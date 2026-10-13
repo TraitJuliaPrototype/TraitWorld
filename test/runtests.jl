@@ -216,3 +216,74 @@ end
     @test Main.Clo.ok([[1.0, 2.0]]) == 3.0
     @test_throws TraitUseError Main.Clo.bad([[1.0, 2.0]])
 end
+
+# --- M2: capability traits over Base's functions, families, generic implementations ---------
+@trait_module module Caps
+using TraitWorld
+export HasLength, Iterable, Indexable
+@trait HasLength{R} begin
+    Base.length(r::R)::Int
+end
+@trait Iterable{R} begin
+    Base.iterate(r::R)::Union{Nothing,Tuple{eltype(R),Any}}
+    Base.iterate(r::R, s)::Union{Nothing,Tuple{eltype(R),Any}}
+end
+@trait Indexable{R} <: HasLength begin
+    Base.getindex(r::R, i::Int)::eltype(R)
+end
+@implement HasLength{A} where {A <: AbstractArray}
+@implement Iterable{A} where {A <: AbstractArray}
+@implement Indexable{A} where {A <: AbstractVector}
+@implement HasLength{T} where {T <: Tuple}
+@implement Indexable{T} where {T <: Tuple}
+end
+using .Caps
+@trait_module module Gen
+using TraitWorld, ..Caps
+export GTable, gcol, gn, gfirst, gmean, gsum
+@trait GTable{R} begin
+    gn(r::R)::Int
+    gcol(r::R, i::Int)::Vector{Float64}
+    gfirst(r::R)::Vector{Float64} = gcol(r, 1)
+end
+@implement GTable{R} where {R: Indexable, eltype(R) == Vector{Float64}} begin
+    gn(r) = length(r)
+    gcol(r, i) = r[i]
+end
+@implement GTable{Matrix{Float64}} begin
+    gn(r) = size(r, 2)
+    gcol(r, i) = r[:, i]
+end
+gmean(t::GTable) = sum(gfirst(t)) / length(gfirst(t))
+gsum(t::Iterable) = (s = 0.0; for x in t; s += x; end; s)      # `for` over a trait object: iterate is an operation
+first_of(t::Indexable) = t[1]
+end
+using .Gen
+struct Wrapped; v::Vector{Vector{Float64}}; end
+@implement HasLength{Wrapped} begin length(r) = length(r.v) end
+@implement Indexable{Wrapped} begin getindex(r, i) = r.v[i] end
+Base.eltype(::Type{Wrapped}) = Vector{Float64}
+struct Broken <: AbstractVector{Float64}; n::Int; end
+Base.size(b::Broken) = (b.n,)
+
+@testset "M2: Base capability traits and generic implementations" begin
+    W = TraitWorld.witness
+    @test W(GTable, Matrix{Float64}) isa TraitWorld.Impl                      # specific beats generic
+    @test W(GTable, Vector{Vector{Float64}}) isa TraitWorld.Generic
+    @test W(GTable, Tuple{Vector{Float64},Vector{Float64}}) isa TraitWorld.Generic
+    @test W(GTable, Wrapped) isa TraitWorld.Generic                         # a user's Indexable becomes a GTable
+    @test W(GTable, Vector{Int}) === nothing                                 # the predicate on eltype
+    @test W(Indexable, Int) === nothing && hasmethod(getindex, Tuple{Int,Int})   # accidental conformance refused
+    @test gmean([[1.0, 3.0]]) == 2.0
+    @test gmean(([2.0, 4.0], [0.0])) == 3.0
+    @test gmean(Wrapped([[5.0, 7.0]])) == 6.0
+    @test gmean([1.0 9.0; 3.0 9.0]) == 2.0
+    @test gsum([1.0, 2.0, 3.5]) == 6.5                                      # Iterable with two arities of iterate
+    @test_throws MethodError gmean(42)
+    # a subtype that breaks AbstractVector's contract: a warning, and the same error as plain Julia
+    e_plain = try Broken(2)[1] catch e; e end
+    e_trait = (@test_logs (:warn, r"does not conform") match_mode=:any (try Gen.first_of(Broken(2)) catch e; e end))
+    @test typeof(e_plain) === typeof(e_trait) && sprint(showerror, e_plain) == sprint(showerror, e_trait)
+    @test isempty(TraitWorld.conformance_problems(Iterable, Vector{Float64}, (:iterate,)))
+    @test !isempty(TraitWorld.conformance_problems(Indexable, Broken, (:getindex,)))
+end

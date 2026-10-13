@@ -94,26 +94,32 @@ macro trait(header, block = nothing)
         ex isa LineNumberNode && continue
         push!(decls, _parse_opdecl(ex, Rsym))
     end
-    names = [d.name for d in decls]
-    length(unique(names)) == length(names) || error("@trait: an operation is declared twice in `$name`")
+    sigs = [(d.name, length(d.args)) for d in decls]
+    length(unique(sigs)) == length(sigs) || error("@trait: an operation is declared twice with the same arity in `$name`")
+    names = unique([d.name for d in decls])
     isempty(supers) || push!(out, :($TW.supertraits(::Type{$name}) = ($(supers...),)))
     push!(out, :($TW.trait_ops(::Type{$name}) = $(Tuple(names))))
+    done = Symbol[]
     for d in decls
         key = QuoteNode(d.name)
-        if d.fexpr isa Symbol
+        first_decl = !(d.name in done)
+        push!(done, d.name)
+        if d.fexpr isa Symbol && first_decl
             push!(out, :(function $(d.fexpr) end))
         end
         N = length(d.args)
         argtypes = [t for (_, t) in d.args]
-        push!(out, :($TW.op_function(::Type{$name}, ::Val{$key}) = $(d.fexpr)))
+        first_decl && push!(out, :($TW.op_function(::Type{$name}, ::Val{$key}) = $(d.fexpr)))
         push!(out, :($TW.op_args(::Type{$name}, ::Val{$key}, ::Type{$Rsym}, ::Val{$N}) where {$Rsym} = Tuple{$(argtypes...)}))
         push!(out, :($TW.op_ret(::Type{$name}, ::Val{$key}, ::Type{$Rsym}, ::Val{$N}) where {$Rsym} = $(d.ret)))
         d.mutating && push!(out, :($TW.is_mutating(::Type{$name}, ::Val{$key}) = true))
         if d.default !== nothing
             argnames = [n for (n, _) in d.args]
-            push!(out, :($TW.has_default(::Type{$name}, ::Val{$key}) = true))
+            any(e -> e.name === d.name && e.default !== nothing && e !== d, decls[1:findfirst(==(d), decls)-1]) ||
+                push!(out, :($TW.has_default(::Type{$name}, ::Val{$key}) = true))
             push!(out, :($TW.op_default(::Type{$name}, ::Val{$key}, $(d.rname), $(argnames...)) = $(d.default)))
         end
+        first_decl || continue
         # the operation on trait objects: the only methods library code can call on one
         T = gensym(:T)
         push!(out, :(@inline $(d.fexpr)(t::$TW.TObj{$T}, args...) where {$T >: $name} =

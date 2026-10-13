@@ -132,6 +132,15 @@ function conformance_problems(@nospecialize(X), @nospecialize(R), ops)
             A = _declared_args(X, op, R, N)
             D = _declared_ret(X, op, R, N)
             sig = Tuple{R,A.parameters...}
+            if !all(isconcretetype, A.parameters)
+                # an abstract declared argument (an iteration state, say): inference there says little,
+                # so ask only that a method exists that does not always throw; every call asserts the result
+                ms = Base._methods_by_ftype(Tuple{typeof(f),sig.parameters...}, -1, Base.get_world_counter())
+                if !(ms isa Vector) || isempty(ms)
+                    push!(problems, "`$op` has no method for $sig")
+                end
+                continue
+            end
             if !hasmethod(f, sig)
                 push!(problems, "`$op` has no method for $sig")
                 continue
