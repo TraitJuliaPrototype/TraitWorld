@@ -1,0 +1,17 @@
+name = "TraitWorld"
+uuid = "7a3c1e52-9b4d-4f6e-8a21-5d0c3b9e7f14"
+authors = ["trait-bound PoC"]
+version = "0.1.0"
+
+[deps]
+PrecompileTools = "aea7be01-6a6a-4083-8856-8a6e6704d82a"
+
+[compat]
+julia = "1.12"
+PrecompileTools = "1"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]
