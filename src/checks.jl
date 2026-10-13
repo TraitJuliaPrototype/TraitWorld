@@ -14,7 +14,7 @@ struct TraitUseError <: Exception
     problems::Vector{String}
 end
 function Base.showerror(io::IO, e::TraitUseError)
-    print(io, "TraitUseError: library code uses a trait object outside its traits:")
+    print(io, "TraitUseError: library code breaks a rule of the trait world:")
     for p in e.problems
         print(io, "\n  ", p)
     end
@@ -80,9 +80,12 @@ function worker_problems(@nospecialize(sig), seen = Base.IdSet{Any}(), out = Str
             end
             ex isa Expr && ex.head === :call || continue
             ats = Any[_CC.widenconst(_CC.argextype(a, src, sptypes)) for a in ex.args]
-            any(k -> _hastobj(ats[k]), 2:length(ats)) || continue
             fT = _CC.argextype(ex.args[1], src, sptypes)
             f = fT isa _CC.Const ? fT.val : (Base.issingletontype(_CC.widenconst(fT)) ? _CC.widenconst(fT).instance : nothing)
+            if !any(k -> _hastobj(ats[k]), 2:length(ats))
+                _layering!(out, seen, f, ats, src, mi, i, world)
+                continue
+            end
             line = _line_of(src, mi, i)
             if f === nothing
                 push!(out, "$line: a trait object is passed to a function not known at compile time")
@@ -135,6 +138,29 @@ function worker_problems(@nospecialize(sig), seen = Base.IdSet{Any}(), out = Str
 end
 
 """
+Rule 1 on typed code: a call that resolves to a method outside the trait
+world (a package the module never imported, reached as `Main.Plain.f()`) is
+reported; calls into helpers of trait modules are followed.
+"""
+function _layering!(out, seen, @nospecialize(f), ats, src, mi, i, world)
+    (f === nothing || f isa Core.Builtin || f isa Core.IntrinsicFunction) && return nothing
+    csig = Tuple{ats...}
+    ms = Base._methods_by_ftype(csig, -1, world)
+    ms isa Vector || return nothing
+    for mm in ms
+        m = mm.method
+        if !is_trait_world(m.module)
+            push!(out, "$(_line_of(src, mi, i)): calls $(m.module).$(m.name), outside the trait world (rule 1): " *
+                       "the trait world uses only itself")
+        elseif owner(Base.moduleroot(m.module)) !== :Julia && Base.moduleroot(m.module) !== TraitWorld &&
+               all(isconcretetype, ats)
+            worker_problems(csig, seen, out)
+        end
+    end
+    return nothing
+end
+
+"""
     checked_call(f, args...)
 
 How an entry calls a worker. A generated function: each call signature gets
@@ -144,9 +170,11 @@ signature (rule 7 places it). The call to the worker is static.
 """
 @generated function checked_call(f, args...)
     flag = Ref(false)
+    guard = GuardState()
     sig = Tuple{f,args...}
     return quote
         $(flag)[] || _check_once($flag, $sig)
+        _guard($guard, $sig)
         return f(args...)
     end
 end

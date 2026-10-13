@@ -21,11 +21,54 @@ function _stdlib_names()
     return s
 end
 
-"Parent package of a loaded package extension, or `nothing`."
+# Extensions noted from their source files: while an extension is precompiled,
+# Base has not recorded its parent yet (EXT_PRIMED), but its file lies in the
+# parent's `ext/` directory, whose Project.toml names it and its triggers.
+const _EXT_PARENTS = IdDict{Module,Module}()
+const _EXT_TRIGGERS = IdDict{Module,Vector{String}}()
+
+"Record `mod` as a package extension if `file` is in a package's `ext/` directory that declares it."
+function _note_extension!(mod::Module, file)
+    r = Base.moduleroot(mod)
+    haskey(_EXT_PARENTS, r) && return nothing
+    file isa Symbol || file isa AbstractString || return nothing
+    f = string(file)
+    basename(dirname(f)) == "ext" || return nothing
+    proj = joinpath(dirname(dirname(f)), "Project.toml")
+    isfile(proj) || return nothing
+    toml = Base.parsed_toml(proj)
+    exts = get(toml, "extensions", nothing)
+    exts isa Dict || return nothing
+    trig = get(exts, String(nameof(r)), nothing)
+    trig === nothing && return nothing
+    parent = _loaded_root(String(toml["name"]))
+    parent === nothing && return nothing
+    _EXT_PARENTS[r] = parent
+    _EXT_TRIGGERS[r] = trig isa String ? [trig] : String[t for t in trig]
+    return nothing
+end
+function _loaded_root(name::String)
+    for (k, v) in Base.loaded_modules
+        k.name == name && return v
+    end
+    return nothing
+end
+
+"Parent package of a package extension, or `nothing`."
 function _extension_parent(r::Module)
+    p = get(_EXT_PARENTS, r, nothing)
+    p === nothing || return p
     v = get(Base.EXT_PRIMED, Base.PkgId(r), nothing)   # extension => [parent, triggers...]
     v === nothing && return nothing
     return get(Base.loaded_modules, first(v), nothing)
+end
+"Trigger packages of a package extension (names), or `nothing`."
+function _extension_triggers(r::Module)
+    t = get(_EXT_TRIGGERS, r, nothing)
+    t === nothing || return t
+    v = get(Base.EXT_PRIMED, Base.PkgId(r), nothing)
+    v === nothing && return nothing
+    return String[p.name for p in v[2:end]]
 end
 
 """

@@ -405,3 +405,29 @@ end
     @test Main.TwoSig.both(abs, -1.5, -2) == (1.5, 2)                      # Base's function: itself
     @test_throws MethodError Main.TwoSig.other(x -> x, "s")               # a signature nobody declared
 end
+
+# --- M6: layering beyond imports; the piracy audit -------------------------------------------
+module Plain2; f(x) = x + 1.0; end
+@trait_module module Weights
+using TraitWorld, ..Columns
+export weight, weighted, guarded
+weight(x::Real) = 1.0
+weighted(t::ColTable, i::Int) = sum(x -> weight(x) * x, col(t, i))
+sneak(t::ColTable) = Main.Plain2.f(colmean(t, 1))
+guarded(t::ColTable, i::Int) = try weighted(t, i) catch; -1.0 end
+end
+using .Weights
+@testset "M6: rule 1 on typed code; the piracy audit" begin
+    e = try Weights.sneak([[1.0]]) catch err; err end
+    @test e isa TraitUseError && occursin("outside the trait world (rule 1)", sprint(showerror, e))
+    m = [1.0 2.0; 3.0 4.0]
+    @test weighted(m, 1) == 4.0
+    toplevel(:(module Pirate2; using ..Weights; Weights.weight(x::Float64) = 2.0; end))
+    TraitWorld.mode!(:error)
+    @test_throws PiracyError weighted(m, 1)
+    TraitWorld.mode!(:recompile)
+    @test weighted(m, 1) == 8.0                                  # the opt-out: plain Julia
+    TraitWorld.mode!(:warn)
+    @test (@test_logs (:warn, r"PiracyError") match_mode=:any weighted(m, 1)) == 8.0
+    @test TraitWorld._rethrow_piracy(:(try f() catch; 0 end)).args[3].args[1].head === :&&   # catch rethrows PiracyError
+end

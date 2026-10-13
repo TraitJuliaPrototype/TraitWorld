@@ -267,7 +267,33 @@ function _owns(definer, @nospecialize(T))
     return definer in o
 end
 
+"""
+Rule 5, delegation: an owner delegates by declaring a package extension. The
+extension is loaded whenever its triggers are, so a call that could use its
+methods sees them only if every trigger is a package its methods mention.
+"""
+function _check_delegate(mod::Module, @nospecialize(types...))
+    r = Base.moduleroot(mod)
+    trigs = _extension_triggers(r)
+    trigs === nothing && return nothing
+    mentioned = Base.IdSet{Any}()
+    for T in types
+        for o in sig_owners(T)
+            push!(mentioned, o)
+        end
+    end
+    for name in trigs
+        tm = _loaded_root(name)
+        tm === nothing && continue
+        owner(tm) in mentioned || throw(ImplementError(
+            "the extension $r is triggered by $name, which its methods do not mention: whether a call sees them " *
+            "would depend on whether $name happens to be loaded (rule 5: a delegate is triggered only by packages its methods mention)"))
+    end
+    return nothing
+end
+
 function _check_implementation(mod::Module, @nospecialize(X), @nospecialize(R), given::Tuple)
+    _check_delegate(mod, X, R)
     definer = owner(mod)
     tmod = owner(parentmodule(X))
     (definer === tmod || (R isa Type && _owns(definer, R))) ||
@@ -296,6 +322,7 @@ function _check_implementation(mod::Module, @nospecialize(X), @nospecialize(R), 
 end
 
 function _check_projection(mod::Module, @nospecialize(X), @nospecialize(T))
+    _check_delegate(mod, X, T)
     p = _proj(X, T)::ProjRec
     definer = owner(mod)
     (definer === owner(parentmodule(X)) || _owns(definer, T)) ||
@@ -395,6 +422,7 @@ _flag(x) = x isa Symbol && x in (:dynamic, :copies)
 
 macro implement(args...)
     mod = __module__
+    _note_extension!(mod, __source__.file)
     TW = TraitWorld
     isempty(args) && error("@implement: nothing to implement")
     head = args[1]

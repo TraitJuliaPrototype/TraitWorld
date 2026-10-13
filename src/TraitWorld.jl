@@ -11,7 +11,12 @@ module TraitWorld
 using PrecompileTools: PrecompileTools
 
 export Trait, Callable, TObj, @trait, @implement, @trait_module, @workload,
-       TraitBoundError, TraitUseError, ImplementError, LayeringError, OwnershipError, PiracyError
+       TraitBoundError, TraitUseError, ImplementError, LayeringError, OwnershipError, PiracyError, mode!
+
+function __init__()
+    m = get(ENV, "JULIA_TRAITWORLD", "")
+    isempty(m) || mode!(Symbol(m))
+end
 
 include("ownership.jl")
 include("core.jl")
