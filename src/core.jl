@@ -201,3 +201,20 @@ CObj{A,S}(f::F) where {A,S,F} = CObj{A,S,F}(f)
     args isa A || throw(MethodError(c.f, args))
     return c.f(args...)::S
 end
+
+"""
+    CMulti{C}
+
+A function argument bounded by several `Callable`s, one per signature it is
+called at: a tuple of `CObj`. A call picks the signature its arguments match.
+"""
+struct CMulti{C<:Tuple}
+    cs::C
+end
+@generated function (m::CMulti{C})(args...) where {C}
+    for (i, c) in enumerate(C.parameters)
+        A = c.parameters[1]
+        Tuple{args...} <: A && return :(m.cs[$i](args...))
+    end
+    return :(throw(MethodError(m, args)))
+end

@@ -158,9 +158,13 @@ function _classify(mod::Module, a)
     elseif a isa Expr && a.head === :(::)
         name, ann = length(a.args) == 2 ? (a.args[1], a.args[2]) : (gensym(:arg), a.args[1])
         if ann isa Expr && ann.head === :tuple
+            vs = Any[_tryeval(mod, x) for x in ann.args]
+            if all(v -> v isa DataType && v <: Callable, vs)
+                # several Callable bounds: the function is called at each signature
+                return _Arg(name, ann, :callables, Any[(v.parameters[1], v.parameters[2]) for v in vs], nothing, nothing, spec)
+            end
             traits = Any[]
-            for x in ann.args
-                v = _tryeval(mod, x)
+            for (x, v) in zip(ann.args, vs)
                 is_trait(v) || error("@trait_module: `$x` in the bound `$ann` is not a trait")
                 append!(traits, bound_traits(v))
             end
@@ -228,10 +232,10 @@ function _rewrite_fdef(mod::Module, ex)
     end
     args = [_classify(mod, a) for a in rawargs]
     key = _fkey(mod, fname)
-    pattern = Any[(x.kind in (:trait, :callable, :untyped)) ? nothing : x.ann for x in args]
+    pattern = Any[(x.kind in (:trait, :callable, :callables, :untyped)) ? nothing : x.ann for x in args]
     entries = _registry(mod, key, :__tw_entries__)
     plain = _registry(mod, key, :__tw_plain__)
-    istraitdef = any(x -> x.kind in (:trait, :callable), args)
+    istraitdef = any(x -> x.kind in (:trait, :callable, :callables), args)
     if !istraitdef
         # an untyped method shaped like an existing entry is that entry's fallback
         if entries !== nothing && pattern in get(entries, key, Any[])
@@ -260,6 +264,9 @@ function _rewrite_fdef(mod::Module, ex)
             push!(wargs, :($(x.name)::$TraitWorld.TObj{$T}))
         elseif x.kind === :callable
             push!(wargs, :($(x.name)::$TraitWorld.CObj{$(x.A),$(x.S)}))
+        elseif x.kind === :callables
+            cs = [:($TraitWorld.CObj{$A,$S}) for (A, S) in x.traits]
+            push!(wargs, :($(x.name)::$TraitWorld.CMulti{<:Tuple{$(cs...)}}))
         elseif x.kind === :untyped
             push!(wargs, x.name)
         else
@@ -293,7 +300,7 @@ function _rewrite_fdef(mod::Module, ex)
             push!(callnames, nm)
             if x.kind === :trait
                 push!(eargs, :(@nospecialize($nm)))
-            elseif x.kind === :callable
+            elseif x.kind === :callable || x.kind === :callables
                 push!(eargs, :(@nospecialize($nm)))
             elseif x.kind === :untyped
                 push!(eargs, nm)
@@ -313,6 +320,11 @@ function _rewrite_fdef(mod::Module, ex)
             elseif x.kind === :callable
                 v = gensym(Symbol(x.name, :_fn))
                 push!(stmts, :($v = $TraitWorld.enter_callable($(x.A), $(x.S), $(x.spec), $(x.name))))
+                push!(newnames, v)
+            elseif x.kind === :callables
+                v = gensym(Symbol(x.name, :_fn))
+                sigs = Expr(:tuple, [Expr(:tuple, A, S) for (A, S) in x.traits]...)
+                push!(stmts, :($v = $TraitWorld.enter_callables($sigs, $(x.spec), $(x.name))))
                 push!(newnames, v)
             else
                 push!(newnames, x.name)
@@ -436,8 +448,30 @@ function _finish_module(mod::Module)
     for key in keys(mod.__tw_entries__)
         key[1] === mod || continue
         isdefined(mod, key[2]) || continue
-        check_bounds(getfield(mod, key[2]))
+        f = getfield(mod, key[2])
+        check_bounds(f)
+        check_entry_ambiguities(f)
     end
+    return nothing
+end
+
+_isworker(m::Method) = any(p -> _tobj_lb(p) !== nothing, Base.unwrap_unionall(m.sig).parameters[2:end])
+
+"""
+Types first, then traits: an entry (at `Any` in its trait positions) and a
+type-annotated method can still be ambiguous when they differ in other
+positions, `f(t::ColTable, x::Int)` against `f(v::AbstractVector, x::Integer)`.
+Reported when the function is defined, not when a call happens to hit it.
+"""
+function check_entry_ambiguities(@nospecialize(f))
+    ms = collect(methods(f))
+    problems = String[]
+    for i in 1:length(ms), j in i+1:length(ms)
+        (_isworker(ms[i]) && _isworker(ms[j])) && continue      # workers: check_bounds
+        Base.isambiguous(ms[i], ms[j]) && push!(problems, "$(ms[i])\n    and $(ms[j])")
+    end
+    isempty(problems) || throw(TraitBoundError("ambiguous methods of `$f`:\n  " * join(problems, "\n  ") *
+                                               "\nAdd a method for their intersection."))
     return nothing
 end
 

@@ -145,8 +145,16 @@ end
 
 # --- Callable ------------------------------------------------------------------
 
-"Whether a value's type belongs to the trait world (Julia, TraitWorld, a trait module)."
-_from_trait_world(@nospecialize(f)) = is_trait_world(typeof(f).name.module)
+const _FROM_TW = IdDict{Any,Bool}()
+"Whether a value's type belongs to the trait world (Julia, TraitWorld, a trait module); cached per type."
+function _from_trait_world(@nospecialize(f))
+    T = typeof(f)
+    v = get(_FROM_TW, T, nothing)
+    v === nothing || return v::Bool
+    v = is_trait_world(T.name.module)
+    _FROM_TW[T] = v
+    return v
+end
 
 """
     enter_callable(A, S, spec, f)
@@ -158,8 +166,24 @@ a function from above is erased unless the library marked the argument
 """
 function enter_callable(::Type{A}, ::Type{S}, spec::Bool, @nospecialize(f)) where {A,S}
     f isa CObj{A,S} && return f
-    if spec || _from_trait_world(f)
-        return CObj{A,S}(f)
+    T = typeof(f)
+    if Base.issingletontype(T)
+        # functions that capture nothing (Base's `abs2`, a closure without state): one wrapper per type
+        key = (A, S, spec, T)
+        c = get(_CALLABLE, key, nothing)
+        c === nothing || return c
+        c = _wrap_callable(A, S, spec, f)
+        _CALLABLE[key] = c
+        return c
     end
+    return _wrap_callable(A, S, spec, f)
+end
+const _CALLABLE = Dict{Any,Any}()
+function _wrap_callable(::Type{A}, ::Type{S}, spec::Bool, @nospecialize(f)) where {A,S}
+    (spec || _from_trait_world(f)) && return CObj{A,S}(f)
     return CObj{A,S}(Erased{A,S}(f))
 end
+
+"A function argument with several `Callable` bounds: one `CObj` per signature."
+enter_callables(sigs::Tuple, spec::Bool, @nospecialize(f)) =
+    f isa CMulti ? f : CMulti(map(s -> enter_callable(s[1], s[2], spec, f), sigs))

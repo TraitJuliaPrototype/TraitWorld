@@ -322,3 +322,86 @@ struct Live3; cols::Vector{Vector{Float64}}; end
     @test e isa ImplementError && occursin("rule 4", sprint(showerror, e))
     @test thrown(:(@implement ColTable Frozen3 copies project(t) = deepcopy(t.cols))) === nothing
 end
+
+# --- M4: dispatch, types first, then traits ----------------------------------------------------
+@testset "M4: dispatch" begin
+    # unrelated bounds on one position without a method for both: rejected when the module is defined
+    e = thrown(quote
+        @trait_module module Unresolved
+        using TraitWorld, ..Columns, ..Rows
+        f(t::ColTable) = 1
+        f(t::RowTable) = 2
+        end
+    end)
+    @test e isa TraitBoundError && occursin("no method has both", e.msg)
+    @test thrown(quote
+        @trait_module module Resolved
+        using TraitWorld, ..Columns, ..Rows
+        f(t::ColTable) = 1
+        f(t::RowTable) = 2
+        f(t::(ColTable, RowTable)) = 3
+        end
+    end) === nothing
+    @test Main.Resolved.f([[1.0]]) == 1                 # ColTable only
+    @test Main.Resolved.f([1.0 2.0]) == 3               # both: the method with both bounds
+    # a subtrait beats its supertrait
+    toplevel(quote
+        @trait_module module SubSuper
+        using TraitWorld, ..Caps
+        g(t::HasLength) = "length"
+        g(t::Indexable) = "indexable"
+        end
+    end)
+    @test Main.SubSuper.g([1.0]) == "indexable"
+    toplevel(quote
+        struct OnlyLen; n::Int; end
+        @implement Main.Caps.HasLength{OnlyLen} begin length(r) = r.n end
+    end)
+    @test Main.SubSuper.g(Main.OnlyLen(3)) == "length"
+    # an entry and a type method that differ in another position: reported at definition
+    e = thrown(quote
+        @trait_module module AmbEntry
+        using TraitWorld, ..Columns
+        h(t::ColTable, x::Int) = 1
+        h(v::AbstractVector, x::Integer) = 2
+        end
+    end)
+    @test e isa TraitBoundError && occursin("ambiguous", e.msg)
+end
+
+# differential test: adopting a trait method keeps every call that worked before
+module Before
+describe(v::Vector{Float64}) = "a vector"
+describe(m::AbstractMatrix) = "a matrix"
+describe(x) = "something else"
+end
+@testset "M4: adopting a trait method keeps existing calls" begin
+    corpus = Any[[1.0], [1.0 2.0; 3.0 4.0], [[1.0], [2.0]], 42, "text", (1, 2), Measurements([[1.0]]),
+                 Ramp([1.0], 1), 1:3, Dict(1 => 2), [1, 2], nothing, :sym]
+    changed = 0
+    for x in corpus
+        before = Before.describe(x)
+        after = describe(x)
+        if before == after
+            continue
+        end
+        # only calls that reached the untyped fallback may change, and only for values with a projection
+        @test before == "something else"
+        @test TraitWorld.proj_lookup(ColTable, typeof(x)) !== nothing
+        changed += 1
+    end
+    @test changed == 3              # [[1.0], [2.0]], Measurements, Ramp
+end
+
+@testset "M5: Callable at two signatures" begin
+    toplevel(quote
+        @trait_module module TwoSig
+        using TraitWorld
+        both(f::(Callable{Tuple{Float64},Float64}, Callable{Tuple{Int},Int}), x::Float64, n::Int) = (f(x), f(n))
+        other(f::(Callable{Tuple{Float64},Float64}, Callable{Tuple{Int},Int}), s::String) = f(s)
+        end
+    end)
+    @test Main.TwoSig.both(x -> x + one(x), 1.5, 2) == (2.5, 3)            # erased once per signature
+    @test Main.TwoSig.both(abs, -1.5, -2) == (1.5, 2)                      # Base's function: itself
+    @test_throws MethodError Main.TwoSig.other(x -> x, "s")               # a signature nobody declared
+end
