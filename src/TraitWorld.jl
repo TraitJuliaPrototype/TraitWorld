@@ -17,6 +17,8 @@ export Trait, Callable, TObj, @trait, @implement, @trait_module, @workload,
 function __init__()
     m = get(ENV, "JULIA_TRAITWORLD", "")
     isempty(m) || mode!(Symbol(m))
+    # a package load can bring projections and implementations without running @implement
+    push!(Base.package_callbacks, _ -> _bump!())
 end
 
 include("ownership.jl")

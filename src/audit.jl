@@ -77,7 +77,7 @@ GuardState() = GuardState(typemax(UInt), UInt(0), Base.IdSet{Method}())
 end
 
 @noinline function _guard_slow(st::GuardState, @nospecialize(sig))
-    findings = audit(sig)
+    findings = @lock _LOCK audit(sig)
     if !isempty(findings)
         MODE[] === :error && throw(PiracyError(sig, findings))      # stays poisoned: not stamped
         for f in findings

@@ -85,6 +85,7 @@ macro trait(header, block = nothing)
     if block === nothing
         isempty(supers) && error("@trait: `$name` has neither operations nor traits it bundles")
         push!(out, :($TW.bundle(::Type{$name}) = ($(supers...),)))
+        push!(out, :($TW._bump!()))
         push!(out, :($name))
         return esc(Expr(:block, out...))
     end
@@ -123,8 +124,9 @@ macro trait(header, block = nothing)
         # the operation on trait objects: the only methods library code can call on one
         T = gensym(:T)
         push!(out, :(@inline $(d.fexpr)(t::$TW.TObj{$T}, args...) where {$T >: $name} =
-                         $TW.opcall($name, Val($key), $(d.fexpr), $TW.viewof(t, $name), args...)))
+                         $TW.opcall($name, Val($key), $(d.fexpr), t, args...)))
     end
+    push!(out, :($TW._bump!()))
     push!(out, :($name))
     return esc(Expr(:block, out...))
 end

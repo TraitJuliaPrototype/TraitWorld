@@ -471,3 +471,141 @@ end
     @test count(p -> p.first === :worker, r.targets) == 4        # colmean and total at two representations
     @test isempty(r.problems) && isempty(r.findings)
 end
+
+# --- the review's findings, one test each -----------------------------------------------------
+userf2(x) = 2x
+struct MyRep2; m::Matrix{Float64}; end
+struct Wrapped2; m::Matrix{Float64}; end
+@implement ColTable{MyRep2} Wrapped2 begin               # projection with operations for its own representation
+    project(t) = MyRep2(t.m)
+    ncols(r) = size(r.m, 2)
+    col(r, i) = r.m[:, i]
+end
+@testset "review: correctness" begin
+    # 1. a worker called with an abstract argument is checked too
+    toplevel(quote
+        @trait_module module RHelp
+        using TraitWorld, ..Caps
+        helper2(t::Iterable, x) = sum(t) + x
+        outer2(t::Iterable, b::Bool) = helper2(t, b ? 1 : 2.0)
+        end
+    end)
+    @test_throws TraitUseError Main.RHelp.outer2([1.0, 2.0], true)
+    # 2. a trait object never escapes by return value
+    toplevel(quote
+        @trait_module module Leak
+        using TraitWorld, ..Columns
+        leak(t::ColTable) = t
+        leak_cond(t::ColTable, b::Bool) = b ? t : 0
+        end
+    end)
+    @test_throws TraitUseError Main.Leak.leak([[1.0]])
+    @test_throws TraitUseError Main.Leak.leak_cond([[1.0]], false)
+    # 3. a fallback of another shape still answers what plain Julia answers
+    toplevel(quote
+        @trait_module module FB
+        using TraitWorld, ..Columns
+        g(t::ColTable, x::Int) = 1
+        g(x, y) = 2
+        end
+    end)
+    @test Main.FB.g([[1.0]], 1) == 1
+    @test Main.FB.g(42, 1) == 2 && Main.FB.g(42, "a") == 2
+    # 4. a method with an unbounded where-variable becomes the fallback, never replaces the entry
+    toplevel(quote
+        @trait_module module WH
+        using TraitWorld, ..Columns
+        h(t::ColTable) = "trait"
+        h(x::T) where {T} = "where"
+        h2(t::ColTable) = "trait"
+        h2(x::T) where {T <: Real} = "real"
+        end
+    end)
+    @test Main.WH.h([[1.0]]) == "trait" && Main.WH.h(42) == "where"
+    @test Main.WH.h2([[1.0]]) == "trait" && Main.WH.h2(42) == "real"
+    # 5. defaults may use supertrait operations
+    toplevel(quote
+        @trait_module module SupDef
+        using TraitWorld, ..Caps
+        @trait Indexable2{R} <: HasLength begin
+            Base.getindex(r::R, i::Int)::eltype(R)
+            lastel(r::R)::eltype(R) = r[length(r)]
+        end
+        @implement Indexable2{A} where {A <: AbstractVector}
+        last_of(t::Indexable2) = lastel(t)
+        end
+    end)
+    @test Main.SupDef.last_of([1.0, 5.0]) == 5.0
+    # 6. existing methods (a family, or without a block) with a trait default
+    toplevel(quote
+        @trait_module module FamDef
+        using TraitWorld
+        @trait WithDef{R} begin
+            Base.length(r::R)::Int
+            dbl(r::R)::Int = 2 * length(r)
+        end
+        @implement WithDef{A} where {A <: AbstractVector}
+        @implement WithDef{Tuple{Int,Int}}
+        twice_len(t::WithDef) = dbl(t)
+        end
+    end)
+    @test Main.FamDef.twice_len([1, 2, 3]) == 6 && Main.FamDef.twice_len((1, 2)) == 4
+    # 7. the projection-with-operations form
+    @test colmean(Wrapped2([1.0 2.0; 3.0 4.0]), 1) == 2.0
+    # 8. a lower-bounded type variable confers no ownership
+    e = thrown(quote
+        @trait_module module LBPirate
+        using TraitWorld, ..Columns
+        struct Mine end
+        Columns.ncols(x::T) where {T >: Mine} = -1
+        end
+    end)
+    @test e isa OwnershipError
+    for m in methods(Columns.ncols)
+        occursin("LBPirate", string(m.module)) && Base.delete_method(m)
+    end
+    # 11. entries that differ in which position is bounded are no ambiguity at definition
+    @test thrown(quote
+        @trait_module module TwoPos
+        using TraitWorld, ..Columns
+        f(t::ColTable, x::Int) = 1
+        f(x::Int, t::ColTable) = 2
+        end
+    end) === nothing
+    @test Main.TwoPos.f([[1.0]], 1) == 1 && Main.TwoPos.f(1, [[1.0]]) == 2
+    # 12. a Base wrapper around a function from above is from above
+    @test TraitWorld.enter_callable(Tuple{Float64}, Float64, false, Base.Fix1(*, 2.0)).f isa Base.Fix1
+    @test TraitWorld.enter_callable(Tuple{Float64}, Float64, false, Base.Fix1(userf2, 2.0)).f isa TraitWorld.Erased
+end
+
+@testset "review: catch rethrows PiracyError; a closed world in a session" begin
+    toplevel(quote
+        @trait_module module Catcher
+        using TraitWorld, ..Columns, ..Weights
+        safe(t::ColTable) = try Weights.weighted([[1.0, 2.0]], 1) catch; -1.0 end
+        end
+    end)
+    TraitWorld.mode!(:error)
+    @test_throws PiracyError Main.Catcher.safe([[1.0]])
+    TraitWorld.mode!(:warn)
+    r = verify_main(VMain.main, (Vector{String},); close = true)
+    @test TraitWorld.CLOSED_WORLD[]
+    @test VMain.main(String[]) == VMain.main(String[]) && VMain.main(["m"]) isa Float64
+    TraitWorld.open_world!()
+    @test !TraitWorld.CLOSED_WORLD[]
+end
+
+@testset "review: unrelated bounds added by another module" begin
+    e = thrown(quote
+        @trait_module module RowsX
+        using TraitWorld, ..Columns
+        @trait RowX{R} begin rx(r::R)::Int end
+        @implement RowX{Matrix{Float64}} begin rx(r) = 1 end
+        Columns.colmean(t::RowX, i::Int) = 0.0
+        end
+    end)
+    @test e isa TraitBoundError
+    for m in methods(Columns.colmean)
+        occursin("RowsX", string(m.module)) && Base.delete_method(m)
+    end
+end

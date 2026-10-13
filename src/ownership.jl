@@ -4,7 +4,7 @@
 # parent's ownership: an extension is how an owner delegates. A method is
 # owned by its package if, in every signature it applies to, the package owns
 # the function or one of the types (`owned_method`); Aqua's weaker "mentions"
-# rule (`is_piratical`) is kept for the piracy audit of ordinary packages.
+# rule is not used: a `Union` with a foreign type would pass it.
 #
 # PoC limit: methods are attributed to `parentmodule(m)`; stock Julia records
 # no loader context, so a definition laundered through `Core.eval(Owner, …)`
@@ -143,11 +143,21 @@ function _owners!(acc::Base.IdSet{Any}, @nospecialize(T))
         isdefined(T, :T) && _owners!(acc, T.T)
     elseif T isa DataType
         push!(acc, owner(T.name.module))
-        for p in T.parameters
-            _owners!(acc, p)
+        if T.name === Base.typename(TObj) && T.parameters[1] isa TypeVar
+            # a trait object `TObj{T} where T >: Union{traits}` belongs to its traits' owners:
+            # the lower bound says which traits it carries
+            _owners!(acc, T.parameters[1].lb)
+            for p in T.parameters[2:end]
+                _owners!(acc, p)
+            end
+        else
+            for p in T.parameters
+                _owners!(acc, p)
+            end
         end
     elseif T isa TypeVar
-        _owners!(acc, T.lb); _owners!(acc, T.ub)
+        # an ordinary lower bound restricts nothing: `x::T where T >: Mine` applies to Any
+        _owners!(acc, T.ub)
     end
     return acc
 end
@@ -158,27 +168,6 @@ identity set on purpose: hashing values of type `Any` is a call other
 packages extend, and the audit must not be invalidated by their loads.
 """
 sig_owners(@nospecialize(sig)) = _owners!(Base.IdSet{Any}(), sig)
-
-"""
-    is_piratical(m::Method)
-
-A method is piratical if its defining package owns neither the function nor
-any type mentioned in its signature, and declares no implementer relation to
-one of those owners.
-"""
-function is_piratical(m::Method)
-    definer = owner(m.module)
-    owners = sig_owners(m.sig)
-    definer in owners && return false
-    definer isa Module || return true
-    # rare and full of TOML handling: kept behind a dynamic call so that its
-    # abstract edges cannot invalidate the audit's hot path
-    impl = Base.inferencebarrier(implements)(definer)::Vector{Symbol}
-    for o in owners
-        o isa Module && nameof(o) in impl && return false
-    end
-    return true
-end
 
 # one signature per Union member at the top level of each argument (and of a
 # type variable's upper bound), at most `limit` combinations

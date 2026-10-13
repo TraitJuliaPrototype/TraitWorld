@@ -541,6 +541,10 @@ function _scan(mi::Core.MethodInstance, cx::_Walk)
             elseif cm isa Method && _machinery_method(cm)
                 site(:guard, i, cm.name, Any[])
                 continue
+            elseif cm isa Method && cm.module === TraitWorld && cm.name === :fallback
+                # reached only by a user type with none of the entry's traits
+                notrait ? hole(:fallback, i, :fallback, Any[]) : site(:trait, i, :fallback, Any[])
+                continue
             elseif cm isa Method && cm.nospecialize != 0 && isdefined(cm.module, :__tw_entries__)
                 # an entry of a trait module: compiled once (that instance must have native code),
                 # but analyzed at the call site's argument types, so only the user types the program
@@ -672,7 +676,8 @@ with `Base.Experimental.entrypoint` for `juliac --trim`; in a trimmed build it
 also closes the world: entry caches are filled now, and the checks, the guard,
 erasure and reflection are switched off in the binary.
 """
-function verify_main(@nospecialize(f), @nospecialize(argtypes::Tuple = ()); compile::Bool = false, entrypoints::Bool = false)
+function verify_main(@nospecialize(f), @nospecialize(argtypes::Tuple = ()); compile::Bool = false, entrypoints::Bool = false,
+                     close::Bool = entrypoints && Base.JLOptions().trim != 0)
     world = Base.get_world_counter()
     cx = _Walk(world)
     entry = Base.signature_type(f, argtypes)
@@ -745,10 +750,8 @@ function verify_main(@nospecialize(f), @nospecialize(argtypes::Tuple = ()); comp
         for S in allroots
             Base.Experimental.entrypoint(S)
         end
-        if Base.JLOptions().trim != 0
-            close_world!(cx.plans)
-        end
     end
+    close && close_world!(cx.plans)
     generating = ccall(:jl_generating_output, Cint, ()) == 1
     uncompiled = Any[]
     if !generating
@@ -772,9 +775,17 @@ the program can need, and switch off what needs the compiler or reflection
 function close_world!(plans)
     for (cache, U, b) in plans
         cache.builders[U] = b
+        cache.gen = GENERATION[]
     end
     CLOSED_WORLD[] = true
     MODE[] = :recompile
+    return nothing
+end
+"Undo `close_world!` in a session (for tests): the open world's checks, guard and erasure again."
+function open_world!()
+    CLOSED_WORLD[] = false
+    MODE[] = :warn
+    _bump!()
     return nothing
 end
 

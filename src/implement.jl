@@ -179,23 +179,48 @@ How representation `R` implements trait `X`: `Impl{defaults}()`, or a
 `Generic` with its constraint witnesses, or `nothing`.
 """
 function witness(@nospecialize(X), @nospecialize(R))
-    _flush_if_stale!(_WITNESS, _WITNESS_WORLD)
-    key = (X, R)
-    haskey(_WITNESS, key) && return _WITNESS[key]
-    w = _witness(X, R)
-    _WITNESS[key] = w
-    return w
+    @lock _LOCK begin
+        _flush_if_stale!(_WITNESS, _WITNESS_WORLD)
+        key = (X, R)
+        haskey(_WITNESS, key) && return _WITNESS[key]
+        w = _witness(X, R)
+        _WITNESS[key] = w
+        return w
+    end
 end
+
+"Whether `R` has a method of every declared arity of operation `op` (abstract declared arguments: some method)."
+function _has_op_method(@nospecialize(X), op::Symbol, @nospecialize(R))
+    f = _opfn(X, op)
+    for N in _arities(X, op)
+        A = _declared_args(X, op, R, N)
+        sig = Tuple{typeof(f),R,A.parameters...}
+        if all(isconcretetype, A.parameters)
+            hasmethod(f, Tuple{sig.parameters[2:end]...}) || return false
+        else
+            ms = Base._methods_by_ftype(sig, -1, Base.get_world_counter())
+            (ms isa Vector && !isempty(ms)) || return false
+        end
+    end
+    return true
+end
+
+"For existing methods (a family, or `@implement X{R}` without a block): the operations `R` has no method for and the trait has a default for."
+_existing_defaults(@nospecialize(X), @nospecialize(R)) =
+    Tuple(op for op in _ops(X) if _hasdefault(X, op) && !_has_op_method(X, op, R))
 
 function _witness(@nospecialize(X), @nospecialize(R))
     rec = _impl(X, R)
     if rec isa ImplRec
+        rec.kind === :methods && return Impl{rec.defaults}()
+        # existing methods: defaults per representation
+        D = _existing_defaults(X, R)
         if rec.kind === :family && isconcretetype(R) && !((X, R) in _FAMILY_WARNED)
             push!(_FAMILY_WARNED, (X, R))
-            ps = conformance_problems(X, R, _ops(X))
+            ps = conformance_problems(X, R, Tuple(op for op in _ops(X) if !(op in D)))
             isempty(ps) || @warn "$R is declared $(X) through a family, but does not conform:\n  " * join(ps, "\n  ")
         end
-        return Impl{rec.defaults}()
+        return Impl{D}()
     end
     found = Any[]
     for k in _generic_keys(X)
@@ -217,7 +242,40 @@ function _witness(@nospecialize(X), @nospecialize(R))
                                               "($(join(first.(found), ", "))), none more specific: add a specific implementation"))
     k, g, subs = found[1]
     sub = Tuple(Wit{Y}(wy) for (Y, wy) in subs)
-    return Generic{X,k,typeof(sub),g.defaults}(sub)
+    w = Generic{X,k,typeof(sub),g.defaults}(sub)
+    if isconcretetype(R) && !((X, R) in _FAMILY_WARNED)
+        # a generic implementation's results are checked at each concrete representation, as a family's are
+        push!(_FAMILY_WARNED, (X, R))
+        ps = _generic_problems(X, k, g, sub, R)
+        isempty(ps) || @warn "the generic implementation of $X does not conform at $R:\n  " * join(ps, "\n  ")
+    end
+    return w
+end
+
+function _generic_problems(@nospecialize(X), k::Symbol, g::GenericRec, sub::Tuple, @nospecialize(R))
+    problems = String[]
+    S = _subobj_type(sub, R)
+    for op in _ops(X)
+        op in g.defaults && continue
+        for N in _arities(X, op)
+            A = _declared_args(X, op, R, N)
+            all(isconcretetype, A.parameters) || continue
+            D = _declared_ret(X, op, R, N)
+            T = Base.infer_return_type(generic_op, Tuple{Type{X},Val{k},Val{op},S,A.parameters...})
+            if T === Union{}
+                push!(problems, "`$op` always throws at $R (inferred `Union{}`)")
+            elseif !(T <: D)
+                push!(problems, "`$op` returns `$T` at $R, declared `$D`")
+            end
+        end
+    end
+    return problems
+end
+"The type of the trait object a generic implementation's body receives at `R`."
+function _subobj_type(sub::Tuple, @nospecialize(R))
+    Xs = Any[typeof(s).parameters[1] for s in sub]
+    vs = Any[View{typeof(s).parameters[1],typeof(s.w),R} for s in sub]
+    return TObj{Union{Xs...},Tuple{vs...}}
 end
 
 "The projection of `T` for `X`: an explicit one, or `T` itself if it is a representation of `X`."
@@ -234,9 +292,11 @@ const _PWITNESS_WORLD = Ref{UInt}(0)
 "The witness a projection gives trait `X`: the representation's, or a dynamic table in front of it."
 function proj_witness(@nospecialize(X), @nospecialize(T), p::ProjRec)
     p.dyn === nothing && return witness(X, p.R)
-    _flush_if_stale!(_PWITNESS, _PWITNESS_WORLD)
-    get!(_PWITNESS, (X, T)) do
-        _dyn_witness(X, p)
+    @lock _LOCK begin
+        _flush_if_stale!(_PWITNESS, _PWITNESS_WORLD)
+        get!(_PWITNESS, (X, T)) do
+            _dyn_witness(X, p)
+        end
     end
 end
 
@@ -372,7 +432,7 @@ end
 _defname(d) = d.args[1].args[1]::Symbol
 
 "Turn `name(r, i) = body` into a method of the operation's function at `R`, annotating unannotated arguments as declared."
-function _op_method(mod::Module, @nospecialize(X), d, Rex)
+function _op_method(mod::Module, @nospecialize(X), d, Rex; precheck::Bool = true)
     call = d.args[1]
     name = call.args[1]::Symbol
     op = name
@@ -395,7 +455,7 @@ function _op_method(mod::Module, @nospecialize(X), d, Rex)
     end
     # rule 5 before anything is defined: someone else's function (Base.size) may get a method
     # only for a representation the defining package owns
-    if owner(parentmodule(f)) !== owner(mod)
+    if precheck && owner(parentmodule(f)) !== owner(mod)
         Rv = _tryeval(mod, Rex)
         if !(Rv isa Type && owner(mod) in sig_owners(Rv))
             throw(ImplementError(
@@ -446,7 +506,9 @@ macro implement(args...)
         return esc(quote
             const $rec = $TW.ImplRec(:existing, ())
             $TW.implementation(::Type{$X}, ::Type{$Rex}) = $rec
-            $TW._check_implementation(@__MODULE__, $X, $Rex, $TW._ops($X))
+            $TW._check_implementation(@__MODULE__, $X, $Rex,
+                Tuple(op for op in $TW._ops($X) if !(op in $TW._existing_defaults($X, $Rex))))
+            $TW._bump!()
             nothing
         end)
     end
@@ -458,6 +520,7 @@ macro implement(args...)
     push!(out, :(const $rec = $TW.ImplRec(:methods, $defaults)))
     push!(out, :($TW.implementation(::Type{$X}, ::Type{$Rex}) = $rec))
     push!(out, :($TW._check_implementation(@__MODULE__, $X, $Rex, $given)))
+    push!(out, :($TW._bump!()))
     push!(out, :nothing)
     return esc(Expr(:block, out...))
 end
@@ -502,6 +565,7 @@ function _implement_where(mod::Module, head, block)
         end
         famR = isempty(family) ? X : family[1].args[2]
         push!(out, :($TW._check_implementation(@__MODULE__, $X, $famR, ())))
+        push!(out, :($TW._bump!()))
         push!(out, :nothing)
         return esc(Expr(:block, out...))
     end
@@ -526,6 +590,7 @@ function _implement_where(mod::Module, head, block)
                                      call.args[2:end]...), d.args[2]))
     end
     push!(out, :($TW._check_implementation(@__MODULE__, $X, $X, ())))
+    push!(out, :($TW._bump!()))
     push!(out, :nothing)
     return esc(Expr(:block, out...))
 end
@@ -586,7 +651,8 @@ function _implement_projection(mod::Module, head, rest)
             given = Tuple(unique(_defname.(ops)))
             defaults = _missing_and_defaults(X, given)
             for d in ops
-                push!(out, _op_method(mod, X, d, Rconst))
+                # R is known only once the projection is inferred: the methods are checked after definition
+                push!(out, _op_method(mod, X, d, Rconst; precheck = false))
             end
             irec = gensym(:implementation)
             push!(out, :(const $irec = $TW.ImplRec(:methods, $defaults)))
@@ -603,6 +669,7 @@ function _implement_projection(mod::Module, head, rest)
     for X in traits
         push!(out, :($TW._check_projection(@__MODULE__, $X, $Tex)))
     end
+    push!(out, :($TW._bump!()))
     push!(out, :nothing)
     return esc(Expr(:block, out...))
 end

@@ -55,12 +55,21 @@ _traitnames(@nospecialize(T)) = _istobj(T) ? join(string.(Base.uniontypes(T.para
 Problems in the worker selected by the concrete call signature `sig`, and in
 the workers it calls.
 """
-function worker_problems(@nospecialize(sig), seen = Base.IdSet{Any}(), out = String[])
+_escapes(@nospecialize(T)) = T isa Union ? any(_escapes, Base.uniontypes(T)) :
+    (T isa DataType && (T <: TObj || T <: View || T <: CObj || T <: CMulti ||
+                        (T <: Tuple && any(_escapes, T.parameters))))
+
+function worker_problems(@nospecialize(sig), seen = Base.IdSet{Any}(), out = String[]; root::Bool = true)
     sig in seen && return out
     push!(seen, sig)
     world = Base.get_world_counter()
-    for (src, _) in Base.code_typed_by_type(sig; optimize = false, world)
+    for (src, rt) in Base.code_typed_by_type(sig; optimize = false, world)
         mi = src.parent
+        if root && _escapes(rt)
+            m = mi isa Core.MethodInstance ? mi.def : nothing
+            push!(out, "$(m isa Method ? string(basename(string(m.file)), ":", m.line) : "?"): returns a trait object " *
+                       "to ordinary code: a trait object is a handle, not a value")
+        end
         sptypes = mi isa Core.MethodInstance ? _CC.sptypes_from_meth_instance(mi) : _CC.EMPTY_SPTYPES
         for (i, st) in enumerate(src.code)
             ex = st isa Expr && st.head === :(=) ? st.args[2] : st
@@ -127,8 +136,9 @@ function worker_problems(@nospecialize(sig), seen = Base.IdSet{Any}(), out = Str
                             push!(out, "$line: a trait object carrying $(_traitnames(ats[k])) is passed to `$fname`, an ordinary " *
                                        "function: it can do only what its traits declare. Declare `$fname` as an operation, or use the operations")
                         end
-                    elseif !_is_op(f, lb) && all(T -> isconcretetype(T), ats)
-                        worker_problems(csig, seen, out)
+                    elseif !_is_op(f, lb)
+                        # a worker called from a worker: checked too, at whatever argument types it gets
+                        worker_problems(csig, seen, out; root = false)
                     end
                 end
             end
@@ -152,9 +162,8 @@ function _layering!(out, seen, @nospecialize(f), ats, src, mi, i, world)
         if !is_trait_world(m.module)
             push!(out, "$(_line_of(src, mi, i)): calls $(m.module).$(m.name), outside the trait world (rule 1): " *
                        "the trait world uses only itself")
-        elseif owner(Base.moduleroot(m.module)) !== :Julia && Base.moduleroot(m.module) !== TraitWorld &&
-               all(isconcretetype, ats)
-            worker_problems(csig, seen, out)
+        elseif owner(Base.moduleroot(m.module)) !== :Julia && Base.moduleroot(m.module) !== TraitWorld
+            worker_problems(csig, seen, out; root = false)
         end
     end
     return nothing
@@ -176,9 +185,13 @@ signature (rule 7 places it). The call to the worker is static.
         # a dynamic call: the check's reflection stays out of compiled code (and out of trimmed binaries)
         $(flag)[] || CLOSED_WORLD[] || Base.inferencebarrier(_check_once)($flag, $sig)
         _guard($guard, $sig)
-        return f(args...)
+        return _noescape(f(args...))
     end
 end
+
+# a trait object never reaches ordinary code: one dispatch at the boundary, folded per signature
+@inline _noescape(x) = x
+_noescape(::Union{TObj,View,CObj,CMulti}) = throw(TraitUseError(["a trait object was returned to ordinary code: a trait object is a handle, not a value"]))
 
 @noinline function _check_once(flag::Base.RefValue{Bool}, @nospecialize(sig))
     CLOSED_WORLD[] && (flag[] = true; return nothing)      # checked by verify_main at build time

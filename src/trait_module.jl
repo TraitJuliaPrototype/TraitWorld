@@ -65,7 +65,8 @@ end
 _prologue() = Any[:(const __trait_module__ = true),
                   :(const __tw_entries__ = Dict{Any,Vector{Any}}()),
                   :(const __tw_plain__ = Dict{Any,Vector{Any}}()),
-                  :(const __tw_checked__ = Set{Any}())]
+                  :(const __tw_extended__ = Set{Any}()),          # other modules' functions given workers here
+                  :(const __tw_methods_seen__ = Base.IdSet{Method}())]
 _epilogue() = :($TraitWorld._finish_module(@__MODULE__))
 
 function _transform_all(stmts)
@@ -159,7 +160,7 @@ struct _Arg
     spec::Bool
 end
 
-function _classify(mod::Module, a)
+function _classify(mod::Module, a, unbounded::Vector{Symbol} = Symbol[])
     spec = false
     if a isa Expr && a.head === :macrocall && a.args[1] === Symbol("@specialize")
         spec = true
@@ -173,6 +174,8 @@ function _classify(mod::Module, a)
         error("@trait_module: optional arguments are not supported in functions with trait-bounded arguments")
     elseif a isa Expr && a.head === :(::)
         name, ann = length(a.args) == 2 ? (a.args[1], a.args[2]) : (gensym(:arg), a.args[1])
+        # `x::T where T` with no bound is untyped: it must not take the entry's place
+        ann isa Symbol && ann in unbounded && return _Arg(name, ann, :untyped, Any[], nothing, nothing, spec)
         if ann isa Expr && ann.head === :tuple
             vs = Any[_tryeval(mod, x) for x in ann.args]
             if all(v -> v isa DataType && v <: Callable, vs)
@@ -246,7 +249,8 @@ function _rewrite_fdef(mod::Module, ex)
     if any(a -> a isa Expr && a.head === :parameters, rawargs)
         return nothing      # keyword arguments: plain Julia (trait-bounded ones are rejected below)
     end
-    args = [_classify(mod, a) for a in rawargs]
+    unbounded = Symbol[w for w in wheres if w isa Symbol]
+    args = [_classify(mod, a, unbounded) for a in rawargs]
     key = _fkey(mod, fname)
     pattern = Any[(x.kind in (:trait, :callable, :callables, :untyped)) ? nothing : x.ann for x in args]
     entries = _registry(mod, key, :__tw_entries__)
@@ -263,7 +267,8 @@ function _rewrite_fdef(mod::Module, ex)
             return Expr(head, s, body), Any[:($TraitWorld._check_methods(@__MODULE__, $(QuoteNode(fname))))]
         end
         plain === nothing || push!(get!(plain, key, Any[]), pattern)
-        return ex, Any[:($TraitWorld._check_methods(@__MODULE__, $(QuoteNode(fname))))]
+        return ex, Any[:($TraitWorld._check_methods(@__MODULE__, $(QuoteNode(fname)))),
+                       :($TraitWorld._check_entries_intact(@__MODULE__, $(QuoteNode(fname))))]
     end
     any(x -> x.kind === :vararg, args) && error("@trait_module: varargs are not supported in `$fname` with trait-bounded arguments")
     # --- the worker
@@ -356,6 +361,8 @@ function _rewrite_fdef(mod::Module, ex)
         end
     end
     push!(rest, :($TraitWorld._check_methods(@__MODULE__, $(QuoteNode(fname)))))
+    key[1] !== mod && isdefined(mod, :__tw_extended__) && push!(mod.__tw_extended__, key)
+    push!(rest, :($TraitWorld._bump!()))
     return worker, rest
 end
 
@@ -440,12 +447,30 @@ end
 "Rule 5: every method a trait module defines is owned by its package, in every signature it applies to."
 function _check_methods(mod::Module, fname)
     f = Core.eval(mod, fname)
+    seen = isdefined(mod, :__tw_methods_seen__) ? mod.__tw_methods_seen__ : Base.IdSet{Method}()
     for m in methods(f)
         m.module === mod || continue
+        m in seen && continue            # each method is checked once, not at every later definition
+        push!(seen, m)
         owned_method(m) && continue
         throw(OwnershipError("$(m) is defined by $(mod), which owns neither its function nor its types " *
                              "in every signature it applies to (rule 5)"))
     end
+    return nothing
+end
+
+"An ordinary method must never take an entry's place (same signature): that would silently switch the trait methods off."
+function _check_entries_intact(mod::Module, fname)
+    f = Core.eval(mod, fname)
+    f isa Function || return nothing
+    key = (parentmodule(f), nameof(f))
+    entries = _registry(mod, key, :__tw_entries__)
+    entries === nothing && return nothing
+    n = length(get(entries, key, Any[]))
+    have = count(_is_entry, methods(f))
+    have >= n || throw(TraitBoundError("a method of `$fname` defined in $mod replaced the entry of its trait-bounded methods " *
+                                       "(it has the entry's signature). Give its arguments types, or write it untyped " *
+                                       "after the trait-bounded methods, so it becomes their fallback."))
     return nothing
 end
 
@@ -461,10 +486,12 @@ function _finish_module(mod::Module)
             "trait module $mod uses $u, which is outside the trait world (rule 1)"))
     end
     isdefined(mod, :__tw_entries__) || return nothing
-    for key in keys(mod.__tw_entries__)
-        key[1] === mod || continue
-        isdefined(mod, key[2]) || continue
-        f = getfield(mod, key[2])
+    # this module's functions, and other modules' functions it gave workers to
+    ks = Any[k for k in keys(mod.__tw_entries__) if k[1] === mod]
+    isdefined(mod, :__tw_extended__) && append!(ks, collect(mod.__tw_extended__))
+    for key in unique(ks)
+        isdefined(key[1], key[2]) || continue
+        f = getfield(key[1], key[2])
         check_bounds(f)
         check_entry_ambiguities(f)
     end
@@ -484,6 +511,9 @@ function check_entry_ambiguities(@nospecialize(f))
     problems = String[]
     for i in 1:length(ms), j in i+1:length(ms)
         (_isworker(ms[i]) && _isworker(ms[j])) && continue      # workers: check_bounds
+        # two entries that differ in which position is trait-bounded overlap only where a value
+        # has a projection in both: a call there raises Julia's own ambiguity error
+        (_is_entry(ms[i]) && _is_entry(ms[j])) && continue
         Base.isambiguous(ms[i], ms[j]) && push!(problems, "$(ms[i])\n    and $(ms[j])")
     end
     isempty(problems) || throw(TraitBoundError("ambiguous methods of `$f`:\n  " * join(problems, "\n  ") *

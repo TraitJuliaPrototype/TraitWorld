@@ -37,13 +37,28 @@ end
 end
 
 """
-The builders of one entry position, by user type. Stamped with the world it
-was filled in: any method definition (a new projection, say) empties it, and
-so does loading it from a package image, whose builders may hold erased
-pointers of another session.
+TraitWorld's generation: bumped by everything that can change what an entry
+builds (`@trait`, `@implement`, a trait-bounded definition, a package load,
+`refresh!()`), but not by unrelated method definitions, so code that defines
+methods in a loop does not rebuild every entry. Plain methods that a generic
+implementation's predicate reads (`eltype` of a user type) must exist before
+the first call, or be followed by `TraitWorld.refresh!()`.
+"""
+const GENERATION = Ref{UInt}(1)
+_bump!() = (GENERATION[] += 1; nothing)
+"Forget every cached entry builder: after defining methods a generic implementation's predicate reads."
+refresh!() = _bump!()
+
+"One lock for the machinery's slow paths: concurrent first calls must not race on its caches."
+const _LOCK = ReentrantLock()
+
+"""
+The builders of one entry position, by user type. Stamped with the
+generation it was filled in; a cache loaded from a package image is stale
+(generation 0 there, and its builders may hold erased pointers of another session).
 """
 mutable struct EntryCache
-    world::UInt
+    gen::UInt
     builders::IdDict{Any,Any}
 end
 EntryCache() = EntryCache(UInt(0), IdDict{Any,Any}())
@@ -65,21 +80,21 @@ The trait object for argument `pos` of a call to `f` from ordinary code, or
         b === nothing && _closed_miss(f, t)
         return b === NOTRAIT ? NOTRAIT : b(t)
     end
-    if c.world == Base.get_world_counter()
-        b = get(c.builders, typeof(t), nothing)
+    if c.gen == GENERATION[]
+        b = get(c.builders, typeof(t), nothing)          # copy-on-write: read without the lock
         b === nothing || return b === NOTRAIT ? NOTRAIT : b(t)
     end
     return Base.inferencebarrier(_enter_slow)(c, f, pos, nargs, t)
 end
 
 @noinline function _enter_slow(c::EntryCache, @nospecialize(f), pos::Int, nargs::Int, @nospecialize(t))
-    w = Base.get_world_counter()
-    if c.world != w
-        empty!(c.builders)
-        c.world = w
-    end
     b = Base.invokelatest(_builder, f, pos, nargs, typeof(t))
-    c.builders[typeof(t)] = b
+    @lock _LOCK begin
+        d = c.gen == GENERATION[] ? copy(c.builders) : IdDict{Any,Any}()
+        d[typeof(t)] = b
+        c.builders = d                                  # readers see the old table or the new one
+        c.gen = GENERATION[]
+    end
     return b === NOTRAIT ? NOTRAIT : b(t)
 end
 
@@ -153,20 +168,60 @@ end
 function fallback(f::F, args...) where {F}
     CLOSED_WORLD[] && return f(Untyped(), args...)
     hasmethod(f, Tuple{Untyped,map(typeof, args)...}) && return f(Untyped(), args...)
-    throw(MethodError(f, args))
+    # any other ordinary method plain Julia would have called: the most specific one
+    # that is neither an entry nor a worker (`g(x, y)` next to `g(t::ColTable, x::Int)`)
+    m = Base.invokelatest(_plain_method, f, Tuple{F,map(typeof, args)...})
+    m === nothing && throw(MethodError(f, args))
+    body = Base.unwrap_unionall(m.sig)
+    return invoke(f, Base.rewrap_unionall(Tuple{body.parameters[2:end]...}, m.sig), args...)
+end
+
+"An entry: a `@nospecialize` method of a trait module (only entries are generated that way)."
+_is_entry(m::Method) = m.nospecialize != 0 && isdefined(m.module, :__tw_entries__)
+
+function _plain_method(@nospecialize(f), @nospecialize(sig))
+    # all applicable methods: a method lookup would drop those the entry covers
+    cands = Method[m for m in methods(f) if sig <: m.sig && !_isworker(m) && !_is_entry(m)]
+    isempty(cands) && return nothing
+    best = cands[1]
+    for m in cands[2:end]
+        Base.morespecific(m.sig, best.sig) && (best = m)
+    end
+    # ambiguous among themselves: as plain Julia, no answer
+    any(m -> m !== best && !Base.morespecific(best.sig, m.sig), cands) && return nothing
+    return best
 end
 
 # --- Callable ------------------------------------------------------------------
 
-const _FROM_TW = IdDict{Any,Bool}()
+const _FROM_TW = Ref(IdDict{Any,Bool}())          # copy-on-write
 "Whether a value's type belongs to the trait world (Julia, TraitWorld, a trait module); cached per type."
 function _from_trait_world(@nospecialize(f))
     T = typeof(f)
-    v = get(_FROM_TW, T, nothing)
+    v = get(_FROM_TW[], T, nothing)
     v === nothing || return v::Bool
-    v = is_trait_world(T.name.module)
-    _FROM_TW[T] = v
+    v = _tw_type(T, Base.IdSet{Any}())
+    @lock _LOCK begin
+        d = copy(_FROM_TW[]); d[T] = v; _FROM_TW[] = d
+    end
     return v
+end
+"""
+A type of the trait world, all the way down: `Base.Fix1(userf, x)` and
+`userf ∘ g` are Base's types around a function from above, so they are not.
+An abstract field could hold anything, so it is not either.
+"""
+function _tw_type(@nospecialize(T), seen)
+    T isa DataType || return false
+    T in seen && return true
+    push!(seen, T)
+    is_trait_world(T.name.module) || return false
+    for i in 1:fieldcount(T)
+        FT = fieldtype(T, i)
+        (FT isa DataType && isconcretetype(FT)) || return false
+        _tw_type(FT, seen) || return false
+    end
+    return true
 end
 
 """
@@ -184,15 +239,17 @@ a function from above is erased unless the library marked the argument
     if Base.issingletontype(T)
         # functions that capture nothing (Base's `abs2`, a closure without state): one wrapper per type
         key = (A, S, spec, T)
-        c = get(_CALLABLE, key, nothing)
+        c = get(_CALLABLE[], key, nothing)               # copy-on-write: read without the lock
         c === nothing || return c
         c = _wrap_callable(A, S, spec, f)
-        _CALLABLE[key] = c
+        @lock _LOCK begin
+            d = copy(_CALLABLE[]); d[key] = c; _CALLABLE[] = d
+        end
         return c
     end
     return _wrap_callable(A, S, spec, f)
 end
-const _CALLABLE = Dict{Any,Any}()
+const _CALLABLE = Ref(Dict{Any,Any}())           # copy-on-write
 function _wrap_callable(::Type{A}, ::Type{S}, spec::Bool, @nospecialize(f)) where {A,S}
     (spec || _from_trait_world(f)) && return CObj{A,S}(f)
     return CObj{A,S}(Erased{A,S}(f))

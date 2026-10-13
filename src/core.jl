@@ -113,29 +113,27 @@ An operation call on a trait object: check the arguments against the
 declaration, run the implementation the witness names, assert the result to
 the declared type. Everything folds for a known view type.
 """
-@inline function opcall(::Type{X}, ::Val{op}, f::F, v::View{X,W,R}, args::Vararg{Any,N}) where {X,op,F,W,R,N}
+@inline function opcall(::Type{X}, ::Val{op}, f::F, t::TObj, args::Vararg{Any,N}) where {X,op,F,N}
+    v = viewof(t, X)
+    R = typeof(v.r)
     args isa op_args(X, Val(op), R, Val(N)) || throw(TraitArgumentError(X, op, R, args))
-    x = _dispatch(X, Val(op), f, v.w, v.r, args...)
+    x = _dispatch(X, Val(op), f, v.w, v.r, t, args...)
     return x::op_ret(X, Val(op), R, Val(N))
 end
 
-@inline function _dispatch(::Type{X}, ::Val{op}, f::F, w::Impl{D}, r, args...) where {X,op,F,D}
-    if Base.sym_in(op, D)
-        return op_default(X, Val(op), TObj((View{X}(w, r),)), args...)
-    end
+# A default receives the whole trait object, with its supertraits' views, so it
+# may call their operations too (`lastel(r) = r[length(r)]` with `length` from HasLength).
+@inline function _dispatch(::Type{X}, ::Val{op}, f::F, w::Impl{D}, r, t, args...) where {X,op,F,D}
+    Base.sym_in(op, D) && return op_default(X, Val(op), t, args...)
     return f(r, args...)
 end
-@inline function _dispatch(::Type{X}, ::Val{op}, f::F, w::Generic{X,k,S,D}, r, args...) where {X,op,F,k,S,D}
-    if Base.sym_in(op, D)
-        return op_default(X, Val(op), TObj((View{X}(w, r),)), args...)
-    end
+@inline function _dispatch(::Type{X}, ::Val{op}, f::F, w::Generic{X,k,S,D}, r, t, args...) where {X,op,F,k,S,D}
+    Base.sym_in(op, D) && return op_default(X, Val(op), t, args...)
     return generic_op(X, Val(k), Val(op), _subobj(w.sub, r), args...)
 end
-@inline function _dispatch(::Type{X}, ::Val{op}, f::F, w::Dyn{NT,D}, r, args...) where {X,op,F,NT,D}
-    if Base.sym_in(op, fieldnames(NT))
-        return getfield(w.table, op)(r, args...)
-    end
-    return op_default(X, Val(op), TObj((View{X}(w, r),)), args...)
+@inline function _dispatch(::Type{X}, ::Val{op}, f::F, w::Dyn{NT,D}, r, t, args...) where {X,op,F,NT,D}
+    Base.sym_in(op, fieldnames(NT)) && return getfield(w.table, op)(r, args...)
+    return op_default(X, Val(op), t, args...)
 end
 
 @inline _subobj(sub::Tuple, r) = TObj(_subviews(r, sub...))
