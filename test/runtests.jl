@@ -287,3 +287,38 @@ Base.size(b::Broken) = (b.n,)
     @test isempty(TraitWorld.conformance_problems(Iterable, Vector{Float64}, (:iterate,)))
     @test !isempty(TraitWorld.conformance_problems(Indexable, Broken, (:getindex,)))
 end
+
+# --- M3: several bounds, several views; joint projections; rule 4 --------------------------------
+@trait_module module Views
+using TraitWorld, ..Columns, ..Rows
+export Table2, overview, overview2, ColStore, setcol!, normalize!
+@trait Table2{R} <: (ColTable, RowTable)
+overview(t::(ColTable, RowTable)) = (colmean(t, 1), firstrow(t))
+overview2(t::Table2) = (colmean(t, 1), firstrow(t))
+@trait ColStore{R} begin
+    @mutating setcol!(r::R, i::Int, v::Vector{Float64})::Nothing
+end
+@implement ColStore{Vector{Vector{Float64}}} begin setcol!(r, i, v) = (r[i] = v; nothing) end
+normalize!(t::(ColTable, ColStore), i::Int) = (c = col(t, i); setcol!(t, i, c ./ sum(c)); nothing)
+end
+using .Views
+const PROJ = Ref(0)
+struct Sep3; cols::Vector{Vector{Float64}}; rows::Matrix{Float64}; end
+@implement ColTable Sep3 project(t) = (PROJ[] += 1; t.cols)
+@implement Main.Rows.RowTable Sep3 project(t) = (PROJ[] += 1; t.rows)
+struct Joint3; m::Matrix{Float64}; end
+@implement (ColTable, Main.Rows.RowTable) Joint3 project(t) = (PROJ[] += 1; t.m)
+struct Live3; cols::Vector{Vector{Float64}}; end
+@implement (ColTable, ColStore) Live3 project(t) = t.cols
+
+@testset "M3: views and joint projections" begin
+    m = [1.0 2.0; 3.0 4.0]
+    PROJ[] = 0; @test overview(Sep3([[1.0, 3.0], [2.0, 4.0]], m)) == (2.0, [1.0, 2.0]); @test PROJ[] == 2
+    PROJ[] = 0; @test overview(Joint3(m)) == (2.0, [1.0, 2.0]); @test PROJ[] == 1
+    @test overview2(Joint3(m)) == overview(m)
+    x = Live3([[1.0, 3.0]]); normalize!(x, 1); @test x.cols[1] == [0.25, 0.75]
+    toplevel(:(struct Frozen3; cols::Vector{Vector{Float64}}; end))
+    e = thrown(:(@implement ColStore Frozen3 copies project(t) = deepcopy(t.cols)))
+    @test e isa ImplementError && occursin("rule 4", sprint(showerror, e))
+    @test thrown(:(@implement ColTable Frozen3 copies project(t) = deepcopy(t.cols))) === nothing
+end
