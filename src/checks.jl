@@ -173,15 +173,18 @@ signature (rule 7 places it). The call to the worker is static.
     guard = GuardState()
     sig = Tuple{f,args...}
     return quote
-        $(flag)[] || _check_once($flag, $sig)
+        # a dynamic call: the check's reflection stays out of compiled code (and out of trimmed binaries)
+        $(flag)[] || CLOSED_WORLD[] || Base.inferencebarrier(_check_once)($flag, $sig)
         _guard($guard, $sig)
         return f(args...)
     end
 end
 
 @noinline function _check_once(flag::Base.RefValue{Bool}, @nospecialize(sig))
+    CLOSED_WORLD[] && (flag[] = true; return nothing)      # checked by verify_main at build time
     ps = Base.invokelatest(worker_problems, sig)::Vector{String}
     isempty(ps) || throw(TraitUseError(unique(ps)))
+    Base.invokelatest(_check_concrete, sig)
     flag[] = true
     return nothing
 end

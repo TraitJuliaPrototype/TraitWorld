@@ -195,8 +195,25 @@ function _sig_alternatives(@nospecialize(sig), limit::Int = 256)
             push!(alts, Any[p])
         end
     end
-    prod(length, alts; init = 1) <= limit || return Any[sig]
-    return Any[Tuple{c...} for c in Iterators.product(alts...)]
+    n = 1
+    for a in alts
+        n *= length(a)
+    end
+    n <= limit || return Any[sig]
+    # the product by hand: Iterators.product would compile per arity, at the first call of a session
+    combos = Vector{Any}[Any[]]
+    for a in alts
+        next = Vector{Any}[]
+        for c in combos, x in a
+            push!(next, Any[c..., x])
+        end
+        combos = next
+    end
+    out = Any[]
+    for c in combos
+        push!(out, Tuple{c...})
+    end
+    return out
 end
 
 """

@@ -48,14 +48,23 @@ mutable struct EntryCache
 end
 EntryCache() = EntryCache(UInt(0), IdDict{Any,Any}())
 
+"Set by `verify_main(…; entrypoints = true)` in a trimmed build: entry caches are complete and nothing may be loaded."
+const CLOSED_WORLD = Ref(false)
+
 """
     enter(cache, f, pos, nargs, t)
 
 The trait object for argument `pos` of a call to `f` from ordinary code, or
 `NOTRAIT` if `t` has none of the traits `f` needs there.
 """
-@inline function enter(c::EntryCache, f::F, pos::Int, nargs::Int, @nospecialize(t)) where {F}
+# not inlined: verify_main recognizes the call, and the entry stays one small piece of code
+@noinline function enter(c::EntryCache, f::F, pos::Int, nargs::Int, @nospecialize(t)) where {F}
     t isa TObj && _rule3_error(f, pos, t)
+    if CLOSED_WORLD[]
+        b = get(c.builders, typeof(t), nothing)
+        b === nothing && _closed_miss(f, t)
+        return b === NOTRAIT ? NOTRAIT : b(t)
+    end
     if c.world == Base.get_world_counter()
         b = get(c.builders, typeof(t), nothing)
         b === nothing || return b === NOTRAIT ? NOTRAIT : b(t)
@@ -73,6 +82,9 @@ end
     c.builders[typeof(t)] = b
     return b === NOTRAIT ? NOTRAIT : b(t)
 end
+
+@noinline _closed_miss(@nospecialize(f), @nospecialize(t)) =
+    error("closed world: `$f` was not verified for an argument of type $(typeof(t))")
 
 @noinline function _rule3_error(@nospecialize(f), pos::Int, @nospecialize(t))
     throw(TraitBoundError("a trait object carrying $(_traitlist(typeof(t))) reached the entry of `$f` at argument $pos, " *
@@ -139,6 +151,7 @@ end
 
 "The untyped fallback of `f`, if the trait module defined one; a `MethodError` otherwise."
 function fallback(f::F, args...) where {F}
+    CLOSED_WORLD[] && return f(Untyped(), args...)
     hasmethod(f, Tuple{Untyped,map(typeof, args)...}) && return f(Untyped(), args...)
     throw(MethodError(f, args))
 end
@@ -164,8 +177,9 @@ Functions from the trait world are always passed as themselves (specialized);
 a function from above is erased unless the library marked the argument
 `@specialize`.
 """
-function enter_callable(::Type{A}, ::Type{S}, spec::Bool, @nospecialize(f)) where {A,S}
+@noinline function enter_callable(::Type{A}, ::Type{S}, spec::Bool, @nospecialize(f)) where {A,S}
     f isa CObj{A,S} && return f
+    CLOSED_WORLD[] && return CObj{A,S}(f)          # every function is known: no erasure
     T = typeof(f)
     if Base.issingletontype(T)
         # functions that capture nothing (Base's `abs2`, a closure without state): one wrapper per type

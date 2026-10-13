@@ -102,6 +102,13 @@ function _process(mod::Module, ex)
     elseif h === :module
         return Expr(:module, ex.args[1], ex.args[2],
                     Expr(:block, _prologue()..., _transform_all(ex.args[3].args)..., _epilogue()))
+    elseif h === :macrocall && _concrete_macro_level(ex.args[1]) !== nothing && _is_fdef(ex.args[end])
+        # @warn_on_abstract / @error_on_abstract on one function
+        level = _concrete_macro_level(ex.args[1])
+        inner = ex.args[end]
+        fname = _fdef_name(inner)
+        r = _process(mod, inner)
+        return Expr(:toplevel, r, :($TraitWorld.concrete_level(::typeof($fname)) = $(QuoteNode(level))))
     elseif h === :macrocall
         name = ex.args[1]
         inner = ex.args[end]
@@ -131,6 +138,15 @@ function _is_fdef(ex)
     end
     s isa Expr && s.head === :(::) && length(s.args) == 2 && (s = s.args[1])
     return s isa Expr && s.head === :call && (s.args[1] isa Symbol || (s.args[1] isa Expr && s.args[1].head === :.))
+end
+
+function _fdef_name(ex)
+    s = ex.args[1]
+    while s isa Expr && s.head === :where
+        s = s.args[1]
+    end
+    s isa Expr && s.head === :(::) && (s = s.args[1])
+    return s.args[1]
 end
 
 struct _Arg

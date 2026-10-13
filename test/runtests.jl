@@ -431,3 +431,43 @@ using .Weights
     @test (@test_logs (:warn, r"PiracyError") match_mode=:any weighted(m, 1)) == 8.0
     @test TraitWorld._rethrow_piracy(:(try f() catch; 0 end)).args[3].args[1].head === :&&   # catch rethrows PiracyError
 end
+
+# --- M7: concrete mode, verify_main ---------------------------------------------------------
+@error_on_abstract @trait_module module Hot
+using TraitWorld, ..Columns
+hot(t::ColTable, k::Float64) = (s = 0.0; for x in col(t, 1); s += x * k; end; s)
+end
+@trait_module module Hot2
+using TraitWorld, ..Columns
+@warn_on_abstract cold(t::ColTable, k::Vector{Any}) = (s = 0.0; for x in col(t, 1); s += x * k[1]; end; s)
+fine(t::ColTable, k::Vector{Any}) = (s = 0.0; for x in col(t, 1); s += x * k[1]; end; s)
+end
+@testset "M7: concrete mode" begin
+    @test Hot.hot([[1.0, 2.0]], 2.0) == 6.0                                    # concrete: runs
+    @test (@test_logs (:warn, r"abstract element type") match_mode=:any Hot2.cold([[1.0, 2.0]], Any[2.0])) == 6.0
+    @test (@test_logs Hot2.fine([[1.0, 2.0]], Any[2.0])) == 6.0                 # not annotated: silent
+    toplevel(quote
+        @error_on_abstract @trait_module module Hot3
+        using TraitWorld, ..Columns
+        g(t::ColTable, k::Vector{Any}) = (s = 0.0; for x in col(t, 1); s += x * k[1]; end; s)
+        end
+    end)
+    @test_throws AbstractTypeError Main.Hot3.g([[1.0, 2.0]], Any[2.0])
+end
+
+module VMain
+using ..Columns
+using Main: Measurements, Ramp
+function main(args::Vector{String})
+    t = isempty(args) ? Ramp([1.0, 2.0], 2) : Measurements([[1.0, 2.0]])
+    return colmean(t, 1)::Float64 + total(t, 2)::Float64
+end
+end
+@testset "M7: verify_main" begin
+    VMain.main(String[]); VMain.main(["m"])
+    r = verify_main(VMain.main, (Vector{String},))
+    @test isclosed(r)
+    @test count(p -> p.first === :enter, r.targets) == 2         # a builder for each user type the program can pass
+    @test count(p -> p.first === :worker, r.targets) == 4        # colmean and total at two representations
+    @test isempty(r.problems) && isempty(r.findings)
+end

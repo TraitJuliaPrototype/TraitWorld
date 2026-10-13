@@ -11,7 +11,8 @@ module TraitWorld
 using PrecompileTools: PrecompileTools
 
 export Trait, Callable, TObj, @trait, @implement, @trait_module, @workload,
-       TraitBoundError, TraitUseError, ImplementError, LayeringError, OwnershipError, PiracyError, mode!
+       TraitBoundError, TraitUseError, ImplementError, LayeringError, OwnershipError, PiracyError, mode!, verify_main, isclosed,
+       @warn_on_abstract, @error_on_abstract, AbstractTypeError, check_concrete
 
 function __init__()
     m = get(ENV, "JULIA_TRAITWORLD", "")
@@ -26,6 +27,8 @@ include("implement.jl")
 include("entry.jl")
 include("trait_module.jl")
 include("checks.jl")
+include("verify.jl")
+include("concrete.jl")
 
 # ---------------------------------------------------------------------------
 # Precompile the machinery itself: macro expansion, registration, checks,
@@ -74,6 +77,14 @@ PrecompileTools.@compile_workload begin
     macroexpand(_PC, :(f(t::PCT, i::Int) = pv(t, i)))
     conformance_problems(_PC.PCT, Vector{Float64}, (:pn, :pv))
     worker_problems(Tuple{typeof(_PC.pcsum),typeof(TObj((View{_PC.PCT}(Impl{(:pd,)}(), v),)))})
+    # the audit and rule 5 per signature (Union members expanded)
+    audit(Tuple{typeof(_PC.pcsum),typeof(TObj((View{_PC.PCT}(Impl{(:pd,)}(), v),)))})
+    for m in methods(_PC.pv)
+        owned_method(m)
+    end
+    _sig_alternatives(Tuple{typeof(sum),Union{Int,Float64},Union{Int,Float32},Union{Int8,Int16}})
+    _sig_alternatives(Tuple{typeof(sum),Union{Int,Float64},Union{Int,Float32}})
+    owned_method(first(methods(TraitWorld.owner)))
 end
 
 """
