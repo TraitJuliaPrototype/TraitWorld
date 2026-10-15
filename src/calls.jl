@@ -91,7 +91,8 @@ end
 _in_trait_module(x::Module) = (p = parentmodule(x); p !== x && isdefined(p, :__trait_module__))
 
 "The declared calls held by an ordinary module, what `verify_main` lists as targets; kept in the module itself, so they are saved with its image."
-declared_calls(m::Module) = isdefined(m, :__tw_declared__) ? getglobal(m, :__tw_declared__)::Vector{DeclaredCall} : DeclaredCall[]
+declared_calls(m::Module) = isdefined(m, :__tw_declared__) ?
+    Base.invokelatest(getglobal, m, :__tw_declared__)::Vector{DeclaredCall} : DeclaredCall[]   # defined during `@call`'s own expansion: read in the latest world
 "Whether `m` holds declared calls: the ordinary module around a trait module that calls out."
 is_declarer(m::Module) = isdefined(m, :__tw_declared__)
 "Modules holding declared calls, among the loaded packages (and those defined in this session)."
