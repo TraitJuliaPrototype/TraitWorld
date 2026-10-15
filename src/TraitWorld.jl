@@ -32,6 +32,7 @@ function __init__()
     empty!(_DOOR_FACTS)
     empty!(_NOT_EXTENSIONS)
     empty!(WRAPPERS); empty!(DELEGATES)
+    _filter_init!()
     push!(Base.package_callbacks, _on_package_load)
 end
 

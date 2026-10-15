@@ -97,3 +97,53 @@ function _read_tolerations(mod::Module)
     dir === nothing && return String[]
     return _tolerations_of(joinpath(dir, "Project.toml"))
 end
+
+# --- the trait-world invalidation filter of a patched Julia ------------------------------
+# With the attic's patched Julia (attic/binary/julia, `jl_set_trait_world_filter` in
+# src/gf.c), a method insertion never invalidates code of a trait module or of
+# TraitWorld when the new method comes from outside the trait world and Julia and
+# its definer owns a type or the function of its signature (the note: a definition
+# elsewhere, for the definer's own types, can never apply). On stock Julia this
+# does nothing. `JULIA_TW_FILTER=0` switches it off, for comparisons.
+const _FILTER_MODS = Any[]          # rooted here, read by the C side
+const _FILTER_NAMES = Any[]
+const _FILTER_ON = Ref(false)
+
+function _filter_init!()
+    _FILTER_ON[] = false
+    get(ENV, "JULIA_TW_FILTER", "1") == "0" && return nothing
+    ok = try
+        cglobal(:jl_tw_skipped, Csize_t) != C_NULL
+    catch
+        false
+    end
+    ok || return nothing
+    empty!(_FILTER_NAMES); append!(_FILTER_NAMES, collect(_stdlib_names()))
+    empty!(_FILTER_MODS); push!(_FILTER_MODS, TraitWorld)
+    _FILTER_ON[] = true
+    _filter_push!()
+    return nothing
+end
+_filter_push!() = (ccall(:jl_set_trait_world_filter, Cvoid, (Any, Any), _FILTER_MODS, _FILTER_NAMES); nothing)
+
+"Register a trait module with the filter (its code is protected)."
+function _filter_add!(m::Module)
+    _FILTER_ON[] || return nothing
+    any(x -> x === m, _FILTER_MODS) && return nothing
+    push!(_FILTER_MODS, m)
+    _filter_push!()
+    return nothing
+end
+"A loaded package: register it and its nested modules that are trait modules."
+function _filter_scan!(r::Module)
+    _FILTER_ON[] || return nothing
+    isdefined(r, :__trait_module__) && _filter_add!(r)
+    for n in names(r; all = true, imported = false)
+        isdefined(r, n) || continue
+        x = getglobal(r, n)
+        x isa Module && x !== r && parentmodule(x) === r && isdefined(x, :__trait_module__) && _filter_add!(x)
+    end
+    return nothing
+end
+"Invalidations the patched Julia's filter skipped so far (0 on stock Julia)."
+filter_skipped() = _FILTER_ON[] ? unsafe_load(cglobal(:jl_tw_skipped, Csize_t)) : 0

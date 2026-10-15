@@ -633,6 +633,7 @@ function _finish_module(mod::Module)
             "trait module $mod uses $u, which is outside the trait world (rule 1)"))
     end
     seal!(mod)
+    Base.inferencebarrier(_filter_add!)(mod)
     isdefined(mod, :__tw_entries__) || return nothing
     # this module's functions, and other modules' functions it gave workers to
     ks = Any[k for k in keys(mod.__tw_entries__) if k[1] === mod]

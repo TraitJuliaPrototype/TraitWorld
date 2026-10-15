@@ -118,6 +118,7 @@ function _on_package_load(id::Base.PkgId)
     m = get(Base.loaded_modules, id, nothing)
     m isa Module || return nothing
     is_wrapper_root(m) && _register_wrapper!(m, getglobal(m, :__tw_wrapper__)...)
+    Base.inferencebarrier(_filter_scan!)(m)
     (isdefined(m, :__trait_module__) || _has_trait_module(m)) && seal!(m)   # a trait package seals itself (no rescan needed)
     Base.toplevel_load[] && _check_loads!()                                  # once per `using`, nested loads included
     return nothing
