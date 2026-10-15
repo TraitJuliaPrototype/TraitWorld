@@ -54,14 +54,40 @@ function _loaded_root(name::String)
     return nothing
 end
 
-"Parent package of a package extension, or `nothing`."
+"""
+Parent package of a package extension, or `nothing`. `Base.EXT_PRIMED` knows
+the extensions primed in this session; one loaded from an image (Adapt's,
+Compat's, when their triggers were already loaded) is recognized by its source
+file, which lies in the parent's `ext/` directory (session 19: the sealing scan
+reported such extensions as pirates of their own parents).
+"""
 function _extension_parent(r::Module)
     p = get(_EXT_PARENTS, r, nothing)
     p === nothing || return p
     v = get(Base.EXT_PRIMED, Base.PkgId(r), nothing)   # extension => [parent, triggers...]
-    v === nothing && return nothing
-    return get(Base.loaded_modules, first(v), nothing)
+    v === nothing || return get(Base.loaded_modules, first(v), nothing)
+    o = get(Base.pkgorigins, Base.PkgId(r), nothing)
+    if o !== nothing && o.path !== nothing
+        _note_extension!(r, o.path)
+        p = get(_EXT_PARENTS, r, nothing)
+        p === nothing || return p
+    end
+    r in _NOT_EXTENSIONS && return nothing
+    # an extension of a standard library (Pkg's REPLExt): the parent that names it
+    for (_, m) in Base.loaded_modules
+        if Base.get_extension(m, nameof(r)) === r
+            _EXT_PARENTS[r] = m
+            return m
+        end
+    end
+    # a loaded package that is no extension stays one: remembered, since the
+    # sealing scan asks once per method (without this, 15 s instead of 2 s
+    # for a full scan with Makie loaded)
+    haskey(Base.loaded_modules, Base.PkgId(r)) && push!(_NOT_EXTENSIONS, r)
+    return nothing
 end
+"Loaded package roots known not to be extensions (reset in `__init__`)."
+const _NOT_EXTENSIONS = Base.IdSet{Module}()
 "Trigger packages of a package extension (names), or `nothing`."
 function _extension_triggers(r::Module)
     t = get(_EXT_TRIGGERS, r, nothing)
@@ -88,7 +114,7 @@ function owner(m::Module)
         end
         return m
     end
-    (r === Base || r === Core) && return :Julia
+    (r === Base || r === Core || r === Base.Compiler) && return :Julia      # the compiler is a module of its own in 1.12
     nameof(r) in _stdlib_names() && return :Julia
     p = _extension_parent(r)
     return p === nothing ? r : owner(p)
@@ -152,7 +178,8 @@ function _owners!(acc::Base.IdSet{Any}, @nospecialize(T))
             end
         else
             for p in T.parameters
-                _owners!(acc, p)
+                # a value as a type parameter (Makie's `Plot{scatter}`, a function) belongs to its type's owner
+                _owners!(acc, p isa Type || p isa TypeVar || p isa Core.TypeofVararg ? p : typeof(p))
             end
         end
     elseif T isa TypeVar

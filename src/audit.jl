@@ -52,6 +52,7 @@ struct PiracyError <: Exception
 end
 PiracyError(msg::String) = PiracyError(msg, PiracyFinding[])
 function Base.showerror(io::IO, e::PiracyError)
+    isempty(e.findings) && e.sig isa String && return print(io, "PiracyError: ", e.sig)
     print(io, "PiracyError: trait-bound code ", e.sig, " depends on ",
           length(e.findings) == 1 ? "a method" : "methods",
           " defined by a package that owns neither the function nor its argument types:")
@@ -129,8 +130,23 @@ _callee_method(@nospecialize(c)) =
     c isa Core.CodeInstance ? c.def.def :
     c isa Core.MethodInstance ? c.def :
     c isa Method ? c : nothing
+
+"""
+The method match of a call signature in `world`, or `nothing`: the runtime's
+own lookup, called directly. `Base._which` goes through the compiler's
+`findsup_mt`, whose compiled code unrelated loads invalidate (DataFrames'
+dependencies do, through `convert(UInt, Integer)`), which put a recompile of
+Base on the first call of every session (session 19).
+"""
+function _match(@nospecialize(sig), world::UInt)
+    min_valid = Ref{UInt}(typemin(UInt))
+    max_valid = Ref{UInt}(typemax(UInt))
+    r = ccall(:jl_gf_invoke_lookup_worlds, Any, (Any, Any, UInt, Ptr{Csize_t}, Ptr{Csize_t}),
+              sig, nothing, world, min_valid, max_valid)
+    return r === nothing ? nothing : r::Core.MethodMatch
+end
 function _current_target(@nospecialize(sig), world::UInt)
-    m = Base._which(sig; world, raise = false)
+    m = _match(sig, world)
     return m === nothing ? nothing : m.method
 end
 
@@ -144,11 +160,9 @@ invalidated the worker is found without recompiling it.
 """
 function audit(@nospecialize(sig); compile::Bool = true)
     world = Base.get_world_counter()
-    mi = try
-        Base.specialize_method(Base._which(sig; world))
-    catch
-        nothing
-    end
+    match = _match(sig, world)
+    match === nothing && return PiracyFinding[]
+    mi = Base.specialize_method(match)
     mi isa Core.MethodInstance || return PiracyFinding[]
     ci = _latest_ci(mi)
     if MODE[] === :error && ci !== nothing && !_isvalid(ci, world)

@@ -76,11 +76,14 @@ function _arities(@nospecialize(X), op::Symbol)
     out = Int[]
     for m in methods(op_args, Tuple{Type{X},Val{op},Any,Any})
         sig = Base.unwrap_unionall(m.sig)
-        p = sig.parameters[end]
-        p isa DataType && p <: Val && push!(out, p.parameters[1])
+        sig isa DataType || continue
+        p = (sig.parameters::Core.SimpleVector)[end]
+        p isa DataType && p <: Val && push!(out, p.parameters[1]::Int)
     end
     return sort!(out)
 end
+"All parameters concrete, by a loop (`all(isconcretetype, sv)` on a `SimpleVector` is generic Base code)."
+_allconcrete(sv::Core.SimpleVector) = (for p in sv; (p isa Type && isconcretetype(p)) || return false; end; true)
 _declared_args(@nospecialize(X), op::Symbol, @nospecialize(R), N::Int) = Base.invokelatest(op_args, X, Val(op), R, Val(N))
 _declared_ret(@nospecialize(X), op::Symbol, @nospecialize(R), N::Int) = Base.invokelatest(op_ret, X, Val(op), R, Val(N))
 
@@ -90,7 +93,7 @@ function trait_closure(@nospecialize(X))
     i = 1
     while i <= length(out)
         for S in _supers(out[i])
-            any(x -> x === S, out) || push!(out, S)
+            _hasid(out, S) || push!(out, S)
         end
         i += 1
     end
@@ -112,8 +115,9 @@ function _generic_keys(@nospecialize(X))
     out = Symbol[]
     for m in methods(generic_rec, Tuple{Type{X},Any})
         sig = Base.unwrap_unionall(m.sig)
-        p = sig.parameters[end]
-        p isa DataType && p <: Val && push!(out, p.parameters[1])
+        sig isa DataType || continue
+        p = (sig.parameters::Core.SimpleVector)[end]
+        p isa DataType && p <: Val && push!(out, p.parameters[1]::Symbol)
     end
     return out
 end
@@ -132,7 +136,7 @@ function conformance_problems(@nospecialize(X), @nospecialize(R), ops)
             A = _declared_args(X, op, R, N)
             D = _declared_ret(X, op, R, N)
             sig = Tuple{R,A.parameters...}
-            if !all(isconcretetype, A.parameters)
+            if !_allconcrete(A.parameters)
                 # an abstract declared argument (an iteration state, say): inference there says little,
                 # so ask only that a method exists that does not always throw; every call asserts the result
                 ms = Base._methods_by_ftype(Tuple{typeof(f),sig.parameters...}, -1, Base.get_world_counter())
@@ -195,8 +199,8 @@ function _has_op_method(@nospecialize(X), op::Symbol, @nospecialize(R))
     for N in _arities(X, op)
         A = _declared_args(X, op, R, N)
         sig = Tuple{typeof(f),R,A.parameters...}
-        if all(isconcretetype, A.parameters)
-            hasmethod(f, Tuple{sig.parameters[2:end]...}) || return false
+        if _allconcrete(A.parameters)
+            hasmethod(f, Tuple{R,A.parameters...}) || return false
         else
             ms = Base._methods_by_ftype(sig, -1, Base.get_world_counter())
             (ms isa Vector && !isempty(ms)) || return false
@@ -228,7 +232,7 @@ function _witness(@nospecialize(X), @nospecialize(R))
         subs = Any[]
         ok = true
         for C in g.constraints, Y in trait_closure(C)
-            any(s -> s[1] === Y, subs) && continue
+            _hasfirst(subs, Y) && continue
             wy = witness(Y, R)
             wy === nothing && (ok = false; break)
             push!(subs, (Y, wy))
@@ -277,6 +281,8 @@ function _subobj_type(sub::Tuple, @nospecialize(R))
     vs = Any[View{typeof(s).parameters[1],typeof(s.w),R} for s in sub]
     return TObj{Union{Xs...},Tuple{vs...}}
 end
+
+_hasfirst(v::Vector{Any}, @nospecialize(y)) = (for s in v; (s::Tuple)[1] === y && return true; end; false)
 
 "The projection of `T` for `X`: an explicit one, or `T` itself if it is a representation of `X`."
 function proj_lookup(@nospecialize(X), @nospecialize(T))
@@ -595,6 +601,92 @@ function _implement_where(mod::Module, head, block)
     return esc(Expr(:block, out...))
 end
 
+"Whether `T` has methods for every operation of `X` that has no default."
+_methods_cover(@nospecialize(X), @nospecialize(T)) =
+    all(op -> _hasdefault(X, op) || _has_op_method(X, op, T), _ops(X))
+_methods_some(@nospecialize(X), @nospecialize(T)) = any(op -> _has_op_method(X, op, T), _ops(X))
+
+"""
+The one-line form, `@implement Trait T`: methods of the trait's operations for
+`T` make it its own representation, checked as an implementation; otherwise
+the field named `data`, or the one field whose type conforms, is the
+projection, composed with that type's own projection if it has one. Methods
+win over a field; partial methods, several conforming fields without `data`,
+or no conforming field are errors naming the operation or the fields.
+"""
+function _implement_oneline(mod::Module, traits::Vector{Any}, Tex, Rdecl)
+    TW = TraitWorld
+    Rdecl === nothing || error("@implement: the one-line form takes no representation; write `@implement $(traits[1]){$Rdecl} $Tex project(t) = …`")
+    T = Core.eval(mod, Tex)
+    T isa DataType && isconcretetype(T) ||
+        error("@implement: the one-line form needs a concrete type, got `$Tex` (the prototype does not declare parametric families this way)")
+    Xs = Any[Core.eval(mod, x) for x in traits]
+    all(is_trait, Xs) || error("@implement: `$(traits[findfirst(!is_trait, Xs)])` is not a trait")
+    if all(X -> _methods_cover(X, T), Xs)
+        # the type is its own representation: its existing methods, checked as an implementation
+        out = Any[]
+        for (xex, X) in zip(traits, Xs)
+            rec = gensym(:implementation)
+            push!(out, :(const $rec = $TW.ImplRec(:existing, ())))
+            push!(out, :($TW.implementation(::Type{$xex}, ::Type{$Tex}) = $rec))
+            push!(out, :($TW._check_implementation(@__MODULE__, $xex, $Tex,
+                           Tuple(op for op in $TW._ops($xex) if !(op in $TW._existing_defaults($xex, $Tex))))))
+        end
+        push!(out, :($TW._bump!()))
+        push!(out, :nothing)
+        return esc(Expr(:block, out...))
+    end
+    for X in Xs
+        if _methods_some(X, T)
+            missing_ops = [op for op in _ops(X) if !_hasdefault(X, op) && !_has_op_method(X, op, T)]
+            throw(ImplementError("$Tex has methods for some operations of $X but not for $(join(string.(missing_ops), ", ")): " *
+                                 "define them, so that $Tex is its own representation, or remove them and conform through a field"))
+        end
+    end
+    fns = fieldnames(T)
+    conforming = Int[]
+    abstract_conforming = Int[]
+    for i in 1:fieldcount(T)
+        FT = fieldtype(T, i)
+        FT isa Type || continue
+        all(X -> proj_lookup(X, FT) !== nothing, Xs) || continue
+        deep_concrete(FT) ? push!(conforming, i) : push!(abstract_conforming, i)
+    end
+    idata = findfirst(==(:data), fns)
+    fld = if idata !== nothing && idata in conforming
+        idata
+    elseif length(conforming) == 1
+        conforming[1]
+    elseif isempty(conforming)
+        if !isempty(abstract_conforming)
+            i = abstract_conforming[1]
+            throw(ImplementError("field `$(fns[i])` of $Tex is declared `$(fieldtype(T, i))`, which is not deeply concrete, so it cannot " *
+                                 "be the projection: declare a concrete field type, or write a projection that materializes it"))
+        end
+        throw(ImplementError("no field of $Tex conforms to $(join(string.(Xs), ", ")) and $Tex has no methods for its operations " *
+                             "(fields: $(join(("$n::$(fieldtype(T, i))" for (i, n) in enumerate(fns)), ", "))); " *
+                             "name a field `data`, write `project(t) = …`, or implement the operations"))
+    else
+        throw(ImplementError("several fields of $Tex conform to $(join(string.(Xs), ", ")): $(join(string.(fns[conforming]), ", ")). " *
+                             "Name one `data`, or write `@implement $(traits[1]) $Tex project(t) = t.field`"))
+    end
+    FT = fieldtype(T, fld)
+    fsym = QuoteNode(fns[fld])
+    # compose with the field type's own projection, when it is not a representation itself
+    ps = Any[_proj(X, FT) for X in Xs]
+    pex = if all(p -> p === nothing, ps)
+        :(getfield(t, $fsym))
+    elseif all(p -> p isa ProjRec && p.project === ps[1].project, ps)
+        p1 = ps[1]
+        p1.dyn === nothing || throw(ImplementError("field `$(fns[fld])` of $Tex conforms through dynamic operations; write the projection out"))
+        :($(p1.project)(getfield(t, $fsym)))
+    else
+        throw(ImplementError("the fields of $Tex conform to $(join(string.(Xs), ", ")) through different projections; write one `project(t) = …`"))
+    end
+    headex = length(traits) == 1 ? traits[1] : Expr(:tuple, traits...)
+    return _implement_projection(mod, headex, Any[Tex, :(project(t) = $pex)])
+end
+
 function _implement_projection(mod::Module, head, rest)
     TW = TraitWorld
     traits = Any[]
@@ -612,6 +704,7 @@ function _implement_projection(mod::Module, head, rest)
     while !isempty(rest) && _flag(rest[1])
         push!(flags, popfirst!(rest))
     end
+    isempty(rest) && isempty(flags) && return _implement_oneline(mod, traits, Tex, Rdecl)
     length(rest) == 1 || error("@implement: expected `project(t) = …` or a begin … end block after the type")
     body = rest[1]
     dynamic = :dynamic in flags

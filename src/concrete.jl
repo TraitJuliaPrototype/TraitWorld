@@ -398,7 +398,7 @@ traced to its root cause.
 """
 function concrete_findings(@nospecialize(sig))
     world = Base.get_world_counter()
-    F = sig.parameters[1]
+    F = _worker_ftype(sig)
     tr = _Tracer(_Walk(world), owner(F.name.module), IdDict{Core.MethodInstance,Any}(), IdDict{Core.MethodInstance,Any}())
     root = _target_mi(sig, world)
     root === nothing && return AbstractFinding[]
@@ -500,11 +500,18 @@ _sig_reps(@nospecialize(sig)) = join([string(nameof(v.parameters[1]), " at ", v.
 
 "Run concrete mode for a worker signature, per its function's level: warn once, or throw."
 function _check_concrete(@nospecialize(sig))
-    F = sig.parameters[1]
+    F = _worker_ftype(sig)
     f = F.instance
     lv = Base.invokelatest(concrete_level, f)::Symbol
     lv === :off && return nothing
     fs = concrete_findings(sig)
+    d = get(WORKER_DOORS, sig, nothing)
+    if d !== nothing && (!isempty(d.outward) || d.truncated)
+        # outward doors are dynamic calls upward; the budget's end is reported, never admitted by silence
+        msg = "`$(nameof(f))` at $(_sig_reps(sig)): " * (isempty(d.outward) ? "" : "outward doors, dynamic calls upward: " * join(d.outward, "; ")) *
+              (d.truncated ? (isempty(d.outward) ? "" : "; ") * "the walk into Base stopped at its budget ($(DOOR_BUDGET[]) method instances): unchecked beyond it" : "")
+        @warn "@warn_on_abstract: " * msg
+    end
     isempty(fs) && return nothing
     lv === :error && throw(AbstractTypeError(nameof(f), _sig_reps(sig), fs))
     @warn "@warn_on_abstract: " * sprint(_print_findings, nameof(f), _sig_reps(sig), fs)

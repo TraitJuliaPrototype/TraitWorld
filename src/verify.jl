@@ -40,7 +40,9 @@ struct _Site
     argtypes::Any
     targets::Vector{Core.MethodInstance}
     line::String
+    decl::Any               # a declared call's signature (`:declared` sites), else nothing
 end
+_Site(kind, doomed, intry, stmt, callee, argtypes, targets, line) = _Site(kind, doomed, intry, stmt, callee, argtypes, targets, line, nothing)
 
 struct _Scan
     invokes::Vector{Tuple{Core.MethodInstance,Bool,Bool}}   # static callee, doomed, intry
@@ -406,8 +408,26 @@ _machinery_method(m::Method) = m.module === TraitWorld && m.name in
 
 const _ENTER = Ref{Any}(nothing)
 const _ENTER_CALLABLE = Ref{Any}(nothing)
+const _ENTER_KW = Ref{Any}(nothing)
+const _ENTER_KW_CALLABLE = Ref{Any}(nothing)
 _enter_method() = something(_ENTER[] === nothing ? (_ENTER[] = only(methods(enter))) : _ENTER[])
 _enter_callable_method() = something(_ENTER_CALLABLE[] === nothing ? (_ENTER_CALLABLE[] = only(methods(enter_callable))) : _ENTER_CALLABLE[])
+_enter_kw_method() = something(_ENTER_KW[] === nothing ? (_ENTER_KW[] = only(methods(enter_kw))) : _ENTER_KW[])
+_enter_kw_callable_method() = something(_ENTER_KW_CALLABLE[] === nothing ? (_ENTER_KW_CALLABLE[] = only(methods(enter_kw_callable))) : _ENTER_KW_CALLABLE[])
+
+"The named tuple type `NT` with field `k` retyped to `T`."
+function _nt_with(@nospecialize(NT), k::Symbol, @nospecialize(T))
+    names = NT.parameters[1]
+    ts = Any[n === k ? T : fieldtype(NT, n) for n in names]
+    return NamedTuple{names,Tuple{ts...}}
+end
+
+"A method of the declared-call machinery: the call of a `DeclaredCall`, its keyword sorter or body."
+function _declared_method(m::Method)
+    m.module === TraitWorld || return false
+    ps = Base.unwrap_unionall(m.sig).parameters
+    return any(p -> p isa DataType && p <: DeclaredCall, ps[1:min(3, length(ps))])
+end
 
 "User types a trait position could see: the leaf types of its argument type, or every registered projected type and representation."
 function _projected_types(@nospecialize(T))
@@ -538,12 +558,92 @@ function _scan(mi::Core.MethodInstance, cx::_Walk)
                 alts[i] = outs
                 site(:trait, i, :callable, Any[Ft], ts)
                 continue
+            elseif cm === _enter_kw_method()
+                # enter_kw(cache, traits, f, k, nt): the builder per user type of a bounded keyword
+                a = st.args[3:end]
+                cv = _constval(src, sptypes, a[1]); tv = _constval(src, sptypes, a[2]); kv = _constval(src, sptypes, a[4])
+                NT = _argT(src, sptypes, a[5])
+                if cv === nothing || tv === nothing || kv === nothing || !(NT isa DataType && NT <: NamedTuple)
+                    hole(:trait_arg, i, :enter_kw, Any[NT])
+                    continue
+                end
+                cache, traits, k = something(cv), something(tv), something(kv)
+                if !(k in NT.parameters[1])
+                    alts[i] = Any[NT]                      # not supplied: the named tuple passes through
+                    site(:trait, i, :enter_kw, Any[NT])
+                    continue
+                end
+                ts = Core.MethodInstance[]
+                outs = Any[]
+                for U in _projected_types(fieldtype(NT, k))
+                    b = Base.invokelatest(_builder_for, collect(Any, traits), U)
+                    b === NOTRAIT && continue              # refused at the entry: an error path
+                    t = _target_mi(Tuple{typeof(b),U}, world)
+                    t === nothing || push!(ts, t)
+                    push!(outs, _nt_with(NT, k, Base.infer_return_type(b, Tuple{U})))
+                    push!(cx.plans, (cache, U, b))
+                end
+                alts[i] = outs
+                site(:trait, i, :enter_kw, Any[NT], ts)
+                continue
+            elseif cm === _enter_kw_callable_method()
+                a = st.args[3:end]
+                Av = _constval(src, sptypes, a[1]); Sv = _constval(src, sptypes, a[2]); kv = _constval(src, sptypes, a[4])
+                NT = _argT(src, sptypes, a[5])
+                if Av === nothing || Sv === nothing || kv === nothing || !(NT isa DataType && NT <: NamedTuple)
+                    hole(:trait_arg, i, :enter_kw_callable, Any[NT])
+                    continue
+                end
+                A, S, k = something(Av), something(Sv), something(kv)
+                if !(k in NT.parameters[1])
+                    alts[i] = Any[NT]
+                    site(:trait, i, :enter_kw_callable, Any[NT])
+                    continue
+                end
+                c2 = _union_split(Any[fieldtype(NT, k)], 32)
+                if c2 === nothing
+                    hole(:trait_arg, i, :enter_kw_callable, Any[NT])
+                    continue
+                end
+                ts = Core.MethodInstance[]
+                outs = Any[]
+                for x in c2
+                    F = x[1]
+                    if F <: CObj
+                        push!(outs, _nt_with(NT, k, F))
+                    else
+                        push!(outs, _nt_with(NT, k, CObj{A,S,F}))
+                        t = _target_mi(Tuple{Type{CObj{A,S}},F}, world)
+                        t === nothing || push!(ts, t)
+                    end
+                end
+                alts[i] = outs
+                site(:trait, i, :enter_kw_callable, Any[NT], ts)
+                continue
+            elseif cm isa Method && _declared_method(cm)
+                # a declared call into the package an interface wraps: a target compiled as ordinary
+                # code at its declared signature (handles unwrapped to Any); never walked
+                dcv = nothing
+                for a in st.args[2:end]
+                    v = _constval(src, sptypes, a)
+                    v !== nothing && something(v) isa DeclaredCall && (dcv = something(v); break)
+                end
+                ats = Any[_argT(src, sptypes, a) for a in st.args[2:end]]
+                if dcv === nothing
+                    hole(:latest, i, :declared, ats)
+                    continue
+                end
+                k0 = findfirst(T -> T isa DataType && T <: DeclaredCall, ats)
+                rest = Any[T <: Handle ? Any : T for T in ats[k0+1:end]]
+                push!(sites, _Site(:trait, doomed[i], intry[i], i, :declared, ats, Core.MethodInstance[], _line(src, mi, i),
+                                   Tuple{Core.Typeof(dcv.f),rest...}))
+                continue
             elseif cm isa Method && _machinery_method(cm)
                 site(:guard, i, cm.name, Any[])
                 continue
-            elseif cm isa Method && cm.module === TraitWorld && cm.name === :fallback
+            elseif cm isa Method && cm.module === TraitWorld && (cm.name === :fallback || cm.name === :kwfallback)
                 # reached only by a user type with none of the entry's traits
-                notrait ? hole(:fallback, i, :fallback, Any[]) : site(:trait, i, :fallback, Any[])
+                notrait ? hole(:fallback, i, cm.name, Any[]) : site(:trait, i, cm.name, Any[])
                 continue
             elseif cm isa Method && cm.nospecialize != 0 && isdefined(cm.module, :__tw_entries__)
                 # an entry of a trait module: compiled once (that instance must have native code),
@@ -571,7 +671,7 @@ function _scan(mi::Core.MethodInstance, cx::_Walk)
                     continue
                 elseif f === Core.finalizer
                     rc === nothing && hole(:closure, i, :finalizer, ats)
-                elseif f === checked_call
+                elseif f === checked_call || f === checked_kwcall
                     # the entry's call of the worker: one target per combination of what the entry built
                     choices = Vector{Any}[]
                     ok = true
@@ -595,11 +695,11 @@ function _scan(mi::Core.MethodInstance, cx::_Walk)
                     end
                     ts = Core.MethodInstance[]
                     for cmb in combos
-                        t = _target_mi(Tuple{typeof(checked_call),cmb...}, world)
+                        t = _target_mi(Tuple{typeof(f),cmb...}, world)
                         t === nothing || push!(ts, t)
                     end
                     site(:trait, i, :worker, ats, ts)
-                elseif f === fallback
+                elseif f === fallback || f === kwfallback
                     notrait ? hole(:fallback, i, f, ats) : site(:trait, i, :fallback, ats)
                 elseif f isa Function && parentmodule(f) === TraitWorld && _machinery_method(first(methods(f)))
                     site(:guard, i, f, ats)
@@ -715,6 +815,10 @@ function verify_main(@nospecialize(f), @nospecialize(argtypes::Tuple = ()); comp
                 end
             elseif s.kind === :trait
                 trait_sites += 1
+                if s.decl !== nothing && !(s.decl in tseen)
+                    push!(tseen, s.decl)
+                    push!(targets, :declared => s.decl)
+                end
                 for t in s.targets
                     t in tseen && continue
                     push!(tseen, t)
@@ -734,7 +838,8 @@ function verify_main(@nospecialize(f), @nospecialize(argtypes::Tuple = ()); comp
     problems = String[]
     for (kind, S) in targets
         kind === :worker || continue
-        W = Tuple{S.parameters[2:end]...}
+        W = S.parameters[1] === typeof(checked_kwcall) ? Tuple{typeof(Core.kwcall),S.parameters[2:end]...} :
+                                                          Tuple{S.parameters[2:end]...}
         append!(problems, worker_problems(W))
         fs = audit(W; compile = false)
         isempty(fs) || push!(findings, W => fs)

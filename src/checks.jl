@@ -21,6 +21,7 @@ function Base.showerror(io::IO, e::TraitUseError)
 end
 
 _istobj(@nospecialize(T)) = T isa DataType && T.name === Base.typename(TObj)
+_ishandle(@nospecialize(T)) = T isa DataType && T <: Handle
 _hastobj(@nospecialize(T)) = _istobj(T) || (T isa Union && any(_istobj, Base.uniontypes(T)))
 
 function _line_of(src, mi, i)
@@ -47,6 +48,9 @@ function _is_op(@nospecialize(f), @nospecialize(lb))
     return false
 end
 
+"`Type{<:TObj}` or `Type{<:CObj}`: a declaration of the machinery's own types, not a look at the user's."
+_handle_type(@nospecialize(T)) = T isa DataType && T <: Type && (T.parameters[1] <: TObj || T.parameters[1] <: CObj)
+
 _traitnames(@nospecialize(T)) = _istobj(T) ? join(string.(Base.uniontypes(T.parameters[1])), ", ") : string(T)
 
 """
@@ -62,6 +66,22 @@ _escapes(@nospecialize(T)) = T isa Union ? any(_escapes, Base.uniontypes(T)) :
 function worker_problems(@nospecialize(sig), seen = Base.IdSet{Any}(), out = String[]; root::Bool = true)
     sig in seen && return out
     push!(seen, sig)
+    if root && _WALK[] === nothing
+        # the root call owns the walk into Base: a budget, and the outward doors recorded per signature
+        st = _DoorWalk(Ref(DOOR_BUDGET[]), String[], false)
+        _WALK[] = st
+        try
+            _worker_problems(sig, seen, out, true)
+        finally
+            _WALK[] = nothing
+        end
+        WORKER_DOORS[sig] = DoorFacts(String[], st.outward, String[], st.truncated)
+        return out
+    end
+    return _worker_problems(sig, seen, out, root)
+end
+
+function _worker_problems(@nospecialize(sig), seen, out, root::Bool)
     world = Base.get_world_counter()
     for (src, rt) in Base.code_typed_by_type(sig; optimize = false, world)
         mi = src.parent
@@ -73,6 +93,17 @@ function worker_problems(@nospecialize(sig), seen = Base.IdSet{Any}(), out = Str
         sptypes = mi isa Core.MethodInstance ? _CC.sptypes_from_meth_instance(mi) : _CC.EMPTY_SPTYPES
         for (i, st) in enumerate(src.code)
             ex = st isa Expr && st.head === :(=) ? st.args[2] : st
+            # globals the worker's own code reads must decide a trait-world type
+            if ex isa GlobalRef
+                _global_ok(ex) || push!(out, "$(_line_of(src, mi, i)): reads the global `$(ex.mod).$(ex.name)`, which does not decide a trait-world type (not a constant, or not deeply concrete)")
+                continue
+            end
+            if ex isa Expr
+                for a in ex.args
+                    a isa GlobalRef && !_global_ok(a) &&
+                        push!(out, "$(_line_of(src, mi, i)): reads the global `$(a.mod).$(a.name)`, which does not decide a trait-world type (not a constant, or not deeply concrete)")
+                end
+            end
             if ex isa Expr && ex.head === :new
                 # a closure capturing a trait object: its body runs wherever it is called
                 # (inside Base's `sum`, say), so check it here, for any arguments
@@ -92,6 +123,12 @@ function worker_problems(@nospecialize(sig), seen = Base.IdSet{Any}(), out = Str
             fT = _CC.argextype(ex.args[1], src, sptypes)
             f = fT isa _CC.Const ? fT.val : (Base.issingletontype(_CC.widenconst(fT)) ? _CC.widenconst(fT).instance : nothing)
             if !any(k -> _hastobj(ats[k]), 2:length(ats))
+                if any(k -> _ishandle(ats[k]), 2:length(ats)) && (f === Core.getfield || f === Base.getproperty ||
+                   f === Core.setfield! || f === Base.setproperty! || f === Core.typeof || f === Base.fieldtype)
+                    push!(out, "$(_line_of(src, mi, i)): `h.ref` or `typeof(h)` on a handle: a handle is opaque inside the trait world, " *
+                               "a value to pass to the next declared call")
+                    continue
+                end
                 _layering!(out, seen, f, ats, src, mi, i, world)
                 continue
             end
@@ -100,8 +137,15 @@ function worker_problems(@nospecialize(sig), seen = Base.IdSet{Any}(), out = Str
                 push!(out, "$line: a trait object is passed to a function not known at compile time")
                 continue
             end
+            if f isa DeclaredCall
+                push!(out, "$line: a trait object is passed to the declared call $f: trait objects never go up; pass what its operations return")
+                continue
+            end
             fname = f isa Function ? nameof(f) : f
             f === Core._typeof_captured_variable && continue      # closure lowering: the closure body is checked at its `new`
+            if (f === Core.isa || f === Core.typeassert) && length(ats) == 3 && _handle_type(ats[3])
+                continue                                           # a keyword sorter's own check of a bounded keyword
+            end
             if f isa Core.Builtin || f isa Core.IntrinsicFunction
                 what = f === Core.getfield ? "`t.field`: the user's data is reached only through the trait's operations" :
                        f === Core.typeof ? "`typeof(t)`: code must not depend on the user's type" :
@@ -162,8 +206,37 @@ function _layering!(out, seen, @nospecialize(f), ats, src, mi, i, world)
         if !is_trait_world(m.module)
             push!(out, "$(_line_of(src, mi, i)): calls $(m.module).$(m.name), outside the trait world (rule 1): " *
                        "the trait world uses only itself")
-        elseif owner(Base.moduleroot(m.module)) !== :Julia && Base.moduleroot(m.module) !== TraitWorld
+        elseif Base.moduleroot(m.module) === TraitWorld
+            continue                                      # the machinery: declared calls, operations, checked calls
+        elseif _is_entry(m)
+            continue                                      # a plain value into another function's entry: its worker is checked at its own first call
+        elseif owner(Base.moduleroot(m.module)) !== :Julia
             worker_problems(csig, seen, out; root = false)
+        elseif f === Base.getproperty && length(ats) >= 3 && ats[2] <: Module
+            # `Mod.name` with constants is a static global reference, checked as one; with a
+            # symbol computed at run time it is the getglobal door
+            st0 = src.code[i]
+            ex0 = st0 isa Expr && st0.head === :(=) ? st0.args[2] : st0
+            sp0 = _CC.sptypes_from_meth_instance(mi)
+            if _static_access(src, sp0, ex0)
+                g = _static_ref(src, sp0, ex0)
+                g === nothing || _global_ok(g) ||
+                    push!(out, "$(_line_of(src, mi, i)): reads the global `$(g.mod).$(g.name)`, which does not decide a trait-world type (not a constant, or not deeply concrete)")
+            else
+                push!(out, "$(_line_of(src, mi, i)): looks a module's field up by a name computed at run time (the getglobal door): a value denoting code has no bound")
+            end
+        elseif (f === Base.invokelatest || f === Core.invokelatest) &&
+               (st0 = src.code[i]; ex0 = st0 isa Expr && st0.head === :(=) ? st0.args[2] : st0; _latest_outward(src, _CC.sptypes_from_meth_instance(mi), ex0))
+            st = _WALK[]
+            st === nothing || push!(st.outward, "$(_line_of(src, mi, i)): invokelatest of an outward door")
+        elseif f in INWARD_DOORS
+            push!(out, "$(_line_of(src, mi, i)): calls the inward door `$(nameof(f))`: a value denoting code has no bound; " *
+                       "an interface package may declare the call, with a checked result")
+        elseif f in OUTWARD_DOORS || (f isa Function && nameof(f) in _STDOUT_DOORS && parentmodule(f) === Base && (length(ats) < 2 || !(ats[2] <: IO)))
+            st = _WALK[]
+            st === nothing || push!(st.outward, "$(_line_of(src, mi, i)): $(nameof(f))")
+        else
+            _doors!(out, csig, src, mi, i, world)         # Base's code, checked through the door list
         end
     end
     return nothing
@@ -188,6 +261,27 @@ signature (rule 7 places it). The call to the worker is static.
         return _noescape(f(args...))
     end
 end
+
+"""
+    checked_kwcall(nt, f, args...)
+
+`checked_call` for a function with keyword arguments: the supplied keywords,
+bounded ones already projected, go to the worker's own keyword sorter, which
+fills the defaults inside the trait world.
+"""
+@generated function checked_kwcall(nt::NamedTuple, f, args...)
+    flag = Ref(false)
+    guard = GuardState()
+    sig = Tuple{typeof(Core.kwcall),nt,f,args...}
+    return quote
+        $(flag)[] || CLOSED_WORLD[] || Base.inferencebarrier(_check_once)($flag, $sig)
+        _guard($guard, $sig)
+        return _noescape(Core.kwcall(nt, f, args...))
+    end
+end
+
+"The function a worker signature belongs to: through `Core.kwcall` for a keyword worker."
+_worker_ftype(@nospecialize(sig)) = sig.parameters[1] === typeof(Core.kwcall) ? sig.parameters[3] : sig.parameters[1]
 
 # a trait object never reaches ordinary code: one dispatch at the boundary, folded per signature
 @inline _noescape(x) = x

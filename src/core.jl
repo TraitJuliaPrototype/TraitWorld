@@ -13,12 +13,34 @@
 abstract type Trait end
 
 """
-    Callable{A, S}
+    Callable{A, S, M}
 
 The built-in trait for a function argument: called with arguments of the tuple
-type `A`, it returns an `S`. Any callable conforms; every call is checked.
+type `A`, it returns an `S`. Any callable conforms; every call is checked. `M`
+is the mode the library sets as its default: `DynamicCall` (a pointer to the
+function's code, the worker compiled once per signature) or `CompiledCall`
+(a worker compiled per function type, outside the library's cache). A bound
+without `M` accepts either and supplies `DynamicCall`; the caller overrides per
+value with `compiled_call(f)` or `dynamic_call(f)`.
 """
-abstract type Callable{A<:Tuple,S} end
+abstract type CallMode end
+struct DynamicCall <: CallMode end
+struct CompiledCall <: CallMode end
+abstract type Callable{A<:Tuple,S,M<:CallMode} end
+
+"""
+    compiled_call(f), dynamic_call(f), Callable{A, S, M}(f)
+
+The caller's choice of mode for one value, which wins over the bound's default;
+the entry strips the wrapper. The long form also fixes the signature, as
+FunctionWrappers does.
+"""
+struct CallAs{M<:CallMode,A,S,F}
+    f::F
+end
+compiled_call(f::F) where {F} = CallAs{CompiledCall,Nothing,Nothing,F}(f)
+dynamic_call(f::F) where {F} = CallAs{DynamicCall,Nothing,Nothing,F}(f)
+(::Type{Callable{A,S,M}})(f::F) where {A,S,M<:CallMode,F} = CallAs{M,A,S,F}(f)
 
 "One trait's view of a value: the witness `w` that says where its operations come from, and the representation `r`."
 struct View{X,W,R}
@@ -93,7 +115,7 @@ supertraits(@nospecialize(X)) = ()
 "`bundle(X)`: for a bundle trait, the traits it names; `t::Table` means `t::(ColTable, RowTable)`."
 bundle(@nospecialize(X)) = nothing
 "`is_trait(X)`: whether `X` was declared with `@trait`."
-is_trait(@nospecialize(X)) = X isa Type && X <: Trait
+is_trait(@nospecialize(X)) = X isa Type && X !== Union{} && X <: Trait
 
 # --- operation calls -------------------------------------------------------
 

@@ -42,7 +42,7 @@ describe(m::AbstractMatrix) = "a matrix"
 describe(t::ColTable) = "a table with $(ncols(t)) columns"
 describe(x) = "something else"
 colmap(f::Callable{Tuple{Float64},Float64}, t::ColTable, i::Int) = map(f, col(t, i))
-colsum(@specialize(f::Callable{Tuple{Float64},Float64}), t::ColTable, i::Int) = sum(f, col(t, i))
+colsum(f::Callable{Tuple{Float64},Float64,CompiledCall}, t::ColTable, i::Int) = sum(f, col(t, i))
 end
 using .Columns
 
@@ -198,11 +198,11 @@ end
 @testset "Callable" begin
     @test colmap(x -> 2x, [[1.0, 2.0]], 1) == [2.0, 4.0]          # erased
     @test colsum(abs2, [[1.0, 2.0]], 1) == 5.0                     # Base's function: always specialized
-    @test colsum(x -> x + 1, [[1.0, 2.0]], 1) == 5.0               # @specialize
+    @test colsum(x -> x + 1, [[1.0, 2.0]], 1) == 5.0               # the bound's default: CompiledCall
     @test_throws TypeError colmap(x -> 1, [[1.0, 2.0]], 1)       # a result of another type: an error, not widening
-    e = TraitWorld.enter_callable(Tuple{Float64}, Float64, false, x -> x)
+    e = TraitWorld.enter_callable(Tuple{Float64}, Float64, nothing, x -> x)
     @test e.f isa TraitWorld.Erased
-    @test TraitWorld.enter_callable(Tuple{Float64}, Float64, false, sin).f === sin
+    @test TraitWorld.enter_callable(Tuple{Float64}, Float64, nothing, sin).f === sin
 end
 
 @testset "closures capturing a trait object are checked" begin
@@ -574,8 +574,8 @@ end
     end) === nothing
     @test Main.TwoPos.f([[1.0]], 1) == 1 && Main.TwoPos.f(1, [[1.0]]) == 2
     # 12. a Base wrapper around a function from above is from above
-    @test TraitWorld.enter_callable(Tuple{Float64}, Float64, false, Base.Fix1(*, 2.0)).f isa Base.Fix1
-    @test TraitWorld.enter_callable(Tuple{Float64}, Float64, false, Base.Fix1(userf2, 2.0)).f isa TraitWorld.Erased
+    @test TraitWorld.enter_callable(Tuple{Float64}, Float64, nothing, Base.Fix1(*, 2.0)).f isa Base.Fix1
+    @test TraitWorld.enter_callable(Tuple{Float64}, Float64, nothing, Base.Fix1(userf2, 2.0)).f isa TraitWorld.Erased
 end
 
 @testset "review: catch rethrows PiracyError; a closed world in a session" begin
@@ -608,4 +608,255 @@ end
     for m in methods(Columns.colmean)
         occursin("RowsX", string(m.module)) && Base.delete_method(m)
     end
+end
+
+# --- poc3 M1: keyword, default and variable arguments -------------------------------------------
+@trait_module module KW
+using TraitWorld, ..Columns
+export colz, colmean_or, cm_all, ncols_sum, describe_kw
+"a bounded keyword that defaults to the trait object itself, and a typed keyword with a constant default"
+colz(t::ColTable, i::Int; baseline::ColTable = t, tol::Float64 = eps()) =
+    (col(t, i) .- colmean(baseline, i)) ./ max(colrange(baseline, i), tol)
+"a positional default: two exported methods"
+colmean_or(t::ColTable, i::Int = 1) = colmean(t, i)
+"a keyword whose default calls an operation, and an untyped keyword"
+cm_all(t::ColTable; cols = 1:ncols(t), scale = 1.0) = [colmean(t, i) * scale for i in cols]
+"a vararg of trait objects"
+ncols_sum(ts::ColTable...) = sum(ncols(t) for t in ts; init = 0)
+describe_kw(t::ColTable; long::Bool = false) = long ? "a table with $(ncols(t)) columns" : "a table"
+describe_kw(x; long::Bool = false) = "not a table"
+end
+using .KW
+@testset "poc3 M1: keyword, default and variable arguments" begin
+    v = [[1.0, 3.0], [2.0, 6.0]]
+    m = Measurements(v)
+    @test colz(m, 1) == [-0.5, 0.5]
+    @test colz(m, 1; baseline = Ramp([2.0, 4.0], 2)) == colz(m, 1; baseline = [[2.0, 4.0]])   # projected at the entry
+    @test colz(m, 1; tol = 10.0) == [-0.1, 0.1]
+    @test_throws TypeError colz(m, 1; tol = 1)                      # declared Float64, as in plain Julia
+    @test_throws TraitBoundError colz(m, 1; baseline = 42)         # no projection: refused at the entry
+    @test colmean_or(m) == 2.0 && colmean_or(m, 2) == 4.0
+    @test cm_all(m) == [2.0, 4.0] && cm_all(m; cols = 2:2, scale = 2.0) == [8.0]
+    @test ncols_sum(m, Ramp([1.0], 3), v) == 7
+    @test ncols_sum() == 0
+    @test describe_kw(m; long = true) == "a table with 2 columns" && describe_kw(42; long = true) == "not a table"
+    @test_throws MethodError ncols_sum(m, 42)
+end
+
+# --- poc3 M2: Callable modes ---------------------------------------------------------------------
+@trait_module module CM
+using TraitWorld, ..Columns
+export cmap, csum, cboth
+cmap(f::Callable{Tuple{Float64},Float64}, t::ColTable, i::Int) = map(f, col(t, i))                   # default: dynamic
+csum(f::Callable{Tuple{Float64},Float64,CompiledCall}, t::ColTable, i::Int) = sum(f, col(t, i))      # default: compiled
+cboth(f::(Callable{Tuple{Float64},Float64}, Callable{Tuple{Int},Int}), x::Float64, n::Int) = (f(x), f(n))
+end
+using .CM
+userdbl(x) = 2x
+@testset "poc3 M2: Callable modes" begin
+    v = [[1.0, 2.0]]
+    @test cmap(userdbl, v, 1) == [2.0, 4.0] && csum(userdbl, v, 1) == 6.0
+    @test TraitWorld.enter_callable(Tuple{Float64}, Float64, nothing, userdbl).f isa TraitWorld.Erased
+    @test TraitWorld.enter_callable(Tuple{Float64}, Float64, CompiledCall, userdbl).f === userdbl
+    @test TraitWorld.enter_callable(Tuple{Float64}, Float64, DynamicCall, compiled_call(userdbl)).f === userdbl   # the value wins
+    @test TraitWorld.enter_callable(Tuple{Float64}, Float64, CompiledCall, dynamic_call(userdbl)).f isa TraitWorld.Erased
+    @test TraitWorld.enter_callable(Tuple{Float64}, Float64, nothing, Callable{Tuple{Float64},Float64,DynamicCall}(userdbl)).f isa TraitWorld.Erased
+    @test_throws TraitBoundError TraitWorld.enter_callable(Tuple{Float64}, Float64, nothing, Callable{Tuple{Int},Int,DynamicCall}(userdbl))
+    @test cmap(compiled_call(userdbl), v, 1) == [2.0, 4.0] && csum(dynamic_call(userdbl), v, 1) == 6.0
+    @test csum(abs2, v, 1) == 5.0                                  # Base's function: a compiled call whatever the default
+    @test cboth(dynamic_call(x -> x + one(x)), 1.5, 2) == (2.5, 3)
+    @test_throws LoadError Core.eval(Main, :(@trait_module module OldSpec
+        using TraitWorld, ..Columns
+        f(@specialize(g::Callable{Tuple{Float64},Float64}), t::ColTable) = g(1.0)
+    end))
+end
+
+# --- poc3 M4: the one-line conformance -----------------------------------------------------------
+@testset "poc3 M4: the one-line conformance" begin
+    toplevel(quote
+        struct Meas1; data::Vector{Vector{Float64}}; end          # the field named data
+        @implement ColTable Meas1
+        struct Meas2; n::Int; cols::Vector{Vector{Float64}}; end  # the one conforming field
+        @implement ColTable Meas2
+        struct Ramp1; base::Vector{Float64}; n::Int; end         # methods: its own representation
+        Columns.ncols(r::Ramp1) = r.n
+        Columns.col(r::Ramp1, i::Int) = r.base .* i
+        @implement ColTable Ramp1
+        struct Nested; data::Meas1; end                           # a field whose type conforms by projection: composed
+        @implement ColTable Nested
+        struct Grid1; data::Matrix{Float64}; end                  # one projection for two traits
+        @implement (ColTable, Main.Rows.RowTable) Grid1
+    end)
+    @test colmean(Main.Meas1([[1.0, 3.0]]), 1) == 2.0
+    @test colmean(Main.Meas2(1, [[1.0, 3.0]]), 1) == 2.0
+    @test colmean(Main.Ramp1([1.0, 3.0], 2), 2) == 4.0
+    @test TraitWorld.implementation(ColTable, Main.Ramp1) isa TraitWorld.ImplRec
+    @test colmean(Main.Nested(Main.Meas1([[1.0, 3.0]])), 1) == 2.0
+    @test overview(Main.Grid1([1.0 2.0; 3.0 4.0])) == (2.0, [1.0, 2.0])
+    e = thrown(quote struct TwoF; a::Vector{Vector{Float64}}; b::Vector{Vector{Float64}}; end; @implement ColTable TwoF end)
+    @test e isa ImplementError && occursin("several fields", e.msg) && occursin("a, b", e.msg)
+    e = thrown(quote struct Abs1; data::AbstractVector{Vector{Float64}}; end; @implement GTable Abs1 end)   # conforms through a family
+    @test e isa ImplementError && occursin("field `data`", e.msg) && occursin("not deeply concrete", e.msg)
+    e = thrown(quote struct Abs2; data::AbstractVector; end; @implement ColTable Abs2 end)                   # conforms to nothing
+    @test e isa ImplementError && occursin("no field of", e.msg)
+    e = thrown(quote struct Part1; n::Int; end; Columns.ncols(r::Part1) = r.n; @implement ColTable Part1 end)
+    @test e isa ImplementError && occursin("not for col", e.msg)
+    e = thrown(quote struct NoF; x::Int; end; @implement ColTable NoF end)
+    @test e isa ImplementError && occursin("no field of", e.msg)
+end
+
+# --- poc3 M3: interface packages, declared calls, handles ---------------------------------------
+module FakeOutside                       # an ordinary package standing in for Makie
+mutable struct Fig; pts::Vector{Tuple{Float64,Float64}}; title::String; end
+newfig() = Fig(Tuple{Float64,Float64}[], "")
+addpoints!(f::Fig, xs, ys; title = "") = (append!(f.pts, zip(xs, ys)); f.title = title; nothing)
+npoints(f::Fig) = length(f.pts)
+title(f::Fig) = f.title
+end
+module FakeInterface
+using TraitWorld, ..FakeOutside
+@interface_package FakeOutside
+@trait_module module Plots
+using TraitWorld
+export Figure, PointSeries, xs, ys, figure, scatter!, npts, ftitle, bad, leak
+@handle Figure
+@trait PointSeries{R} begin
+    xs(r::R)::Vector{Float64}
+    ys(r::R)::Vector{Float64}
+end
+@implement PointSeries{Matrix{Float64}} begin
+    xs(r) = r[:, 1]
+    ys(r) = r[:, 2]
+end
+figure() = @call FakeOutside.newfig()::Figure
+scatter!(f::Figure, t::PointSeries; title::String = "") = @call FakeOutside.addpoints!(f, xs(t), ys(t); title)::Nothing
+npts(f::Figure) = @call FakeOutside.npoints(f)::Int
+ftitle(f::Figure) = @call FakeOutside.title(f)::String
+bad(t::PointSeries, f::Figure) = (f.ref; xs(t))
+leak(t::PointSeries, f::Figure) = @call FakeOutside.addpoints!(f, t, t)::Nothing
+end
+using .Plots
+export Figure, PointSeries, xs, ys, figure, scatter!, npts, ftitle, bad, leak
+end
+@trait_module module UsesPlots
+using TraitWorld, ..FakeInterface
+export plot_it
+plot_it(t::PointSeries) = (f = figure(); scatter!(f, t; title = "two points"); (npts(f), ftitle(f)))
+end
+@testset "poc3 M3: interface packages, declared calls, handles" begin
+    m = [1.0 2.0; 3.0 4.0]
+    @test UsesPlots.plot_it(m) == (2, "two points")
+    f = FakeInterface.figure()
+    @test f isa FakeInterface.Figure && f.ref isa FakeOutside.Fig          # a handle is a value to ordinary code
+    FakeInterface.scatter!(f, m); @test FakeInterface.npts(f) == 2
+    e = try FakeInterface.bad(m, f) catch err; err end
+    @test e isa TraitUseError && occursin("handle is opaque", sprint(showerror, e))
+    e = try FakeInterface.leak(m, f) catch err; err end
+    @test e isa TraitUseError && occursin("never go up", sprint(showerror, e))
+    @test length(TraitWorld.declared_calls(FakeInterface)) == 5
+    @test TraitWorld.INTERFACES[FakeInterface] === FakeOutside
+    e = thrown(quote
+        @trait_module module NoIface
+        using TraitWorld, ..FakeOutside
+        end
+    end)
+    @test e isa LayeringError                                           # the wrapped package itself stays outside
+    e = thrown(quote
+        @trait_module module BadCall
+        using TraitWorld
+        g() = @call Main.FakeOutside.newfig()::Int
+        end
+    end)
+    @test e isa ErrorException && occursin("only inside the trait module of an interface package", e.msg)
+end
+
+# --- poc3 M8: verify_main with keyword entries and declared calls ------------------------------
+module VKW
+using ..KW, ..UsesPlots
+using Main: Measurements
+function main(args::Vector{String})
+    t = Measurements([[1.0, 2.0]])
+    z = colz(t, 1; tol = 0.5)::Vector{Float64}
+    n = plot_it([1.0 2.0; 3.0 4.0])::Tuple{Int,String}
+    return sum(z) + n[1]
+end
+end
+@testset "poc3 M8: verify_main, keyword entries and declared calls" begin
+    VKW.main(String[])
+    r = verify_main(VKW.main, (Vector{String},))
+    @test isclosed(r)
+    @test count(p -> p.first === :declared, r.targets) == 4           # figure, addpoints!, npoints, title
+    @test count(p -> p.first === :worker, r.targets) >= 2             # colz's keyword worker, plot_it's worker
+    @test any(p -> p.first === :declared && p.second <: Tuple{typeof(FakeOutside.newfig)}, r.targets)
+end
+
+# --- poc3 M6: sealing (last: refuse mode deletes the pirates of the session) ------------------------
+@testset "poc3 M6: sealing" begin
+    @test "Julia" in TraitWorld.SEALED && "Columns" in TraitWorld.SEALED     # a trait module seals itself
+    toplevel(:(module BasePirate; Base.sum(x::Vector{Int16}) = Int16(0); end))
+    found = TraitWorld.find_pirates!()
+    @test any(p -> p.definer == "BasePirate" && "Julia" in p.needs, found)
+    @test any(p -> p.definer == "Pirate2", found)                           # Weights.weight(::Float64): Weights is sealed
+    @test_throws PiracyError TraitWorld.check_no_piracy()
+    # warn mode keeps the pirate and reports it once (a full scan, as after a new seal)
+    TraitWorld._RESCAN[] = true
+    @test (@test_logs (:warn, r"BasePirate defines") match_mode=:any TraitWorld._check_loads!()) === nothing
+    @test which(sum, (Vector{Int16},)).module === Main.BasePirate
+    # refuse mode deletes a pirate that loads afterwards, and reports it
+    TraitWorld.find_pirates!()                                              # the cursor past everything so far
+    TraitWorld.piracy_mode!(:refuse)
+    toplevel(:(module BasePirate2; Base.sum(x::Vector{Int32}) = Int32(0); end))
+    @test which(sum, (Vector{Int32},)).module === Main.BasePirate2
+    @test_logs (:error, r"BasePirate2 defines") match_mode=:any TraitWorld._check_loads!()
+    @test which(sum, (Vector{Int32},)).module === Base
+    # a tolerated package is never touched
+    push!(TraitWorld.TOLERATED, "Tolerated1")
+    toplevel(:(module Tolerated1; Base.sum(x::Vector{UInt16}) = UInt16(0); end))
+    @test TraitWorld._check_loads!() === nothing
+    @test which(sum, (Vector{UInt16},)).module === Main.Tolerated1
+    TraitWorld.piracy_mode!(:warn)
+end
+
+# --- poc3 M5: BaseInterface, the door check -----------------------------------------------------
+module PlainGlobals; x = 1; end
+@trait_module module Doors
+using TraitWorld, ..Columns
+bad_eval(t::ColTable) = (eval(:(1 + 1)); ncols(t))
+bad_tls(t::ColTable) = (task_local_storage(); ncols(t))
+bad_module(t::ColTable) = Main.PlainGlobals.x + ncols(t)
+counter = 0
+bad_global(t::ColTable) = counter + ncols(t)
+warns(t::ColTable) = (@warn "a table"; ncols(t))
+prints(t::ColTable) = (println(ncols(t)); ncols(t))
+clean(t::ColTable) = (c = col(t, 1); sum(c) / length(c) + sqrt(abs(minimum(c))) + length(string(ncols(t))))
+end
+@testset "poc3 M5: the door check" begin
+    v = [[1.0, 2.0]]
+    msg(f) = try f(v); "" catch e; sprint(showerror, e) end
+    @test occursin("inward door", msg(Doors.bad_eval)) && occursin("eval", msg(Doors.bad_eval))
+    @test occursin("inward door", msg(Doors.bad_tls))
+    @test occursin("inward door", msg(Doors.bad_module)) || occursin("global", msg(Doors.bad_module))
+    @test occursin("global", msg(Doors.bad_global)) && occursin("counter", msg(Doors.bad_global))
+    @test (@test_logs (:warn, "a table") Doors.warns(v)) == 1                   # an outward door: accepted
+    @test Doors.prints(v) == 1
+    @test Doors.clean(v) == 1.5 + 1.0 + 1
+    W = TraitWorld.WORKER_DOORS
+    key(f) = first(k for k in keys(W) if k.parameters[1] === typeof(f))
+    @test !isempty(W[key(Doors.warns)].outward) && !isempty(W[key(Doors.prints)].outward)
+    @test isempty(W[key(Doors.clean)].outward)
+    # the same door through a declared call is accepted
+    toplevel(quote
+        module TLSInterface
+        using TraitWorld
+        @interface_package Base
+        @trait_module module T
+        using TraitWorld
+        export tls
+        tls() = @call Base.task_local_storage(:tw_probe)::Int
+        end
+        using .T: tls
+        end
+    end)
+    task_local_storage(:tw_probe, 7)
+    @test Main.TLSInterface.tls() == 7
 end

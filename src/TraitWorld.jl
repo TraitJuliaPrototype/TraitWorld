@@ -10,15 +10,28 @@ module TraitWorld
 
 using PrecompileTools: PrecompileTools
 
-export Trait, Callable, TObj, @trait, @implement, @trait_module, @workload,
+export Trait, Callable, CallMode, DynamicCall, CompiledCall, compiled_call, dynamic_call, TObj,
+       @trait, @implement, @trait_module, @workload, @interface_package, @handle, @call, Handle,
        TraitBoundError, TraitUseError, ImplementError, LayeringError, OwnershipError, PiracyError, mode!, verify_main, isclosed,
+       piracy_mode!, check_no_piracy,
        @warn_on_abstract, @error_on_abstract, AbstractTypeError, check_concrete
 
 function __init__()
     m = get(ENV, "JULIA_TRAITWORLD", "")
     isempty(m) || mode!(Symbol(m))
-    # a package load can bring projections and implementations without running @implement
-    push!(Base.package_callbacks, _ -> _bump!())
+    s = get(ENV, "JULIA_TRAITWORLD_SEAL", "")
+    isempty(s) || piracy_mode!(Symbol(s))
+    # the project's tolerations, read before any other package loads
+    proj = Base.active_project()
+    proj === nothing || union!(TOLERATED, _tolerations_of(proj))
+    # the scan's state as serialized by the precompile workload means nothing here: the first
+    # top-level load scans everything loaded before TraitWorld (a pirate may have come first)
+    _RESCAN[] = true
+    _SCAN_WORLD[] = 0
+    empty!(_REPORTED)
+    empty!(_DOOR_FACTS)
+    empty!(_NOT_EXTENSIONS)
+    push!(Base.package_callbacks, _on_package_load)
 end
 
 include("ownership.jl")
@@ -28,7 +41,10 @@ include("trait.jl")
 include("implement.jl")
 include("entry.jl")
 include("trait_module.jl")
+include("interface.jl")
+include("sealing.jl")
 include("checks.jl")
+include("doors.jl")
 include("verify.jl")
 include("concrete.jl")
 
@@ -67,10 +83,25 @@ struct _PCOwn; n::Int; end
     pn(r) = r.n
     pv(r, i) = Float64(i)
 end
+struct _PCOne; data::Vector{Float64}; end
+@implement _PC.PCT _PCOne
+# a private interface package: the registration, declared calls and handles
+module _PCI
+using ..TraitWorld
+@interface_package Base
+@trait_module module P
+using ..TraitWorld
+@handle H
+mk() = @call Base.Ref(1)::H
+rd(h::H) = @call Base.getindex(h)::Int
+tw(t::TraitWorld._PC.PCT, h::H) = rd(h) + TraitWorld._PC.pn(t)
+end
+end
 
 PrecompileTools.@compile_workload begin
     v = [1.0, 2.0]
-    _PC.pcsum(v); _PC.pcsum(_PCProj(v)); _PC.pcsum(_PCDyn(v)); _PC.pcsum(_PCOwn(2))
+    _PC.pcsum(v); _PC.pcsum(_PCProj(v)); _PC.pcsum(_PCDyn(v)); _PC.pcsum(_PCOwn(2)); _PC.pcsum(_PCOne(v))
+    macroexpand(TraitWorld, :(@implement _PC.PCT _PCOne))
     _PC.pcboth(v, _PCProj(v))
     _PC.pcmap(abs, v); _PC.pcmap(x -> 2x, _PCProj(v))
     macroexpand(_PC, :(@implement PCT{Vector{Int}} begin pn(r) = 1; pv(r, i) = 1.0 end))
@@ -87,7 +118,10 @@ PrecompileTools.@compile_workload begin
     _sig_alternatives(Tuple{typeof(sum),Union{Int,Float64},Union{Int,Float32},Union{Int8,Int16}})
     _sig_alternatives(Tuple{typeof(sum),Union{Int,Float64},Union{Int,Float32}})
     owned_method(first(methods(TraitWorld.owner)))
+    h = _PCI.P.mk(); _PCI.P.rd(h); _PCI.P.tw(v, h)
+    is_interface_root(_PCI); find_pirates!()
 end
+precompile(_on_package_load, (Base.PkgId,))
 
 """
     @workload begin … end

@@ -153,52 +153,69 @@ end
 struct _Arg
     name::Any
     ann::Any        # the annotation as written, or nothing
-    kind::Symbol    # :plain, :untyped, :trait, :callable, :vararg
+    kind::Symbol    # :plain, :untyped, :trait, :callable, :callables, :vararg, :vararg_trait
     traits::Vector{Any}
     A::Any
     S::Any
-    spec::Bool
+    M::Any          # the Callable mode the bound names, or nothing (either mode, the default supplied)
+    default::Any    # a keyword's default, or nothing
+    required::Bool  # a keyword without a default
+end
+_Arg(name, ann, kind, traits, A, S, M) = _Arg(name, ann, kind, traits, A, S, M, nothing, false)
+
+"The parameters of a `Callable` bound: `(A, S, M)`, with `M === nothing` when the bound leaves the mode open."
+function _callable_params(@nospecialize(v))
+    v isa Type && v !== Union{} && v <: Callable || return nothing
+    u = Base.unwrap_unionall(v)
+    u isa DataType && u.name === Base.typename(Callable) || return nothing
+    A, S, M = u.parameters
+    (A isa TypeVar || S isa TypeVar) && return nothing
+    return (A, S, M isa TypeVar ? nothing : M)
 end
 
 function _classify(mod::Module, a, unbounded::Vector{Symbol} = Symbol[])
-    spec = false
     if a isa Expr && a.head === :macrocall && a.args[1] === Symbol("@specialize")
-        spec = true
-        a = a.args[end]
+        error("@trait_module: `@specialize` is retired; write the mode in the bound, `f::Callable{A, S, CompiledCall}`, " *
+              "or let the caller choose with `compiled_call(f)`")
     end
     if a isa Symbol
-        return _Arg(a, nothing, :untyped, Any[], nothing, nothing, spec)
+        return _Arg(a, nothing, :untyped, Any[], nothing, nothing, nothing)
     elseif a isa Expr && a.head === :...
-        return _Arg(a, nothing, :vararg, Any[], nothing, nothing, false)
+        inner = _classify(mod, a.args[1], unbounded)
+        inner.kind === :trait && return _Arg(inner.name, inner.ann, :vararg_trait, inner.traits, nothing, nothing, nothing)
+        inner.kind in (:callable, :callables) && error("@trait_module: a vararg of `Callable` is not supported")
+        return _Arg(a, nothing, :vararg, Any[], nothing, nothing, nothing)
     elseif a isa Expr && a.head === :kw
-        error("@trait_module: optional arguments are not supported in functions with trait-bounded arguments")
+        x = _classify(mod, a.args[1], unbounded)
+        return _Arg(x.name, x.ann, x.kind, x.traits, x.A, x.S, x.M, a.args[2], false)
     elseif a isa Expr && a.head === :(::)
         name, ann = length(a.args) == 2 ? (a.args[1], a.args[2]) : (gensym(:arg), a.args[1])
         # `x::T where T` with no bound is untyped: it must not take the entry's place
-        ann isa Symbol && ann in unbounded && return _Arg(name, ann, :untyped, Any[], nothing, nothing, spec)
+        ann isa Symbol && ann in unbounded && return _Arg(name, ann, :untyped, Any[], nothing, nothing, nothing)
         if ann isa Expr && ann.head === :tuple
             vs = Any[_tryeval(mod, x) for x in ann.args]
-            if all(v -> v isa DataType && v <: Callable, vs)
+            cps = Any[_callable_params(v) for v in vs]
+            if all(c -> c !== nothing, cps)
                 # several Callable bounds: the function is called at each signature
-                return _Arg(name, ann, :callables, Any[(v.parameters[1], v.parameters[2]) for v in vs], nothing, nothing, spec)
+                return _Arg(name, ann, :callables, cps, nothing, nothing, nothing)
             end
             traits = Any[]
             for (x, v) in zip(ann.args, vs)
                 is_trait(v) || error("@trait_module: `$x` in the bound `$ann` is not a trait")
                 append!(traits, bound_traits(v))
             end
-            return _Arg(name, ann, :trait, traits, nothing, nothing, spec)
+            return _Arg(name, ann, :trait, traits, nothing, nothing, nothing)
         end
         v = _tryeval(mod, ann)
-        if v isa Type && v !== Union{} && v <: Callable && v isa DataType
-            A, S = v.parameters
-            return _Arg(name, ann, :callable, Any[], A, S, spec)
+        cp = _callable_params(v)
+        if cp !== nothing
+            return _Arg(name, ann, :callable, Any[], cp[1], cp[2], cp[3])
         elseif is_trait(v)
-            return _Arg(name, ann, :trait, bound_traits(v), nothing, nothing, spec)
+            return _Arg(name, ann, :trait, bound_traits(v), nothing, nothing, nothing)
         end
-        return _Arg(name, ann, :plain, Any[], nothing, nothing, spec)
+        return _Arg(name, ann, :plain, Any[], nothing, nothing, nothing)
     end
-    return _Arg(a, nothing, :plain, Any[], nothing, nothing, spec)
+    return _Arg(a, nothing, :plain, Any[], nothing, nothing, nothing)
 end
 
 function _tryeval(mod::Module, ex)
@@ -231,6 +248,78 @@ function _registry(mod::Module, key, which::Symbol)
     return getfield(regmod, which)::Dict{Any,Vector{Any}}
 end
 
+"A keyword parameter of a trait-bounded function, classified like a positional one."
+function _classify_kw(mod::Module, p, unbounded::Vector{Symbol})
+    if p isa Expr && p.head === :...
+        return _Arg(p.args[1], nothing, :kwrest, Any[], nothing, nothing, nothing)
+    end
+    x = _classify(mod, p, unbounded)
+    required = !(p isa Expr && p.head === :kw)
+    x.kind === :untyped && (x = _Arg(x.name, nothing, :plain, Any[], nothing, nothing, nothing, x.default, required))
+    x.kind in (:vararg, :vararg_trait, :callables) && error("@trait_module: unsupported keyword parameter `$p`")
+    return _Arg(x.name, x.ann, x.kind, x.traits, x.A, x.S, x.M, x.default, required)
+end
+
+"Reassemble a signature: `f(args...; kws...)::ret where {wheres...}`."
+function _mksig(fname, args, kws, ret, wheres)
+    s = isempty(kws) ? Expr(:call, fname, args...) : Expr(:call, fname, Expr(:parameters, kws...), args...)
+    ret === nothing || (s = Expr(:(::), s, ret))
+    for w in wheres
+        s = Expr(:where, s, w)
+    end
+    return s
+end
+
+"""
+Positional defaults are what Julia makes of them: the full method, and one
+shorter method per default whose body calls the full one. Each is then a
+trait-bounded definition of its own, with its own entry (rule 3: the shorter
+method passes its own trait object on).
+"""
+function _expand_defaults(mod::Module, head, fname, rawargs, kwparams, wheres, ret, body)
+    names = Any[]
+    full = Any[]
+    for a in rawargs
+        if a isa Expr && a.head === :kw
+            push!(full, a.args[1])
+        else
+            push!(full, a)
+        end
+        x = a isa Expr && a.head === :kw ? a.args[1] : a
+        x isa Expr && x.head === :(::) && (x = length(x.args) == 2 ? x.args[1] : gensym(:arg))
+        x isa Expr && x.head === :... && (x = x.args[1] isa Expr ? x.args[1].args[1] : x.args[1])
+        push!(names, x)
+    end
+    firstdef = findfirst(a -> a isa Expr && a.head === :kw, rawargs)
+    defs = Any[Expr(head, _mksig(fname, full, kwparams, ret, wheres), body)]
+    kwforward = isempty(kwparams) ? Any[] : Any[Expr(:parameters, Expr(:..., :kws))]
+    kwtake = isempty(kwparams) ? Any[] : Any[Expr(:..., :kws)]
+    for k in length(rawargs):-1:firstdef
+        # the method without the last (length(rawargs) - k + 1) arguments
+        taken = full[1:k-1]
+        callargs = Any[names[1:k-1]..., Any[rawargs[j].args[2] for j in k:length(rawargs)]...]
+        call = isempty(kwforward) ? Expr(:call, fname, callargs...) : Expr(:call, fname, kwforward[1], callargs...)
+        push!(defs, Expr(:(=), _mksig(fname, taken, kwtake, nothing, wheres), call))
+    end
+    worker = nothing
+    rest = Any[]
+    for d in defs
+        r = _rewrite_fdef(mod, d)
+        if r === nothing
+            push!(rest, d)
+        elseif worker === nothing
+            worker, rr = r
+            append!(rest, rr)
+        else
+            w, rr = r
+            push!(rest, w)
+            append!(rest, rr)
+        end
+    end
+    worker === nothing && return nothing
+    return worker, rest
+end
+
 function _rewrite_fdef(mod::Module, ex)
     head = ex.head
     sig, body = ex.args[1], ex.args[2]
@@ -246,58 +335,78 @@ function _rewrite_fdef(mod::Module, ex)
     end
     fname = sig.args[1]
     rawargs = sig.args[2:end]
-    if any(a -> a isa Expr && a.head === :parameters, rawargs)
-        return nothing      # keyword arguments: plain Julia (trait-bounded ones are rejected below)
+    kwparams = Any[]
+    if !isempty(rawargs) && rawargs[1] isa Expr && rawargs[1].head === :parameters
+        kwparams = rawargs[1].args
+        rawargs = rawargs[2:end]
     end
     unbounded = Symbol[w for w in wheres if w isa Symbol]
     args = [_classify(mod, a, unbounded) for a in rawargs]
+    kws = [_classify_kw(mod, p, unbounded) for p in kwparams]
+    istraitdef = any(x -> x.kind in (:trait, :callable, :callables, :vararg_trait), args) ||
+                 any(x -> x.kind in (:trait, :callable), kws)
+    if istraitdef && any(a -> a isa Expr && a.head === :kw, rawargs)
+        return _expand_defaults(mod, head, fname, rawargs, kwparams, wheres, ret, body)
+    end
     key = _fkey(mod, fname)
-    pattern = Any[(x.kind in (:trait, :callable, :callables, :untyped)) ? nothing : x.ann for x in args]
+    pattern = Any[(x.kind in (:trait, :callable, :callables, :untyped, :vararg_trait)) ? nothing : x.ann for x in args]
     entries = _registry(mod, key, :__tw_entries__)
     plain = _registry(mod, key, :__tw_plain__)
-    istraitdef = any(x -> x.kind in (:trait, :callable, :callables), args)
     if !istraitdef
-        # an untyped method shaped like an existing entry is that entry's fallback
+        # an untyped method shaped like an existing entry is that entry's fallback (keywords and defaults kept)
         if entries !== nothing && pattern in get(entries, key, Any[])
-            newcall = Expr(:call, fname, :(::$TraitWorld.Untyped), rawargs...)
-            s = ret === nothing ? newcall : Expr(:(::), newcall, ret)
-            for w in wheres
-                s = Expr(:where, s, w)
-            end
+            s = _mksig(fname, Any[:(::$TraitWorld.Untyped), rawargs...], kwparams, ret, wheres)
             return Expr(head, s, body), Any[:($TraitWorld._check_methods(@__MODULE__, $(QuoteNode(fname))))]
         end
         plain === nothing || push!(get!(plain, key, Any[]), pattern)
         return ex, Any[:($TraitWorld._check_methods(@__MODULE__, $(QuoteNode(fname)))),
                        :($TraitWorld._check_entries_intact(@__MODULE__, $(QuoteNode(fname))))]
     end
-    any(x -> x.kind === :vararg, args) && error("@trait_module: varargs are not supported in `$fname` with trait-bounded arguments")
+    nva = count(x -> x.kind in (:vararg, :vararg_trait), args)
+    nva <= 1 && (nva == 0 || args[end].kind in (:vararg, :vararg_trait)) ||
+        error("@trait_module: `$fname` has a vararg that is not last")
     # --- the worker
     wargs = Any[]
     newwheres = Any[]
+    function tobj_bound(x)
+        T = gensym(:T)
+        closure = Any[]
+        for X in x.traits, Y in trait_closure(X)
+            any(z -> z === Y, closure) || push!(closure, Y)
+        end
+        push!(newwheres, Expr(:(>:), T, Expr(:curly, :Union, closure...)))
+        return :($TraitWorld.TObj{$T})
+    end
     for x in args
         if x.kind === :trait
-            T = gensym(:T)
-            closure = Any[]
-            for X in x.traits, Y in trait_closure(X)
-                any(z -> z === Y, closure) || push!(closure, Y)
-            end
-            push!(newwheres, Expr(:(>:), T, Expr(:curly, :Union, closure...)))
-            push!(wargs, :($(x.name)::$TraitWorld.TObj{$T}))
+            push!(wargs, :($(x.name)::$(tobj_bound(x))))
+        elseif x.kind === :vararg_trait
+            push!(wargs, Expr(:..., :($(x.name)::$(tobj_bound(x)))))
         elseif x.kind === :callable
             push!(wargs, :($(x.name)::$TraitWorld.CObj{$(x.A),$(x.S)}))
         elseif x.kind === :callables
-            cs = [:($TraitWorld.CObj{$A,$S}) for (A, S) in x.traits]
+            cs = [:($TraitWorld.CObj{$A,$S}) for (A, S, _) in x.traits]
             push!(wargs, :($(x.name)::$TraitWorld.CMulti{<:Tuple{$(cs...)}}))
         elseif x.kind === :untyped
             push!(wargs, x.name)
+        elseif x.kind === :vararg
+            push!(wargs, x.name)                      # as written, `xs::Int...` or `xs...`
         else
             push!(wargs, x.ann === nothing ? x.name : :($(x.name)::$(x.ann)))
         end
     end
-    wsig = Expr(:call, fname, wargs...)
-    ret === nothing || (wsig = Expr(:(::), wsig, ret))
-    allwheres = Any[wheres..., newwheres...]
-    isempty(allwheres) || (wsig = Expr(:where, wsig, allwheres...))
+    wkws = Any[]
+    for x in kws
+        if x.kind === :kwrest
+            push!(wkws, Expr(:..., x.name))
+            continue
+        end
+        lhs = x.kind === :trait ? :($(x.name)::$TraitWorld.TObj) :
+              x.kind === :callable ? :($(x.name)::$TraitWorld.CObj{$(x.A),$(x.S)}) :
+              x.ann === nothing ? x.name : :($(x.name)::$(x.ann))
+        push!(wkws, x.required ? lhs : Expr(:kw, lhs, x.default))
+    end
+    wsig = _mksig(fname, wargs, wkws, ret, Any[wheres..., newwheres...])
     worker = Expr(head, wsig, _rethrow_piracy(body))
     rest = Any[]
     # --- the entry, once per shape
@@ -312,23 +421,33 @@ function _rewrite_fdef(mod::Module, ex)
             owner(key[1]) === owner(mod) || error("@trait_module: `$fname` belongs to $(key[1]); $(mod) may add trait-bounded " *
                                                   "methods to it only where it already has an entry of that shape (rule 5)")
         end
-        nargs = length(args)
+        nargs = nva == 0 ? length(args) : -1
         eargs = Any[]
         stmts = Any[]
         callnames = Any[]
-        for (i, x) in enumerate(args)
+        for x in args
             nm = x.name
-            push!(callnames, nm)
-            if x.kind === :trait
+            if x.kind in (:trait, :callable, :callables)
                 push!(eargs, :(@nospecialize($nm)))
-            elseif x.kind === :callable || x.kind === :callables
-                push!(eargs, :(@nospecialize($nm)))
+                push!(callnames, nm)
+            elseif x.kind === :vararg_trait
+                push!(eargs, :(@nospecialize($nm...)))
+                push!(callnames, Expr(:..., nm))
+            elseif x.kind === :vararg
+                push!(eargs, x.ann)                   # as written
+                push!(callnames, Expr(:..., nm))
             elseif x.kind === :untyped
                 push!(eargs, nm)
+                push!(callnames, nm)
             else
                 push!(eargs, x.ann === nothing ? nm : :($nm::$(x.ann)))
+                push!(callnames, nm)
             end
         end
+        haskw = !isempty(kws)
+        kwname = gensym(:kws)
+        ntname = gensym(:nt)
+        haskw && push!(stmts, :($ntname = Base.values($kwname)))
         newnames = Any[]
         for (i, x) in enumerate(args)
             if x.kind === :trait
@@ -336,24 +455,51 @@ function _rewrite_fdef(mod::Module, ex)
                 cache = gensym(Symbol(x.name, :_cache))
                 push!(rest, :(const $cache = $TraitWorld.EntryCache()))
                 push!(stmts, :($v = $TraitWorld.enter($cache, $fname, $i, $nargs, $(x.name))))
-                push!(stmts, :($v === $TraitWorld.NOTRAIT && return $TraitWorld.fallback($fname, $(callnames...))))
+                fb = haskw ? :($TraitWorld.kwfallback($ntname, $fname, $(callnames...))) : :($TraitWorld.fallback($fname, $(callnames...)))
+                push!(stmts, :($v === $TraitWorld.NOTRAIT && return $fb))
                 push!(newnames, v)
+            elseif x.kind === :vararg_trait
+                v = gensym(Symbol(x.name, :_views))
+                cache = gensym(Symbol(x.name, :_cache))
+                push!(rest, :(const $cache = $TraitWorld.EntryCache()))
+                push!(stmts, :($v = $TraitWorld.enter_each($cache, $fname, $i, $(x.name))))
+                fb = haskw ? :($TraitWorld.kwfallback($ntname, $fname, $(callnames...))) : :($TraitWorld.fallback($fname, $(callnames...)))
+                push!(stmts, :($v === $TraitWorld.NOTRAIT && return $fb))
+                push!(newnames, Expr(:..., v))
             elseif x.kind === :callable
                 v = gensym(Symbol(x.name, :_fn))
-                push!(stmts, :($v = $TraitWorld.enter_callable($(x.A), $(x.S), $(x.spec), $(x.name))))
+                push!(stmts, :($v = $TraitWorld.enter_callable($(x.A), $(x.S), $(x.M === nothing ? :nothing : x.M), $(x.name))))
                 push!(newnames, v)
             elseif x.kind === :callables
                 v = gensym(Symbol(x.name, :_fn))
-                sigs = Expr(:tuple, [Expr(:tuple, A, S) for (A, S) in x.traits]...)
-                push!(stmts, :($v = $TraitWorld.enter_callables($sigs, $(x.spec), $(x.name))))
+                sigs = Expr(:tuple, [Expr(:tuple, A, S, M === nothing ? :nothing : M) for (A, S, M) in x.traits]...)
+                push!(stmts, :($v = $TraitWorld.enter_callables($sigs, $(x.name))))
                 push!(newnames, v)
+            elseif x.kind === :vararg
+                push!(newnames, Expr(:..., x.name))
             else
                 push!(newnames, x.name)
             end
         end
-        push!(stmts, :(return $TraitWorld.checked_call($fname, $(newnames...))))
-        kept = Any[w for w in wheres if any(x -> x.kind === :plain && x.ann !== nothing && _uses(x.ann, _wherevar(w)), args)]
-        esig = Expr(:call, fname, eargs...)
+        for x in kws
+            x.kind in (:trait, :callable) || continue
+            k = QuoteNode(x.name)
+            if x.kind === :trait
+                cache = gensym(Symbol(x.name, :_kwcache))
+                push!(rest, :(const $cache = $TraitWorld.EntryCache()))
+                tr = Expr(:tuple, x.traits...)
+                push!(stmts, :($ntname = $TraitWorld.enter_kw($cache, $tr, $fname, $k, $ntname)))
+            else
+                push!(stmts, :($ntname = $TraitWorld.enter_kw_callable($(x.A), $(x.S), $(x.M === nothing ? :nothing : x.M), $k, $ntname)))
+            end
+        end
+        if haskw
+            push!(stmts, :(return $TraitWorld.checked_kwcall($ntname, $fname, $(newnames...))))
+        else
+            push!(stmts, :(return $TraitWorld.checked_call($fname, $(newnames...))))
+        end
+        kept = Any[w for w in wheres if any(x -> x.kind in (:plain, :vararg) && x.ann !== nothing && _uses(x.ann, _wherevar(w)), args)]
+        esig = haskw ? Expr(:call, fname, Expr(:parameters, Expr(:..., kwname)), eargs...) : Expr(:call, fname, eargs...)
         isempty(kept) || (esig = Expr(:where, esig, kept...))
         push!(rest, Expr(:function, esig, Expr(:block, stmts...)))
         if entries !== nothing
@@ -436,7 +582,7 @@ function _check_import(mod::Module, ex::Expr)
     end
     for p in paths
         target = _module_path(mod, p)
-        is_trait_world(target) || throw(LayeringError(
+        is_trait_world(target) || is_interface_root(target) || throw(LayeringError(
             "trait module $mod imports $target, which is outside the trait world. Layering (rule 1): ordinary code may " *
             "use the trait world, the trait world uses only itself. Make $target a trait module, or call it from an " *
             "ordinary module that uses both."))
@@ -482,9 +628,10 @@ function _finish_module(mod::Module)
     # imports made outside the checked statements (before the block) count too
     for u in ccall(:jl_module_usings, Any, (Any,), mod)::Vector{Any}
         u isa Module || continue
-        is_trait_world(u) || throw(LayeringError(
+        is_trait_world(u) || is_interface_root(u) || throw(LayeringError(
             "trait module $mod uses $u, which is outside the trait world (rule 1)"))
     end
+    seal!(mod)
     isdefined(mod, :__tw_entries__) || return nothing
     # this module's functions, and other modules' functions it gave workers to
     ks = Any[k for k in keys(mod.__tw_entries__) if k[1] === mod]
