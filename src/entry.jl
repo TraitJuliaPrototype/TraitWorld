@@ -94,6 +94,7 @@ end
 
 @noinline function _enter_slow(c::EntryCache, @nospecialize(f), pos::Int, nargs::Int, @nospecialize(t))
     b = Base.invokelatest(_builder, f, pos, nargs, typeof(t))
+    b === NOTRAIT || _vc_note_builder(b, typeof(t))
     @lock _LOCK begin
         d = c.gen == GENERATION[] ? copy(c.builders) : IdDict{Any,Any}()
         d[typeof(t)] = b

@@ -122,6 +122,7 @@ function _on_package_load(id::Base.PkgId)
     Base.inferencebarrier(_filter_scan!)(m)
     (isdefined(m, :__trait_module__) || _has_trait_module(m)) && seal!(m)   # a trait package seals itself (no rescan needed)
     Base.toplevel_load[] && _check_loads!()                                  # once per `using`, nested loads included
+    Base.toplevel_load[] && Base.inferencebarrier(_vc_load!)()               # the view caches of what is loaded now
     return nothing
 end
 

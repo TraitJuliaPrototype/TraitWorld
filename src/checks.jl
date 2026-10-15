@@ -297,9 +297,11 @@ _noescape(::Union{TObj,View,CObj,CMulti}) = throw(TraitUseError(["a trait object
 
 @noinline function _check_once(flag::Base.RefValue{Bool}, @nospecialize(sig))
     CLOSED_WORLD[] && (flag[] = true; return nothing)      # checked by verify_main at build time
+    sig in _VC_CHECKED && (flag[] = true; return nothing)   # checked when its view cache was built
     ps = Base.invokelatest(worker_problems, sig)::Vector{String}
     isempty(ps) || throw(TraitUseError(unique(ps)))
     Base.invokelatest(_check_concrete, sig)
     flag[] = true
+    _vc_note_worker(sig)                                   # compiled in this session: for a view cache
     return nothing
 end

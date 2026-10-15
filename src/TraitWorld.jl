@@ -8,12 +8,16 @@ defined.
 """
 module TraitWorld
 
+"Marks TraitWorld's code for the patched Julia's load-time filter (attic/binary): the machinery is trait-world code."
+const __trait_world_machinery__ = true
+
 using PrecompileTools: PrecompileTools
+using Serialization: Serialization
 
 export Trait, Callable, CallMode, DynamicCall, CompiledCall, compiled_call, dynamic_call, TObj,
        @trait, @implement, @trait_module, @workload, @trait_wrapper, @handle, @call, Handle,
        TraitBoundError, TraitUseError, ImplementError, LayeringError, OwnershipError, PiracyError, mode!, verify_main, isclosed,
-       piracy_mode!, check_no_piracy,
+       piracy_mode!, check_no_piracy, viewcache_flush,
        @warn_on_abstract, @error_on_abstract, AbstractTypeError, check_concrete
 
 function __init__()
@@ -33,6 +37,7 @@ function __init__()
     empty!(_NOT_EXTENSIONS)
     empty!(WRAPPERS); empty!(DELEGATES)
     _filter_init!()
+    _vc_init!()
     push!(Base.package_callbacks, _on_package_load)
 end
 
@@ -50,6 +55,7 @@ include("checks.jl")
 include("doors.jl")
 include("verify.jl")
 include("concrete.jl")
+include("viewcache.jl")
 
 # ---------------------------------------------------------------------------
 # Precompile the machinery itself: macro expansion, registration, checks,
@@ -124,6 +130,9 @@ PrecompileTools.@compile_workload begin
     is_declarer(_PCI); is_wrapped(_PCI); find_pirates!()
 end
 precompile(_on_package_load, (Base.PkgId,))
+precompile(_vc_load!, ())
+precompile(_register_wrapper!, (Module, Module, Tuple{}))
+precompile(viewcache_flush, ())
 
 """
     @workload begin … end

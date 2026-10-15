@@ -2,7 +2,7 @@
 
 julia_version = "1.12.2"
 manifest_format = "2.0"
-project_hash = "9362260a7235c9aafd7e90af212a08d52e18ead8"
+project_hash = "a53ab8eb379c8d8d60415abe84144c70eb4ae597"
 
 [[deps.Dates]]
 deps = ["Printf"]
@@ -26,13 +26,17 @@ deps = ["Unicode"]
 uuid = "de0858da-6303-5e67-8744-51eddeeeb8d7"
 version = "1.11.0"
 
+[[deps.Serialization]]
+uuid = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
+version = "1.11.0"
+
 [[deps.TOML]]
 deps = ["Dates"]
 uuid = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
 version = "1.0.3"
 
 [[deps.TraitWorld]]
-deps = ["PrecompileTools"]
+deps = ["PrecompileTools", "Serialization"]
 path = "."
 uuid = "7a3c1e52-9b4d-4f6e-8a21-5d0c3b9e7f14"
 version = "0.1.0"

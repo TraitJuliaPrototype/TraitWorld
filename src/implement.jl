@@ -213,6 +213,14 @@ end
 _existing_defaults(@nospecialize(X), @nospecialize(R)) =
     Tuple(op for op in _ops(X) if _hasdefault(X, op) && !_has_op_method(X, op, R))
 
+# behind an inference barrier: `first.(found)` over a `Vector{Any}` gave the
+# builder's code an edge to `first(::Any)`, which DataStructures extends, so
+# loading CSV before TraitWorld invalidated every builder at load (view caches, x12)
+@noinline function _ambiguous_generic(@nospecialize(X), @nospecialize(R), found::Vector{Any})
+    throw(ImplementError("$R matches $(length(found)) generic implementations of $X " *
+                         "($(join(first.(found), ", "))), none more specific: add a specific implementation"))
+end
+
 function _witness(@nospecialize(X), @nospecialize(R))
     rec = _impl(X, R)
     if rec isa ImplRec
@@ -242,8 +250,7 @@ function _witness(@nospecialize(X), @nospecialize(R))
         push!(found, (k, g, subs))
     end
     isempty(found) && return nothing
-    length(found) > 1 && throw(ImplementError("$R matches $(length(found)) generic implementations of $X " *
-                                              "($(join(first.(found), ", "))), none more specific: add a specific implementation"))
+    length(found) > 1 && Base.inferencebarrier(_ambiguous_generic)(X, R, found)
     k, g, subs = found[1]
     sub = Tuple(Wit{Y}(wy) for (Y, wy) in subs)
     w = Generic{X,k,typeof(sub),g.defaults}(sub)

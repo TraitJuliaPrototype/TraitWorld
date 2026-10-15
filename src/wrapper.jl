@@ -108,6 +108,11 @@ end
 const _FILTER_MODS = Any[]          # rooted here, read by the C side
 const _FILTER_NAMES = Any[]
 const _FILTER_ON = Ref(false)
+# Measurements only (x13): packages treated as if they were trait-world code,
+# `JULIA_TW_PROTECT=Makie,CairoMakie,…`. Unsound for ordinary code in general
+# (an ordinary package may receive values of outside types); sound for a session
+# in which such packages are reached only with values of their own view.
+const _PROTECT = String[]
 
 function _filter_init!()
     _FILTER_ON[] = false
@@ -119,9 +124,17 @@ function _filter_init!()
     end
     ok || return nothing
     empty!(_FILTER_NAMES); append!(_FILTER_NAMES, collect(_stdlib_names()))
+    empty!(_PROTECT); append!(_PROTECT, filter(!isempty, split(get(ENV, "JULIA_TW_PROTECT", ""), ',')))
     empty!(_FILTER_MODS); push!(_FILTER_MODS, TraitWorld)
     _FILTER_ON[] = true
     _filter_push!()
+    # the load-time half (base/staticdata.jl of the same build): edges of trait-world
+    # code in a package image are not failed by outside, owned methods
+    if isdefined(Base.StaticData, :_tw_load_filter)
+        Base.StaticData._tw_modules[] = _FILTER_MODS
+        Base.StaticData._tw_julia_names[] = _FILTER_NAMES
+        Base.StaticData._tw_load_filter[] = Int8(1)
+    end
     return nothing
 end
 _filter_push!() = (ccall(:jl_set_trait_world_filter, Cvoid, (Any, Any), _FILTER_MODS, _FILTER_NAMES); nothing)
@@ -138,6 +151,7 @@ end
 function _filter_scan!(r::Module)
     _FILTER_ON[] || return nothing
     isdefined(r, :__trait_module__) && _filter_add!(r)
+    isempty(_PROTECT) || String(nameof(r)) in _PROTECT && _filter_add!(r)
     for n in names(r; all = true, imported = false)
         isdefined(r, n) || continue
         x = getglobal(r, n)
@@ -147,3 +161,5 @@ function _filter_scan!(r::Module)
 end
 "Invalidations the patched Julia's filter skipped so far (0 on stock Julia)."
 filter_skipped() = _FILTER_ON[] ? unsafe_load(cglobal(:jl_tw_skipped, Csize_t)) : 0
+"Edges of trait-world code in package images that the patched Julia's load-time filter kept (0 on stock Julia)."
+load_filter_skipped() = _FILTER_ON[] && isdefined(Base.StaticData, :_tw_skipped) ? Base.StaticData._tw_skipped[] : 0
