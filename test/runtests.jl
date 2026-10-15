@@ -815,6 +815,11 @@ end
     @test TraitWorld._check_loads!() === nothing
     @test which(sum, (Vector{UInt16},)).module === Main.Tolerated1
     TraitWorld.piracy_mode!(:warn)
+    # a call method of a sealed callable type: not bound to any name, found in the global method table
+    toplevel(:(module FixPirate; (f::Base.Fix1{typeof(sum)})(x::Vector{Int8}) = Int8(0); end))
+    @test any(p -> p.definer == "FixPirate", TraitWorld.find_pirates!())
+    # a loaded package that is no extension is remembered as such (the scan asks once per method)
+    @test TraitWorld._extension_parent(TraitWorld) === nothing && TraitWorld in TraitWorld._NOT_EXTENSIONS
 end
 
 # --- poc3 M5: BaseInterface, the door check -----------------------------------------------------
@@ -829,6 +834,8 @@ bad_global(t::ColTable) = counter + ncols(t)
 warns(t::ColTable) = (@warn "a table"; ncols(t))
 prints(t::ColTable) = (println(ncols(t)); ncols(t))
 clean(t::ColTable) = (c = col(t, 1); sum(c) / length(c) + sqrt(abs(minimum(c))) + length(string(ncols(t))))
+deep(t::ColTable) = length(string(col(t, 1)[1])) + ncols(t)
+barrier_eval(t::ColTable) = (f = Base.inferencebarrier(Base.eval); f(Main, :(1 + 1)); ncols(t))
 end
 @testset "poc3 M5: the door check" begin
     v = [[1.0, 2.0]]
@@ -844,6 +851,15 @@ end
     key(f) = first(k for k in keys(W) if k.parameters[1] === typeof(f))
     @test !isempty(W[key(Doors.warns)].outward) && !isempty(W[key(Doors.prints)].outward)
     @test isempty(W[key(Doors.clean)].outward)
+    # the walk's budget: its end is reported whatever the concrete level
+    old = TraitWorld.DOOR_BUDGET[]
+    TraitWorld.DOOR_BUDGET[] = 3
+    empty!(TraitWorld._DOOR_FACTS)
+    @test (@test_logs (:warn, r"stopped at its budget") match_mode=:any Doors.deep(v)) == 4
+    @test W[key(Doors.deep)].truncated
+    TraitWorld.DOOR_BUDGET[] = old
+    # a door behind a dynamic call: the design checks the target when it compiles; stock Julia does not
+    @test_broken occursin("inward door", msg(Doors.barrier_eval))
     # the same door through a declared call is accepted
     toplevel(quote
         module TLSInterface

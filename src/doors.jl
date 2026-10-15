@@ -34,8 +34,8 @@ const OUTWARD_DOORS = Base.IdSet{Any}([
     Base.display, Base.redisplay, Base.redirect_stdout, Base.redirect_stderr, Base.redirect_stdin,
     Base.Multimedia.displays, Base.Multimedia.pushdisplay, Base.Multimedia.popdisplay,
 ])
-"Outward doors by name, for functions whose no-IO methods read `stdout`: `print`, `println`, `show`, `printstyled`, `flush`."
-const _STDOUT_DOORS = (:print, :println, :show, :printstyled, :flush, :displaysize, :repr)
+"Outward doors by name, for functions whose no-IO methods read `stdout`: `print`, `println`, `show`, `printstyled`, `flush`, `displaysize()` (`repr` writes to its own buffer)."
+const _STDOUT_DOORS = (:print, :println, :show, :printstyled, :flush, :displaysize)
 
 "An inward door reached through a `ccall`."
 _inward_ccall(name) = name isa Symbol && name in (:jl_apply, :jl_toplevel_eval, :jl_toplevel_eval_in, :jl_eval_string,
@@ -148,7 +148,9 @@ function door_facts(mi::Core.MethodInstance, world::UInt, budget::Ref{Int}, stac
                                            (length(ex.args) < 2 || !(_CC.widenconst(_CC.argextype(ex.args[2], src, sptypes)) <: IO)))
                 push!(outward, string(f, " called by ", here))
             end
-            # a dynamic call: the dispatch check of rule 6 decides at run time; not followed
+            # a dynamic call is not followed. The design checks its target when it
+            # compiles; on stock Julia nothing does (the audit follows static
+            # edges only), so a door behind a dynamic call is a PoC limit.
         end
     end
     pop!(stack)

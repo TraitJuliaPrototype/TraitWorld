@@ -144,14 +144,24 @@ function _pirate_of_sealed(m::Method)
 end
 
 """
-Every method defined after world `since`, found through the functions and
-types bound in the loaded modules and their submodules (as Aqua enumerates):
+Every method defined after world `since`. Julia 1.12 keeps all methods in
+one global table, `Core.methodtable` (type names have no tables of their
+own), which a visit enumerates in 0.03 s with Makie loaded, call methods of
+callable types (`(::Base.Fix1{…})(x)`) included. On a Julia whose type names
+still carry their own tables, a walk over the functions and types bound in
+the loaded modules (as Aqua enumerates) is the fallback: 2.3 s with Makie
+loaded, and blind to call methods of callable types;
 `_methods_by_ftype(Tuple{Vararg{Any}})` sorts every method against every
-other and took 10 s with Makie loaded, this walk 1 s. A pirate's method is
-on a function or type bound somewhere, so the walk sees it.
+other and took 10 s.
 """
 function _methods_since(since::UInt)
     out = Method[]
+    if !hasfield(Core.TypeName, :mt)
+        Base.visit(Core.methodtable) do m
+            m isa Method && m.primary_world > since && push!(out, m)
+        end
+        return out
+    end
     seen_f = Base.IdSet{Any}()
     seen_m = Base.IdSet{Module}()
     for (_, m) in Base.loaded_modules

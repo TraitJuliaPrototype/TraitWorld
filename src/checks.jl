@@ -76,9 +76,17 @@ function worker_problems(@nospecialize(sig), seen = Base.IdSet{Any}(), out = Str
             _WALK[] = nothing
         end
         WORKER_DOORS[sig] = DoorFacts(String[], st.outward, String[], st.truncated)
+        # the budget's end is reported whatever the concrete level: never an admission by silence
+        st.truncated && Base.inferencebarrier(_warn_truncated)(sig)
         return out
     end
     return _worker_problems(sig, seen, out, root)
+end
+
+function _warn_truncated(@nospecialize(sig))
+    @warn "The door check of $(sig) stopped at its budget ($(DOOR_BUDGET[]) method instances): " *
+          "the code beyond it is unchecked for inward doors (raise TraitWorld.DOOR_BUDGET[] to check it)" maxlog = 1 _id = hash(sig)
+    return nothing
 end
 
 function _worker_problems(@nospecialize(sig), seen, out, root::Bool)
