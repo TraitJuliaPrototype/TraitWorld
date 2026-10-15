@@ -1,5 +1,5 @@
 # ---------------------------------------------------------------------------
-# What library code may do with a trait object (rule 3 and the "may do"
+# What library code may do with a trait object (rule 2 and the "may do"
 # table), checked on the worker's typed code at a concrete representation:
 # a `TObj` may reach only methods declared for trait objects, which are the
 # trait's operations and workers whose bounds it carries. Anything else, a
@@ -181,7 +181,7 @@ function _worker_problems(@nospecialize(sig), seen, out, root::Bool)
                     if lb === nothing
                         if f isa Function && !isempty(traits_at(f, k - 1, length(ats) - 1))
                             push!(out, "$line: a trait object carrying $(_traitnames(ats[k])) is passed to `$fname`, whose " *
-                                       "methods need other traits at argument $(k-1). Declare the bounds it needs, so the caller projects each (rule 3)")
+                                       "methods need other traits at argument $(k-1). Declare the bounds it needs, so the caller projects each (rule 2)")
                         elseif f === Base.getproperty || f === Base.setproperty!
                             push!(out, "$line: `t.field`: the user's data is reached only through the trait's operations")
                         else
@@ -239,7 +239,7 @@ function _layering!(out, seen, @nospecialize(f), ats, src, mi, i, world)
             st === nothing || push!(st.outward, "$(_line_of(src, mi, i)): invokelatest of an outward door")
         elseif f in INWARD_DOORS
             push!(out, "$(_line_of(src, mi, i)): calls the inward door `$(nameof(f))`: a value denoting code has no bound; " *
-                       "an interface package may declare the call, with a checked result")
+                       "a trait module may declare the call (@call), with a checked result")
         elseif f in OUTWARD_DOORS || (f isa Function && nameof(f) in _STDOUT_DOORS && parentmodule(f) === Base && (length(ats) < 2 || !(ats[2] <: IO)))
             st = _WALK[]
             st === nothing || push!(st.outward, "$(_line_of(src, mi, i)): $(nameof(f))")
@@ -256,7 +256,7 @@ end
 How an entry calls a worker. A generated function: each call signature gets
 its own flag, embedded in its compiled code, so the check runs once per
 signature, and the flag is saved with whichever package image compiled that
-signature (rule 7 places it). The call to the worker is static.
+signature (rule 4 places it). The call to the worker is static.
 """
 @generated function checked_call(f, args...)
     flag = Ref(false)

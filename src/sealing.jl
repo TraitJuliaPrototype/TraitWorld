@@ -1,13 +1,15 @@
 # ---------------------------------------------------------------------------
 # Sealing (writeup/poc3-plan.md §3.3 and §9.3), the stock-Julia approximation.
 #
-# Julia is sealed as soon as traits are in effect (BaseInterface is implicit);
-# a loaded trait package seals itself; a loaded interface package seals itself
-# and the dependency closure of the package it wraps, read from the active
-# manifest. A pirate of the sealed region is a method whose definer owns
-# neither the function nor a type in some signature it applies to, while every
-# owner there is sealed (rule 5; delegates and declared implementers count as
-# owners). The package callback looks for pirates after each top-level
+# Sealing is rule 3 enforced at the load over rule 4's views. Julia is sealed
+# as soon as traits are in effect (the Base wrapper is implicit); a loaded
+# trait package seals itself; a loaded trait wrapper seals itself, the package
+# it wraps, the implementations it names and their dependency closures, read
+# from the active manifest. Code reached only by calls upward is never sealed.
+# A pirate of the sealed region is a method whose definer owns neither the
+# function nor a type in some signature it applies to, while every owner there
+# is sealed (rule 3; extensions and the implementations a wrapper names count
+# as their owners' delegates). The package callback looks for pirates after each top-level
 # `using`, over the methods defined since the previous scan, and over all of
 # them after a new seal, so a pirate that loaded first is found at the seal's
 # load. Base swallows exceptions thrown by package callbacks, so the load
@@ -16,7 +18,7 @@
 # interim and the default, they are reported and kept, and the audit of
 # `audit.jl` warns at the first call of a worker that reaches one. Tolerated
 # packages (`[traits] tolerate` of the active project and of the loaded
-# interface packages) are never touched.
+# wrappers) are never touched.
 # ---------------------------------------------------------------------------
 
 "Owners whose functions and types are sealed: package names, and \"Julia\"."
@@ -93,11 +95,19 @@ function _manifest_closure(name::String)
     return out
 end
 
-"An interface package seals itself and the closure of the package it wraps."
-function _seal_interface!(mod::Module, wrapped::Module)
-    seal!(mod)
-    for n in _manifest_closure(String(nameof(Base.moduleroot(wrapped))))
-        (n in ("Base", "Core") || n in _stdlib_names_str()) ? seal_name!("Julia") : seal_name!(n)
+"""
+A trait wrapper seals itself, the package it wraps, the implementations it
+names and their dependencies: everything a worker that sees the package can
+be compiled against (rule 4's view). Code reached only by calls upward is in
+no view and is never sealed.
+"""
+function _seal_wrapper!(w::Module, pkg::Module, impls::Vector{Module})
+    seal!(w)
+    for m in Module[pkg; impls]               # owners: package roots, or a module of a script
+        for n in _manifest_closure(String(nameof(m)))
+            (n in ("Base", "Core") || n in _stdlib_names_str()) ? seal_name!("Julia") : seal_name!(n)
+        end
+        seal_name!(String(nameof(m)))
     end
     return nothing
 end
@@ -132,10 +142,9 @@ function _pirate_of_sealed(m::Method)
     definer === :Julia && return nothing              # Julia owns its own functions
     dname = _owner_name(definer)
     dname in TOLERATED && return nothing
-    _implements_exempt(m) && return nothing
     for s in _sig_alternatives(m.sig)
         os = sig_owners(s)
-        definer in os && continue
+        _owns_or_delegate(definer, os) && continue
         names = String[_owner_name(o) for o in os]
         all(n -> n in SEALED, names) || continue
         return Pirate(m, dname, unique!(names))

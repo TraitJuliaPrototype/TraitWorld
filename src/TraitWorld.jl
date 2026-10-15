@@ -3,7 +3,7 @@
 
 A proof of concept of the design note "Traits for better Julia": trait
 modules, traits over a representation parameter, implementations and
-projections, layering (rule 1) and ownership (rule 5) checked when code is
+projections, layering (rule 1) and ownership (rule 3) checked when code is
 defined.
 """
 module TraitWorld
@@ -11,7 +11,7 @@ module TraitWorld
 using PrecompileTools: PrecompileTools
 
 export Trait, Callable, CallMode, DynamicCall, CompiledCall, compiled_call, dynamic_call, TObj,
-       @trait, @implement, @trait_module, @workload, @interface_package, @handle, @call, Handle,
+       @trait, @implement, @trait_module, @workload, @trait_wrapper, @handle, @call, Handle,
        TraitBoundError, TraitUseError, ImplementError, LayeringError, OwnershipError, PiracyError, mode!, verify_main, isclosed,
        piracy_mode!, check_no_piracy,
        @warn_on_abstract, @error_on_abstract, AbstractTypeError, check_concrete
@@ -31,6 +31,7 @@ function __init__()
     empty!(_REPORTED)
     empty!(_DOOR_FACTS)
     empty!(_NOT_EXTENSIONS)
+    empty!(WRAPPERS); empty!(DELEGATES)
     push!(Base.package_callbacks, _on_package_load)
 end
 
@@ -41,7 +42,8 @@ include("trait.jl")
 include("implement.jl")
 include("entry.jl")
 include("trait_module.jl")
-include("interface.jl")
+include("calls.jl")
+include("wrapper.jl")
 include("sealing.jl")
 include("checks.jl")
 include("doors.jl")
@@ -85,10 +87,9 @@ struct _PCOwn; n::Int; end
 end
 struct _PCOne; data::Vector{Float64}; end
 @implement _PC.PCT _PCOne
-# a private interface package: the registration, declared calls and handles
+# a private package that calls out: declared calls and handles
 module _PCI
 using ..TraitWorld
-@interface_package Base
 @trait_module module P
 using ..TraitWorld
 @handle H
@@ -110,7 +111,7 @@ PrecompileTools.@compile_workload begin
     macroexpand(_PC, :(f(t::PCT, i::Int) = pv(t, i)))
     conformance_problems(_PC.PCT, Vector{Float64}, (:pn, :pv))
     worker_problems(Tuple{typeof(_PC.pcsum),typeof(TObj((View{_PC.PCT}(Impl{(:pd,)}(), v),)))})
-    # the audit and rule 5 per signature (Union members expanded)
+    # the audit and rule 3 per signature (Union members expanded)
     audit(Tuple{typeof(_PC.pcsum),typeof(TObj((View{_PC.PCT}(Impl{(:pd,)}(), v),)))})
     for m in methods(_PC.pv)
         owned_method(m)
@@ -119,7 +120,7 @@ PrecompileTools.@compile_workload begin
     _sig_alternatives(Tuple{typeof(sum),Union{Int,Float64},Union{Int,Float32}})
     owned_method(first(methods(TraitWorld.owner)))
     h = _PCI.P.mk(); _PCI.P.rd(h); _PCI.P.tw(v, h)
-    is_interface_root(_PCI); find_pirates!()
+    is_declarer(_PCI); is_wrapped(_PCI); find_pirates!()
 end
 precompile(_on_package_load, (Base.PkgId,))
 

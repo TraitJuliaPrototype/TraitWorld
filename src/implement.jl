@@ -1,7 +1,7 @@
 # ---------------------------------------------------------------------------
 # @implement: implementations (per representation, per family, generic) and
 # projections (single, joint, dynamic). All are registered as methods, so they
-# are serialized with the package that defines them, and owned by it (rule 5).
+# are serialized with the package that defines them, and owned by it (rule 3).
 #
 #     @implement ColTable{Vector{Vector{Float64}}} begin ncols(r) = …; col(r, i) = … end
 #     @implement Indexable{A} where {A <: AbstractVector}            # a family, Base's own methods
@@ -326,7 +326,7 @@ function _dyn_witness(@nospecialize(X), p::ProjRec)
     return Dyn{typeof(table),D}(table)
 end
 
-# --- checks run when an implementation or projection is defined (rule 5, rule 4) -------
+# --- checks run when an implementation or projection is defined (rule 3, rule 2) -------
 
 function _owns(definer, @nospecialize(T))
     o = sig_owners(T)
@@ -334,7 +334,7 @@ function _owns(definer, @nospecialize(T))
 end
 
 """
-Rule 5, delegation: an owner delegates by declaring a package extension. The
+Rule 3, delegation: an owner delegates by declaring a package extension. The
 extension is loaded whenever its triggers are, so a call that could use its
 methods sees them only if every trigger is a package its methods mention.
 """
@@ -353,7 +353,7 @@ function _check_delegate(mod::Module, @nospecialize(types...))
         tm === nothing && continue
         owner(tm) in mentioned || throw(ImplementError(
             "the extension $r is triggered by $name, which its methods do not mention: whether a call sees them " *
-            "would depend on whether $name happens to be loaded (rule 5: a delegate is triggered only by packages its methods mention)"))
+            "would depend on whether $name happens to be loaded (rule 3: a delegate is triggered only by packages its methods mention)"))
     end
     return nothing
 end
@@ -363,8 +363,8 @@ function _check_implementation(mod::Module, @nospecialize(X), @nospecialize(R), 
     definer = owner(mod)
     tmod = owner(parentmodule(X))
     (definer === tmod || (R isa Type && _owns(definer, R))) ||
-        throw(ImplementError("$(mod) may not implement $X for $R: it owns neither the trait nor the representation (rule 5)"))
-    # rule 5 for the methods themselves: an operation that is someone else's function (Base.size)
+        throw(ImplementError("$(mod) may not implement $X for $R: it owns neither the trait nor the representation (rule 3)"))
+    # rule 3 for the methods themselves: an operation that is someone else's function (Base.size)
     # may be implemented for R only by an owner of the function or of R, never by the trait's owner alone
     for op in given
         f = _opfn(X, op)
@@ -372,7 +372,7 @@ function _check_implementation(mod::Module, @nospecialize(X), @nospecialize(R), 
             m.module === mod || continue
             owned_method(m) || throw(ImplementError(
                 "$(mod) defines $(m) to implement $X, but owns neither `$(nameof(f))` nor the types in its signature: " *
-                "that would change `$(nameof(f))` for everyone (rule 5). Declare the existing methods instead " *
+                "that would change `$(nameof(f))` for everyone (rule 3). Declare the existing methods instead " *
                 "(`@implement $X{…}` without a block), or let the owner of $(R) implement it."))
         end
     end
@@ -392,7 +392,7 @@ function _check_projection(mod::Module, @nospecialize(X), @nospecialize(T))
     p = _proj(X, T)::ProjRec
     definer = owner(mod)
     (definer === owner(parentmodule(X)) || _owns(definer, T)) ||
-        throw(ImplementError("$(mod) may not project $T onto $X: it owns neither (rule 5)"))
+        throw(ImplementError("$(mod) may not project $T onto $X: it owns neither (rule 3)"))
     R = p.R
     (R isa Type && deep_concrete(R)) ||
         throw(ImplementError("the projection of $T for $X returns $R, which is not deeply concrete"))
@@ -403,7 +403,7 @@ function _check_projection(mod::Module, @nospecialize(X), @nospecialize(T))
             for op in _ops(Y)
                 _mutating(Y, op) && throw(ImplementError(
                     "$Y has the mutating operation `$op`, so it accepts only projections that share the user's data; " *
-                    "the projection of $T copies (rule 4)"))
+                    "the projection of $T copies (rule 2)"))
             end
         end
     end
@@ -459,14 +459,14 @@ function _op_method(mod::Module, @nospecialize(X), d, Rex; precheck::Bool = true
             push!(args, a)
         end
     end
-    # rule 5 before anything is defined: someone else's function (Base.size) may get a method
+    # rule 3 before anything is defined: someone else's function (Base.size) may get a method
     # only for a representation the defining package owns
     if precheck && owner(parentmodule(f)) !== owner(mod)
         Rv = _tryeval(mod, Rex)
         if !(Rv isa Type && owner(mod) in sig_owners(Rv))
             throw(ImplementError(
                 "$(mod) may not implement `$op` of $X for $(Rex): `$(nameof(f))` belongs to $(parentmodule(f)), and $(mod) does not own " *
-                "$(Rex), so the method would change `$(nameof(f))` for everyone (rule 5). Declare the existing methods instead " *
+                "$(Rex), so the method would change `$(nameof(f))` for everyone (rule 3). Declare the existing methods instead " *
                 "(`@implement $(nameof(X)){$(Rex)}` without a block), or let the owner of $(Rex) implement it."))
         end
     end

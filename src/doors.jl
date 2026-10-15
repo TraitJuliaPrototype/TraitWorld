@@ -1,6 +1,6 @@
 # ---------------------------------------------------------------------------
-# BaseInterface, the door check (writeup/poc3-plan.md §3.2; the note, "Base and
-# the standard libraries"). Base is in the trait world by designation, and a
+# The Base wrapper's door check (writeup/poc3-plan.md §3.2; the note, "Trait wrappers"
+# and "Calls upward"). Base is in the trait world by designation, and a
 # specialization of Base reached from a worker is trait-world code when the
 # check passes: the layering walk follows calls into Julia's own code, once per
 # method instance and process, within a budget, and reports
@@ -200,7 +200,7 @@ function _doors!(out, @nospecialize(csig), src, mi, i, world)
     line = _line_of(src, mi, i)
     for d in facts.inward
         push!(out, "$line: reaches an inward door through Julia's code: $d. A value denoting code has no bound; " *
-                   "an interface package may declare the call, with a checked result")
+                   "a trait module may declare the call (@call), with a checked result")
     end
     for g in facts.globals
         push!(out, "$line: reads a global that does not decide a trait-world type: $g")

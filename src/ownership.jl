@@ -1,5 +1,5 @@
 # ---------------------------------------------------------------------------
-# Ownership (rule 5), ported from TraitRegions. Julia itself (Base, Core and
+# Ownership (rule 3), ported from TraitRegions. Julia itself (Base, Core and
 # every standard library) is ONE owner. Package extensions inherit their
 # parent's ownership: an extension is how an owner delegates. A method is
 # owned by its package if, in every signature it applies to, the package owns
@@ -120,46 +120,6 @@ function owner(m::Module)
     return p === nothing ? r : owner(p)
 end
 
-# Implementer declarations: interfaces a package may extend as if it owned
-# them. Defaults cover the interface/implementation splits measured on the
-# CairoMakie stack; packages override or add via Project.toml.
-const DEFAULT_IMPLEMENTS = Dict{Symbol,Vector{Symbol}}(
-    :StaticArrays     => [:StaticArraysCore],
-    :ChainRules       => [:ChainRulesCore],
-    :Colors           => [:ColorTypes],
-    :ColorVectorSpace => [:ColorTypes],
-    :ImageCore        => [:ColorTypes],
-    :StatsBase        => [:StatsAPI],
-    :Distributions    => [:StatsAPI, :StatsBase],
-)
-
-const _IMPLEMENTS = IdDict{Module,Vector{Symbol}}()
-
-"Interfaces package `m` declares it implements (Project.toml `[traitbound] implements`)."
-function implements(m::Module)
-    get!(_IMPLEMENTS, m) do
-        out = copy(get(DEFAULT_IMPLEMENTS, nameof(m), Symbol[]))
-        dir = pkgdir(m)
-        if dir !== nothing
-            proj = joinpath(dir, "Project.toml")
-            if isfile(proj)
-                toml = Base.parsed_toml(proj)
-                # plain haskey/getindex: these are compiled in the sysimage,
-                # `get` with a typed default costs ~10 ms of first-use compile
-                if haskey(toml, "traitbound")
-                    tb = toml["traitbound"]
-                    if tb isa Dict && haskey(tb, "implements")
-                        for name in tb["implements"]
-                            push!(out, Symbol(name::String))
-                        end
-                    end
-                end
-            end
-        end
-        out
-    end
-end
-
 function _owners!(acc::Base.IdSet{Any}, @nospecialize(T))
     if T isa Union
         _owners!(acc, T.a); _owners!(acc, T.b)
@@ -233,16 +193,32 @@ function _sig_alternatives(@nospecialize(sig), limit::Int = 256)
 end
 
 """
+Whether `definer` owns something in a signature's owners `os`, or is a
+delegate of an owner there: an implementation a trait wrapper names for the
+package it wraps (rule 3).
+"""
+function _owns_or_delegate(@nospecialize(definer), os::Base.IdSet{Any})
+    definer in os && return true
+    definer isa Module || return false
+    for o in os
+        for d in delegates_of(o)
+            d === definer && return true
+        end
+    end
+    return false
+end
+
+"""
     owned_method(m::Method)
 
-Rule 5: the package that defined `m` owns, in every signature `m` applies to,
+Rule 3: the package that defined `m` owns, in every signature `m` applies to,
 the function or one of the types. Unlike Aqua's rule, `f(::Union{Mine, Int})`
 is not owned: it applies to `Int` alone too.
 """
 function owned_method(m::Method)
     definer = owner(m.module)
     for s in _sig_alternatives(m.sig)
-        definer in sig_owners(s) || return false
+        _owns_or_delegate(definer, sig_owners(s)) || return false
     end
     return true
 end

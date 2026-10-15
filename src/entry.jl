@@ -109,7 +109,7 @@ end
 @noinline function _rule3_error(@nospecialize(f), pos::Int, @nospecialize(t))
     throw(TraitBoundError("a trait object carrying $(_traitlist(typeof(t))) reached the entry of `$f` at argument $pos, " *
                           "whose methods need other traits there. Inside the trait world a value is passed on only where " *
-                          "its own trait is expected (rule 3): declare every bound the callee needs, so the caller projects each."))
+                          "its own trait is expected (rule 2): declare every bound the callee needs, so the caller projects each."))
 end
 
 _traitlist(::Type{TObj{T,V}}) where {T,V} = join(string.(Base.uniontypes(T)), ", ")

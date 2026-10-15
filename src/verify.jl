@@ -66,7 +66,7 @@ struct MainReport
     uncompiled::Vector{Any}         # normal-path MethodInstances without native code
     checked_native::Bool            # false while generating a package image
     findings::Vector{Pair{Any,Vector{PiracyFinding}}}
-    problems::Vector{String}        # build-time checks of the enumerated workers (rules 1 and 3)
+    problems::Vector{String}        # build-time checks of the enumerated workers (rules 1 and 2)
 end
 
 "`true` iff no hole lies on a normal path and every normal-path method instance has native code."
@@ -768,7 +768,7 @@ Check that calling `f` with arguments of types `argtypes` can only reach
 compiled code: every dynamic call has finitely many targets known now, or is
 one of TraitWorld's entry steps, whose targets are enumerated from the
 argument types and the registered projections. Runs the build-time checks of
-every enumerated worker (rules 1 and 3, the piracy audit) and reports the
+every enumerated worker (rules 1 and 2, the piracy audit) and reports the
 holes, separating those reached only on the way to an uncaught `throw`.
 
 `compile = true` compiles every target. `entrypoints = true` registers them
@@ -833,7 +833,7 @@ function verify_main(@nospecialize(f), @nospecialize(argtypes::Tuple = ()); comp
         end
     end
     sort!(holes; by = h -> (h.errorpath, string(h.kind), string(h.callee)))
-    # build-time checks of every enumerated worker: rules 1 and 3, and the piracy audit
+    # build-time checks of every enumerated worker: rules 1 and 2, and the piracy audit
     findings = Pair{Any,Vector{PiracyFinding}}[]
     problems = String[]
     for (kind, S) in targets
@@ -934,7 +934,7 @@ function Base.show(io::IO, ::MIME"text/plain", r::MainReport)
     else
         println(io, "  native code: not checked (generating a package image)")
     end
-    println(io, "  build-time checks of enumerated workers (rules 1 and 3): ",
+    println(io, "  build-time checks of enumerated workers (rules 1 and 2): ",
             isempty(r.problems) ? "clean" : string(length(r.problems)) * " problem(s)")
     for p in first(r.problems, 10)
         println(io, "    ", p)

@@ -75,7 +75,7 @@ end
     @test_throws MethodError colmean(42, 1)                  # no projection: as in plain Julia
 end
 
-@testset "M1: rule 3 and escapes, reported with their lines" begin
+@testset "M1: rule 2 and escapes, reported with their lines" begin
     toplevel(quote
         @trait_module module Rows
         using TraitWorld
@@ -103,7 +103,7 @@ end
     end)
     m = Measurements([[1.0, 2.0]])
     msg(f) = try f(m); "" catch e; sprint(showerror, e) end
-    @test occursin("rule 3", msg(Main.Bad.bad_rule3)) && occursin("runtests.jl", msg(Main.Bad.bad_rule3))
+    @test occursin("rule 2", msg(Main.Bad.bad_rule3)) && occursin("runtests.jl", msg(Main.Bad.bad_rule3))
     @test occursin("`sum`, an ordinary function", msg(Main.Bad.bad_ordinary))
     @test occursin("t.field", msg(Main.Bad.bad_field))
     @test occursin("typeof(t)", msg(Main.Bad.bad_typeof))
@@ -116,7 +116,7 @@ end
     @test Main.Bad.good(Main.Both([[1.0, 3.0]], [1.0 2.0; 3.0 4.0])) == (2.0, [1.0, 2.0])
 end
 
-@testset "M1: ownership (rule 5) and layering (rule 1)" begin
+@testset "M1: ownership (rule 3) and layering (rule 1)" begin
     # implementing a foreign trait for a foreign representation
     e = thrown(:(@implement ColTable{Vector{Int}} begin ncols(r) = 1; col(r, i) = [1.0] end))
     @test e isa ImplementError       # the session owns neither the trait nor Vector{Int}
@@ -126,7 +126,7 @@ end
         @implement ColTable{Vector{Float32}} begin ncols(r) = 1; col(r, i) = [1.0] end
         end
     end)
-    @test e isa ImplementError && occursin("rule 5", sprint(showerror, e))
+    @test e isa ImplementError && occursin("rule 3", sprint(showerror, e))
     # an existing function implemented for a foreign type: rejected before anything is defined
     e = thrown(quote
         @trait_module module SizeTrait
@@ -145,7 +145,7 @@ end
         end
     end)
     @test e isa OwnershipError
-    # a Union with a foreign type is no way around rule 5
+    # a Union with a foreign type is no way around rule 3
     e = thrown(quote
         @trait_module module UnionMod
         using TraitWorld
@@ -288,7 +288,7 @@ Base.size(b::Broken) = (b.n,)
     @test !isempty(TraitWorld.conformance_problems(Indexable, Broken, (:getindex,)))
 end
 
-# --- M3: several bounds, several views; joint projections; rule 4 --------------------------------
+# --- M3: several bounds, several views; joint projections; rule 2 --------------------------------
 @trait_module module Views
 using TraitWorld, ..Columns, ..Rows
 export Table2, overview, overview2, ColStore, setcol!, normalize!
@@ -319,7 +319,7 @@ struct Live3; cols::Vector{Vector{Float64}}; end
     x = Live3([[1.0, 3.0]]); normalize!(x, 1); @test x.cols[1] == [0.25, 0.75]
     toplevel(:(struct Frozen3; cols::Vector{Vector{Float64}}; end))
     e = thrown(:(@implement ColStore Frozen3 copies project(t) = deepcopy(t.cols)))
-    @test e isa ImplementError && occursin("rule 4", sprint(showerror, e))
+    @test e isa ImplementError && occursin("rule 2", sprint(showerror, e))
     @test thrown(:(@implement ColTable Frozen3 copies project(t) = deepcopy(t.cols))) === nothing
 end
 
@@ -705,7 +705,7 @@ end
     @test e isa ImplementError && occursin("no field of", e.msg)
 end
 
-# --- poc3 M3: interface packages, declared calls, handles ---------------------------------------
+# --- poc3 M3: calls upward, declared calls, handles ---------------------------------------
 module FakeOutside                       # an ordinary package standing in for Makie
 mutable struct Fig; pts::Vector{Tuple{Float64,Float64}}; title::String; end
 newfig() = Fig(Tuple{Float64,Float64}[], "")
@@ -715,7 +715,6 @@ title(f::Fig) = f.title
 end
 module FakeInterface
 using TraitWorld, ..FakeOutside
-@interface_package FakeOutside
 @trait_module module Plots
 using TraitWorld
 export Figure, PointSeries, xs, ys, figure, scatter!, npts, ftitle, bad, leak
@@ -743,7 +742,7 @@ using TraitWorld, ..FakeInterface
 export plot_it
 plot_it(t::PointSeries) = (f = figure(); scatter!(f, t; title = "two points"); (npts(f), ftitle(f)))
 end
-@testset "poc3 M3: interface packages, declared calls, handles" begin
+@testset "poc3 M3: calls upward, declared calls, handles" begin
     m = [1.0 2.0; 3.0 4.0]
     @test UsesPlots.plot_it(m) == (2, "two points")
     f = FakeInterface.figure()
@@ -754,7 +753,7 @@ end
     e = try FakeInterface.leak(m, f) catch err; err end
     @test e isa TraitUseError && occursin("never go up", sprint(showerror, e))
     @test length(TraitWorld.declared_calls(FakeInterface)) == 5
-    @test TraitWorld.INTERFACES[FakeInterface] === FakeOutside
+    @test TraitWorld.is_declarer(FakeInterface) && FakeInterface in TraitWorld.declarers()   # the ordinary module around the trait module holds them
     e = thrown(quote
         @trait_module module NoIface
         using TraitWorld, ..FakeOutside
@@ -767,7 +766,7 @@ end
         g() = @call Main.FakeOutside.newfig()::Int
         end
     end)
-    @test e isa ErrorException && occursin("only inside the trait module of an interface package", e.msg)
+    @test e isa ErrorException && occursin("needs an ordinary module around the trait module", e.msg)
 end
 
 # --- poc3 M8: verify_main with keyword entries and declared calls ------------------------------
@@ -822,7 +821,27 @@ end
     @test TraitWorld._extension_parent(TraitWorld) === nothing && TraitWorld in TraitWorld._NOT_EXTENSIONS
 end
 
-# --- poc3 M5: BaseInterface, the door check -----------------------------------------------------
+# --- trait wrappers: a split core, its named implementation, one it does not name --------------
+module CoreX; struct V; x::Vector{Float64}; end; end
+module ImplX; using ..CoreX; Base.length(v::CoreX.V) = length(v.x); end
+module ImplY; using ..CoreX; Base.size(v::CoreX.V) = (length(v.x),); end
+@testset "trait wrappers" begin
+    lx = first(methods(length, (CoreX.V,))); sy = first(methods(size, (CoreX.V,)))
+    @test !TraitWorld.owned_method(lx) && !TraitWorld.is_trait_world(CoreX)    # unwrapped: ImplX owns neither
+    toplevel(:(module CoreXWrapper; using TraitWorld, ..CoreX, ..ImplX; @trait_wrapper CoreX ImplX; end))
+    @test TraitWorld.wrapper_of(CoreX) === Main.CoreXWrapper && "CoreX" in TraitWorld.SEALED && "ImplX" in TraitWorld.SEALED
+    @test TraitWorld.owned_method(lx) && !TraitWorld.owned_method(sy)        # the named implementation is a delegate
+    found = TraitWorld.find_pirates!()                                       # a new seal: a full scan
+    @test any(p -> p.definer == "ImplY", found) && !any(p -> p.definer == "ImplX", found)
+    @test TraitWorld.is_trait_world(CoreX) && TraitWorld.is_trait_world(ImplX)
+    toplevel(:(@trait_module module UsesCoreX; using TraitWorld, ..CoreX; end))      # a wrapped package may be imported
+    @test isdefined(Main, :UsesCoreX)
+    # at most one wrapper per package: a second decides nothing
+    @test_logs (:error, r"second trait wrapper") match_mode=:any toplevel(:(module CoreXWrapper2; using TraitWorld, ..CoreX; @trait_wrapper CoreX; end))
+    @test TraitWorld.wrapper_of(CoreX) === Main.CoreXWrapper
+end
+
+# --- poc3 M5: the Base wrapper, the door check -----------------------------------------------------
 module PlainGlobals; x = 1; end
 @trait_module module Doors
 using TraitWorld, ..Columns
@@ -864,7 +883,6 @@ end
     toplevel(quote
         module TLSInterface
         using TraitWorld
-        @interface_package Base
         @trait_module module T
         using TraitWorld
         export tls

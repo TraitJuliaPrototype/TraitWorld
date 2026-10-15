@@ -13,7 +13,7 @@
 # The audit runs at the first call of each signature and again after any
 # world change, so whether it fires does not depend on workloads or load order.
 # PoC limits (as in TraitRegions): stock Julia compiles against the whole
-# method table, so the audit stands in for rule 6; a pirate reached only
+# method table, so the audit stands in for rule 4; a pirate reached only
 # through a dynamic call is applied, as in plain Julia.
 # ---------------------------------------------------------------------------
 
@@ -97,14 +97,8 @@ end
 const _CLEAN = Base.IdSet{Core.CodeInstance}()
 const _PIRATICAL = IdDict{Method,Bool}()
 
-"Piratical under rule 5 (per signature, so a `Union` is no way around it), unless an implementer relation is declared."
-_piratical(m::Method) = get!(() -> !owned_method(m) && !_implements_exempt(m), _PIRATICAL, m)
-function _implements_exempt(m::Method)
-    definer = owner(m.module)
-    definer isa Module || return false
-    impl = Base.inferencebarrier(implements)(definer)::Vector{Symbol}
-    return any(o -> o isa Module && nameof(o) in impl, sig_owners(m.sig))
-end
+"Piratical under rule 3, per signature, so a `Union` is no way around it; a delegate a trait wrapper names counts as an owner."
+_piratical(m::Method) = get!(() -> !owned_method(m), _PIRATICAL, m)
 
 _isvalid(ci::Core.CodeInstance, world::UInt) = ci.min_world <= world <= ci.max_world
 

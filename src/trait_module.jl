@@ -18,7 +18,7 @@
 # `t::(ColTable, RowTable)`, a bundle trait, `f::Callable{A, S}`) becomes
 #   - a worker: the body as written, on `TObj{T} where {T >: Union{traits…}}`
 #     and `CObj{A, S}`, compiled per representation; calls between workers
-#     with matching bounds go straight to them (rule 3);
+#     with matching bounds go straight to them (rule 2);
 #   - an entry at `Any` in those positions, for ordinary callers: it projects
 #     (rule 2), erases or passes functions, and calls the worker. An untyped
 #     method of the same shape becomes the entry's fallback.
@@ -37,12 +37,13 @@ Base.showerror(io::IO, e::OwnershipError) = print(io, "OwnershipError: ", e.msg)
 """
     is_trait_world(m::Module)
 
-Base, Core, the standard libraries, TraitWorld itself, and every trait module
-(and the modules inside one).
+Base, Core, the standard libraries, TraitWorld itself, every trait module
+(and the modules inside one), and every package a trait wrapper brings in,
+with the implementations it names.
 """
 function is_trait_world(m::Module)
     r = Base.moduleroot(m)
-    (owner(r) === :Julia || r === TraitWorld) && return true
+    (owner(r) === :Julia || r === TraitWorld || is_wrapped(m)) && return true
     x = m
     while true
         isdefined(x, :__trait_module__) && return true
@@ -273,7 +274,7 @@ end
 """
 Positional defaults are what Julia makes of them: the full method, and one
 shorter method per default whose body calls the full one. Each is then a
-trait-bounded definition of its own, with its own entry (rule 3: the shorter
+trait-bounded definition of its own, with its own entry (rule 2: the shorter
 method passes its own trait object on).
 """
 function _expand_defaults(mod::Module, head, fname, rawargs, kwparams, wheres, ret, body)
@@ -417,9 +418,9 @@ function _rewrite_fdef(mod::Module, ex)
                   "for an entry; define the trait-bounded methods first, then the untyped fallback")
         end
         if key[1] !== mod
-            # an entry is a method at Any: only the function's owner may add one (rule 5)
+            # an entry is a method at Any: only the function's owner may add one (rule 3)
             owner(key[1]) === owner(mod) || error("@trait_module: `$fname` belongs to $(key[1]); $(mod) may add trait-bounded " *
-                                                  "methods to it only where it already has an entry of that shape (rule 5)")
+                                                  "methods to it only where it already has an entry of that shape (rule 3)")
         end
         nargs = nva == 0 ? length(args) : -1
         eargs = Any[]
@@ -582,7 +583,7 @@ function _check_import(mod::Module, ex::Expr)
     end
     for p in paths
         target = _module_path(mod, p)
-        is_trait_world(target) || is_interface_root(target) || throw(LayeringError(
+        is_trait_world(target) || is_declarer(target) || is_wrapper_root(target) || throw(LayeringError(
             "trait module $mod imports $target, which is outside the trait world. Layering (rule 1): ordinary code may " *
             "use the trait world, the trait world uses only itself. Make $target a trait module, or call it from an " *
             "ordinary module that uses both."))
@@ -590,7 +591,7 @@ function _check_import(mod::Module, ex::Expr)
     return nothing
 end
 
-"Rule 5: every method a trait module defines is owned by its package, in every signature it applies to."
+"Rule 3: every method a trait module defines is owned by its package, in every signature it applies to."
 function _check_methods(mod::Module, fname)
     f = Core.eval(mod, fname)
     seen = isdefined(mod, :__tw_methods_seen__) ? mod.__tw_methods_seen__ : Base.IdSet{Method}()
@@ -600,7 +601,7 @@ function _check_methods(mod::Module, fname)
         push!(seen, m)
         owned_method(m) && continue
         throw(OwnershipError("$(m) is defined by $(mod), which owns neither its function nor its types " *
-                             "in every signature it applies to (rule 5)"))
+                             "in every signature it applies to (rule 3)"))
     end
     return nothing
 end
@@ -628,7 +629,7 @@ function _finish_module(mod::Module)
     # imports made outside the checked statements (before the block) count too
     for u in ccall(:jl_module_usings, Any, (Any,), mod)::Vector{Any}
         u isa Module || continue
-        is_trait_world(u) || is_interface_root(u) || throw(LayeringError(
+        is_trait_world(u) || is_declarer(u) || is_wrapper_root(u) || throw(LayeringError(
             "trait module $mod uses $u, which is outside the trait world (rule 1)"))
     end
     seal!(mod)
