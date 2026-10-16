@@ -37,6 +37,17 @@ function _line_of(src, mi, i)
     return m isa Method ? string(basename(string(m.file)), ":", m.line) : "?"
 end
 
+"Whether method `m` is code of a trait module (defined in one, or in a module inside one)."
+function _is_trait_module_code(m::Method)
+    x = m.module
+    while true
+        isdefined(x, :__trait_module__) && return true
+        p = parentmodule(x)
+        p === x && return false
+        x = p
+    end
+end
+
 "Whether `f` is an operation function of one of the traits in `lb` (its methods on trait objects forward)."
 function _is_op(@nospecialize(f), @nospecialize(lb))
     for X in Base.uniontypes(lb)
@@ -189,12 +200,18 @@ function _worker_problems(@nospecialize(sig), seen, out, root::Bool)
                 m = mm.method
                 msig = Base.unwrap_unionall(m.sig)
                 params = msig.parameters
+                internal_checked = false
                 for k in 2:length(ats)
                     _hastobj(ats[k]) || continue
                     p = k <= length(params) ? params[k] : (isempty(params) ? Any : params[end])
                     p isa Core.TypeofVararg && (p = isdefined(p, :T) ? p.T : Any)
                     lb = _tobj_lb(p)
-                    if lb === nothing
+                    if lb === nothing && _is_trait_module_code(m) && !_is_entry(m)
+                        # an internal function of a trait module (note "Internal functions need no bounds"):
+                        # compiled for the trait object as part of the worker, and checked through its body
+                        internal_checked || worker_problems(csig, seen, out; root = false)
+                        internal_checked = true
+                    elseif lb === nothing
                         if f isa Function && !isempty(traits_at(f, k - 1, length(ats) - 1))
                             push!(out, "$line: a trait object carrying $(_traitnames(ats[k])) is passed to `$fname`, whose " *
                                        "methods need other traits at argument $(k-1). Declare the bounds it needs, so the caller projects each (rule 2)")

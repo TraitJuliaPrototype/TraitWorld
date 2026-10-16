@@ -257,16 +257,18 @@ end
 
 # --- trait parameters: associated types (note "Declaring a trait": Parameters) ------------
 
+Base.Experimental.@max_methods 1 function trait_params end
 "`trait_params(X)`: the names of trait `X`'s parameters besides the representation, in order."
 trait_params(@nospecialize(X)) = ()
+Base.Experimental.@max_methods 1 function param end
 """
 `param(X, Val(p), R)`: parameter `p` of trait `X` at representation `R`, an
 associated type: one value per conformance, defined by the trait's equation
 (`T = eltype(R)`) or by the conformance (`@implement ArrayLike{Float64, 1} MyVector`).
 """
-function param end
-"`param_bound(X, Val(p))`: the bound a trait declares on its parameter `p` (`T <: NumberLike`)."
-function param_bound end
+param
+Base.Experimental.@max_methods 1 function param_bound end
+@doc "`param_bound(X, Val(p))`: the bound a trait declares on its parameter `p` (`T <: NumberLike`)." param_bound
 "The trait instance a view of representation `R` carries: `X` with its parameters at `R`, the representation last."
 function _instance(@nospecialize(X), @nospecialize(R))
     ps = trait_params(X)
@@ -373,16 +375,20 @@ end
 
 # --- fields: properties a trait declares --------------------------------------
 
+Base.Experimental.@max_methods 1 function trait_fields end
 "`trait_fields(X)`: the fields trait `X` declares, as `(name, writable)` pairs."
 trait_fields(@nospecialize(X)) = ()
-"`field_type(X, Val(f), R)`: the declared type of field `f` at representation `R`."
-function field_type end
+Base.Experimental.@max_methods 1 function field_type end
+@doc "`field_type(X, Val(f), R)`: the declared type of field `f` at representation `R`." field_type
+Base.Experimental.@max_methods 1 function trait_uses_self end
 "`trait_uses_self(X)`: whether trait `X`'s declarations name the implementing type (`Self` in an operation's types, or a defining equation)."
 trait_uses_self(@nospecialize(X)) = false
-"`_fieldmatch(X, Val(f), FT)`: the parameters field `f` of trait `X` defines, matched against its type `FT` in a conforming type (methods added by @trait)."
-function _fieldmatch end
+Base.Experimental.@max_methods 1 function _fieldmatch end
+@doc "`_fieldmatch(X, Val(f), FT)`: the parameters field `f` of trait `X` defines, matched against its type `FT` in a conforming type (methods added by @trait)." _fieldmatch
+Base.Experimental.@max_methods 1 function trait_field_params end
 "`trait_field_params(X)`: the parameters of `X` that its declared fields define (`u::U`, `data::Vector{T}`)."
 trait_field_params(@nospecialize(X)) = ()
+Base.Experimental.@max_methods 1 function field_isrep end
 "`field_isrep(X, Val(f))`: whether field `f` is declared with the implementing type: it names the forwarding field of a one-line conformance."
 field_isrep(@nospecialize(X), @nospecialize(f)) = false
 
@@ -397,8 +403,8 @@ field_isrep(@nospecialize(X), @nospecialize(f)) = false
 Base.getproperty(d::Dynamic, s::Symbol) = getproperty(getfield(d, :t), s)
 Base.setproperty!(d::Dynamic, s::Symbol, x) = setproperty!(getfield(d, :t), s, x)
 
-"`_fieldpos(X, Val(f))`: the position of declared field `f` among trait `X`'s fields (methods added by @trait)."
-function _fieldpos end
+Base.Experimental.@max_methods 1 function _fieldpos end
+@doc "`_fieldpos(X, Val(f))`: the position of declared field `f` among trait `X`'s fields (methods added by @trait)." _fieldpos
 "The type of declared field `f` in key `K`: the conforming type's own field type."
 _fieldkeytype(::Type{X}, ::Val{f}, ::Type{K}) where {X,f,K} = K <: Key ? _keyfield(K, f) : field_type(X, Val(f), K)
 
@@ -449,24 +455,28 @@ end
 
 # --- trait declarations, as methods defined by `@trait` --------------------
 
-"`trait_ops(X)`: the operation names of trait `X`, in declaration order."
-function trait_ops end
-"`op_function(X, Val(op))`: the function an operation is."
-function op_function end
-"`op_ret(X, Val(op), R, Val(N))`: the declared result type at representation `R`, for `N` arguments after `r`."
-function op_ret end
-"`op_args(X, Val(op), R, Val(N))`: the declared types of the arguments after `r`, as a tuple type."
-function op_args end
-"`op_default(X, Val(op), t, args...)`: the trait's default for an operation, with `t` a trait object."
-function op_default end
-"`generic_op(X, Val(k), Val(op), t, args...)`: generic implementation `k` of an operation."
-function generic_op end
-"`generic_rec(X, Val(k))`: the constraints of generic implementation `k` of trait `X` (one method per implementation)."
-function generic_rec end
+Base.Experimental.@max_methods 1 function trait_ops end
+@doc "`trait_ops(X)`: the operation names of trait `X`, in declaration order." trait_ops
+Base.Experimental.@max_methods 1 function op_function end
+@doc "`op_function(X, Val(op))`: the function an operation is." op_function
+Base.Experimental.@max_methods 1 function op_ret end
+@doc "`op_ret(X, Val(op), R, Val(N))`: the declared result type at representation `R`, for `N` arguments after `r`." op_ret
+Base.Experimental.@max_methods 1 function op_args end
+@doc "`op_args(X, Val(op), R, Val(N))`: the declared types of the arguments after `r`, as a tuple type." op_args
+Base.Experimental.@max_methods 1 function op_default end
+@doc "`op_default(X, Val(op), t, args...)`: the trait's default for an operation, with `t` a trait object." op_default
+Base.Experimental.@max_methods 1 function generic_op end
+@doc "`generic_op(X, Val(k), Val(op), t, args...)`: generic implementation `k` of an operation." generic_op
+Base.Experimental.@max_methods 1 function generic_rec end
+@doc "`generic_rec(X, Val(k))`: the constraints of generic implementation `k` of trait `X` (one method per implementation)." generic_rec
+Base.Experimental.@max_methods 1 function has_default end
 has_default(@nospecialize(X), @nospecialize(op)) = false
+Base.Experimental.@max_methods 1 function is_mutating end
 is_mutating(@nospecialize(X), @nospecialize(op)) = false
+Base.Experimental.@max_methods 1 function supertraits end
 "`supertraits(X)`: traits whose operations `X` includes; their views travel with every `X` view."
 supertraits(@nospecialize(X)) = ()
+Base.Experimental.@max_methods 1 function bundle end
 "`bundle(X)`: for a bundle trait, the traits it names; `t::Table` means `t::(ColTable, RowTable)`."
 bundle(@nospecialize(X)) = nothing
 "`is_trait(X)`: whether `X` was declared with `@trait`."
@@ -543,8 +553,9 @@ struct _CallWrap{S} end
 # The callee side declares concrete types (`Ref{T}` for non-bits values), so
 # the call inside is static; the caller passes non-bits values as boxes
 # (`Any`): the same pointer, without allocating a `RefValue`.
-_ctype(@nospecialize(T)) = isbitstype(T) ? T : Any
-_cdecl(@nospecialize(T)) = isbitstype(T) ? T : Ref{T}
+# (a zero-size type, `Nothing`, is no C type: it goes as a reference too)
+_ctype(@nospecialize(T)) = isbitstype(T) && sizeof(T) > 0 ? T : Any
+_cdecl(@nospecialize(T)) = isbitstype(T) && sizeof(T) > 0 ? T : Ref{T}
 @generated function _fptr(::Type{A}, ::Type{S}, ::Type{F}) where {A,S,F}
     ats = map(_cdecl, A.parameters)
     return :(@cfunction($(_CallWrap{S}()), $(_ctype(S)), ($(Ref{F}), $(ats...))))

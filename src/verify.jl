@@ -471,7 +471,7 @@ function _entry_targets(cx, @nospecialize(L), @nospecialize(T), world::UInt, out
             t === nothing || push!(ts, t)
             _has_conformance_method(X, U) && continue
             b = Base.invokelatest(_builder_for, Any[X], U)
-            b === NOTRAIT || push!(cx.plans, ((X, U), b))
+            b === NOTRAIT || push!(cx.plans, (Pair{Any,Any}(X, U), b))
         end
     end
     return ts, outs, notrait

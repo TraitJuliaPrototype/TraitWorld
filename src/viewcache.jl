@@ -274,3 +274,26 @@ function _vc_load!()
     end
     return nothing
 end
+
+# --- registries hold no edges --------------------------------------------------------
+#
+# The registries (methods a declaration adds: `trait_fields(::Type{X})`, `projection(::Type{X},
+# ::Type{T})`, …) are declared with `@max_methods 1`. Two sentinel methods each make sure that a
+# call at an abstract type always matches more than one method, so inference gives up and the
+# machinery's compiled code keeps no edge that a later declaration would invalidate. (With only
+# the fallback in TraitWorld's image, a call at `Any` resolved to it, and the first trait with
+# fields re-inferred `_builder_for`: 0.4 s in a solver's first call.)
+struct _Sentinel1 end
+struct _Sentinel2 end
+for f in (:trait_params, :param, :param_bound, :trait_fields, :field_type, :trait_uses_self, :_fieldmatch,
+          :trait_field_params, :field_isrep, :_fieldpos, :trait_ops, :op_function, :op_ret, :op_args, :op_default,
+          :generic_op, :generic_rec, :has_default, :is_mutating, :supertraits, :bundle, :implementation,
+          :projection, :_declared_defaults)
+    for S in (_Sentinel1, _Sentinel2)
+        @eval $f(::Type{$S}, @nospecialize(args...)) = nothing
+    end
+end
+for S in (_Sentinel1, _Sentinel2)
+    @eval conformance(::As{$S}, @nospecialize(u)) = NOTRAIT
+    @eval needed(::EntryPos{$S,0,0}) = TraitList{Tuple{}}()
+end

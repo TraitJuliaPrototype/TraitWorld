@@ -18,6 +18,7 @@ struct ImplRec
     kind::Symbol
     defaults::Tuple
 end
+Base.Experimental.@max_methods 1 function implementation end
 "`implementation(X, R)`: an `ImplRec`, or `nothing`. Generic implementations are found separately."
 implementation(@nospecialize(X), @nospecialize(R)) = nothing
 
@@ -46,6 +47,7 @@ end
 ProjRec(project, R, copies::Bool, dyn) = ProjRec(project, R, copies, dyn, 0, nothing, nothing)
 ProjRec(project, R, copies::Bool, dyn, field::Int) = ProjRec(project, R, copies, dyn, field, nothing, nothing)
 ProjRec(project, R, copies::Bool, dyn, field::Int, inverse) = ProjRec(project, R, copies, dyn, field, inverse, nothing)
+Base.Experimental.@max_methods 1 function projection end
 "`projection(X, T)`: a `ProjRec`, or `nothing`. A representation is its own projection."
 projection(@nospecialize(X), @nospecialize(T)) = nothing
 
@@ -60,6 +62,8 @@ function deep_concrete(@nospecialize(T); seen = Base.IdSet{Any}())
     T in seen && return true
     push!(seen, T)
     isconcretetype(T) || return false
+    # the design's dynamic positions: their `Any` field is what they are (note "Dynamic values", "Callable")
+    (T <: Dynamic || T <: Erased || T <: Handle) && return true
     if T isa DataType
         for p in T.parameters
             deep_concrete(p; seen) || return false
@@ -171,11 +175,13 @@ function conformance_problems(@nospecialize(X), @nospecialize(R), ops)
     return problems
 end
 
-const _FAMILY_WARNED = Set{Tuple{Any,Any}}()
+# keyed by Pair{Any,Any}: one specialization of the dictionary code, held in this image (a tuple key
+# would compile `haskey` per pair of key types, at a new trait's first call)
+const _FAMILY_WARNED = Set{Pair{Any,Any}}()
 
 # --- witnesses -------------------------------------------------------------------
 
-const _WITNESS = Dict{Tuple{Any,Any},Any}()
+const _WITNESS = Dict{Pair{Any,Any},Any}()
 const _WITNESS_WORLD = Ref{UInt}(0)
 
 function _flush_if_stale!(cache::Dict, worldref::Ref{UInt})
@@ -196,7 +202,7 @@ How representation `R` implements trait `X`: `Impl{defaults}()`, or a
 function witness(@nospecialize(X), @nospecialize(R))
     @lock _LOCK begin
         _flush_if_stale!(_WITNESS, _WITNESS_WORLD)
-        key = (X, R)
+        key = Pair{Any,Any}(X, R)
         haskey(_WITNESS, key) && return _WITNESS[key]
         w = _witness(X, R)
         _WITNESS[key] = w
@@ -240,8 +246,8 @@ function _witness(@nospecialize(X), @nospecialize(R))
         rec.kind === :methods && return Impl{rec.defaults}()
         # existing methods: defaults per representation
         D = _existing_defaults(X, R)
-        if rec.kind === :family && isconcretetype(R) && !((X, R) in _FAMILY_WARNED)
-            push!(_FAMILY_WARNED, (X, R))
+        if rec.kind === :family && isconcretetype(R) && !(Pair{Any,Any}(X, R) in _FAMILY_WARNED)
+            push!(_FAMILY_WARNED, Pair{Any,Any}(X, R))
             ps = conformance_problems(X, R, Tuple(op for op in _ops(X) if !(op in D)))
             isempty(ps) || @warn "$R is declared $(X) through a family, but does not conform:\n  " * join(ps, "\n  ")
         end
@@ -267,9 +273,9 @@ function _witness(@nospecialize(X), @nospecialize(R))
     k, g, subs = found[1]
     sub = Tuple(Wit{_instance(Y, R)}(wy) for (Y, wy) in subs)
     w = Generic{X,k,typeof(sub),g.defaults}(sub)
-    if isconcretetype(R) && !((X, R) in _FAMILY_WARNED)
+    if isconcretetype(R) && !(Pair{Any,Any}(X, R) in _FAMILY_WARNED)
         # a generic implementation's results are checked at each concrete representation, as a family's are
-        push!(_FAMILY_WARNED, (X, R))
+        push!(_FAMILY_WARNED, Pair{Any,Any}(X, R))
         ps = _generic_problems(X, k, g, sub, R)
         isempty(ps) || @warn "the generic implementation of $X does not conform at $R:\n  " * join(ps, "\n  ")
     end
@@ -321,7 +327,7 @@ function proj_lookup(@nospecialize(X), @nospecialize(T))
     return ProjRec(identity, T, false, nothing)
 end
 
-const _PWITNESS = Dict{Tuple{Any,Any},Any}()
+const _PWITNESS = Dict{Pair{Any,Any},Any}()
 const _PWITNESS_WORLD = Ref{UInt}(0)
 
 "The witness a projection gives trait `X`: the representation's, or a dynamic table in front of it."
@@ -329,7 +335,7 @@ function proj_witness(@nospecialize(X), @nospecialize(T), p::ProjRec)
     p.dyn === nothing && return witness(X, p.R)
     @lock _LOCK begin
         _flush_if_stale!(_PWITNESS, _PWITNESS_WORLD)
-        get!(_PWITNESS, (X, T)) do
+        get!(_PWITNESS, Pair{Any,Any}(X, T)) do
             _dyn_witness(X, p)
         end
     end
@@ -508,13 +514,14 @@ end
 
 # --- conformances as methods (keys-plan §6) -----------------------------------------
 
+Base.Experimental.@max_methods 1 function _declared_defaults end
 """
 `_declared_defaults(X, T)`: the operations a declared conformance of `T` to `X` serves by
 defaults, as `(trait, implementing type, operations)` records, one method per conformance,
 defined with it so that it is saved with the declaring package (note "Declaring a trait":
 an override belongs to the conformance).
 """
-function _declared_defaults end
+_declared_defaults
 
 """
 What a conformance declaration fixes, after its checks: the builder of its views
@@ -931,6 +938,14 @@ function _implement_oneline(mod::Module, traits::Vector{Any}, Tex, Rdecl; pexs =
         error("@implement: the one-line form needs a concrete type, got `$Tex` (the prototype does not declare parametric families this way)")
     Xs = Any[Core.eval(mod, x) for x in traits]
     all(is_trait, Xs) || error("@implement: `$(traits[findfirst(!is_trait, Xs)])` is not a trait")
+    # parameters the conformance states (`@implement ODEModel{Float64} Lorenz`): defined now, because
+    # the checks below read the operations' declared types, which name them
+    if pexs !== nothing
+        for ex in _param_methods(Xs[1], pexs, Tex, Any[])
+            Core.eval(mod, ex)
+        end
+        pexs = nothing
+    end
     # a trait that declares its projection field (`data::R`) names the field
     pfs = unique(Symbol[f for X in Xs for (f, _) in trait_fields(X) if field_isrep(X, Val(f))])
     if !isempty(pfs)

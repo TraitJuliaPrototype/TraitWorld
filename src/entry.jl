@@ -119,12 +119,12 @@ function _conformance_builder(@nospecialize(X), @nospecialize(T))
     return b isa Builder ? b : nothing
 end
 
-const _SLOW = Ref(IdDict{Any,Any}())                  # (X, U) => Builder or NOTRAIT; copy-on-write
+const _SLOW = Ref(IdDict{Any,Any}())                  # Pair(X, U) => Builder or NOTRAIT; copy-on-write
 const _SLOW_GEN = Ref{UInt}(0)
 "The conformance of a type with no method of its own: a generic implementation, a family, a dynamic one."
 @noinline function _conformance_slow(@nospecialize(X), @nospecialize(u))
     U = typeof(u)
-    key = (X, U)
+    key = Pair{Any,Any}(X, U)
     if CLOSED_WORLD[] || _SLOW_GEN[] == GENERATION[]
         b = get(_SLOW[], key, nothing)
         b === nothing || return b === NOTRAIT ? NOTRAIT : (b::Builder)(u)
@@ -151,6 +151,7 @@ struct EntryPos{F,pos,nargs} end
 "The traits a bound or a position needs, as a type: `TraitList{Tuple{ColTable, RowTable}}`."
 struct TraitList{L<:Tuple} end
 
+Base.Experimental.@max_methods 1 function needed end
 """
     needed(EntryPos{F, pos, nargs}())
 
@@ -158,6 +159,7 @@ The traits the workers of `F` need at a position, as a `TraitList`. A trait modu
 method per entry position when it is complete (`_finish_module`), and again when a later
 definition adds a bound; until then this fallback computes it.
 """
+needed
 needed(::EntryPos{F,pos,nargs}) where {F,pos,nargs} = Base.inferencebarrier(_needed_slow)(F, pos, nargs)
 _needed_slow(@nospecialize(F), pos::Int, nargs::Int) = TraitList{Tuple{traits_at(F.instance, pos, nargs)...}}()
 
