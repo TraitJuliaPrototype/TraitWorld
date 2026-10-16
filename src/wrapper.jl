@@ -154,7 +154,7 @@ function _filter_scan!(r::Module)
     isdefined(r, :__trait_module__) && _filter_add!(r)
     isempty(_PROTECT) || String(nameof(r)) in _PROTECT && _filter_add!(r)
     for n in names(r; all = true, imported = false)
-        isdefined(r, n) || continue
+        (isdefined(r, n) && !Base.isdeprecated(r, n)) || continue
         x = getglobal(r, n)
         x isa Module && x !== r && parentmodule(x) === r && isdefined(x, :__trait_module__) && _filter_add!(x)
     end

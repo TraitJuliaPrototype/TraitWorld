@@ -274,7 +274,7 @@ end
 function _has_trait_module(m::Module)
     isdefined(m, :__trait_module__) && return true
     for n in names(m; all = true)
-        isdefined(m, n) || continue
+        (isdefined(m, n) && !Base.isdeprecated(m, n)) || continue
         x = getglobal(m, n)
         x isa Module && x !== m && parentmodule(x) === m && isdefined(x, :__trait_module__) && return true
     end
