@@ -305,9 +305,8 @@ end
 function _mksig(fname, args, kws, ret, wheres)
     s = isempty(kws) ? Expr(:call, fname, args...) : Expr(:call, fname, Expr(:parameters, kws...), args...)
     ret === nothing || (s = Expr(:(::), s, ret))
-    for w in wheres
-        s = Expr(:where, s, w)
-    end
+    # one `where {…}`: a type variable declared earlier is in scope in a later bound (`R1, T >: ColTable{R1}`)
+    isempty(wheres) || (s = Expr(:where, s, wheres...))
     return s
 end
 
@@ -409,20 +408,31 @@ function _rewrite_fdef(mod::Module, ex)
     # --- the worker
     wargs = Any[]
     newwheres = Any[]
-    function tobj_bound(x)
+    function tobj_bound(x; perelement::Bool = false)
         T = gensym(:T)
+        fams = Any[]
         closure = Any[]
-        for X in x.traits, Y in trait_closure(X)
-            any(z -> z === Y, closure) || push!(closure, Y)
+        # a vararg's elements may differ in representation: each is its own existential type
+        wl = perelement ? Any[] : newwheres
+        # every trait, and its supertraits, as a pattern with a type variable for each open
+        # parameter (the representation included): `TT >: Union{ColTable{R1}, ArrayLike{Float64, N1, R2}}`
+        for X in x.traits
+            F = _family(X)
+            for Y in trait_closure(F)
+                any(z -> z === Y, fams) && continue
+                push!(fams, Y)
+                push!(closure, _pattern_expr!(Y === F ? X : Y, wl))
+            end
         end
-        push!(newwheres, Expr(:(>:), T, Expr(:curly, :Union, closure...)))
+        push!(wl, Expr(:(>:), T, Expr(:curly, :Union, closure...)))
+        perelement && return Expr(:where, :($TraitWorld.TObj{$T}), wl...)
         return :($TraitWorld.TObj{$T})
     end
     for x in args
         if x.kind === :trait
             push!(wargs, :($(x.name)::$(tobj_bound(x))))
         elseif x.kind === :vararg_trait
-            push!(wargs, Expr(:..., :($(x.name)::$(tobj_bound(x)))))
+            push!(wargs, Expr(:..., :($(x.name)::$(tobj_bound(x; perelement = true)))))
         elseif x.kind === :callable
             push!(wargs, :($(x.name)::$TraitWorld.CObj{$(x.A),$(x.S)}))
         elseif x.kind === :callables
@@ -710,6 +720,27 @@ function check_entry_ambiguities(@nospecialize(f))
     return nothing
 end
 
+"""
+A trait bound as a pattern for a worker's signature: the family applied to the
+parameters the bound fixes and a fresh type variable for each open one,
+including the representation; the variables are added to `wheres`.
+"""
+function _pattern_expr!(@nospecialize(X), wheres::Vector{Any})
+    u = Base.unwrap_unionall(X)
+    fam = u.name.wrapper
+    args = Any[]
+    for p in u.parameters
+        if p isa TypeVar
+            s = gensym(p.name)
+            push!(wheres, s)
+            push!(args, s)
+        else
+            push!(args, p)
+        end
+    end
+    return Expr(:curly, fam, args...)
+end
+
 "The unresolved pairs of bounds of `f`'s workers; throws if there are any."
 function check_bounds(@nospecialize(f))
     ws = Any[]
@@ -725,7 +756,7 @@ function check_bounds(@nospecialize(f))
                 push!(rest, p)
             else
                 any_t = true
-                push!(bs, Base.uniontypes(lb))
+                push!(bs, unique(_family.(Base.uniontypes(lb))))
                 push!(rest, :trait)
             end
         end

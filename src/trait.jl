@@ -76,15 +76,51 @@ function _parse_trait_header(h)
         end
         h = h.args[1]
     end
-    h isa Expr && h.head === :curly && length(h.args) == 2 && h.args[1] isa Symbol && h.args[2] isa Symbol ||
-        error("@trait: expected `Name{R}`, got `$h`")
-    return h.args[1]::Symbol, h.args[2]::Symbol, supers
+    h isa Expr && h.head === :curly && length(h.args) >= 2 && h.args[1] isa Symbol && h.args[end] isa Symbol ||
+        error("@trait: expected `Name{R}` or `Name{P…, R}`, the representation last; got `$h`")
+    # parameters before the representation: associated types, optionally bounded (`T <: NumberLike`)
+    params = Any[]
+    for a in h.args[2:end-1]
+        if a isa Symbol
+            push!(params, (a, nothing))
+        elseif a isa Expr && a.head === :(<:) && a.args[1] isa Symbol
+            push!(params, (a.args[1], a.args[2]))
+        else
+            error("@trait: a parameter is a name, optionally bounded (`T <: NumberLike`); got `$a`")
+        end
+    end
+    return h.args[1]::Symbol, h.args[end]::Symbol, supers, params
+end
+
+"Replace the parameter names in a type expression by their values at the representation: `T` becomes `param(X, Val(:T), R)`."
+function _subst_params(ex, pnames::Vector{Symbol}, name, Rsym::Symbol)
+    TW = TraitWorld
+    ex isa Symbol && ex in pnames && return :($TW.param($name, Val($(QuoteNode(ex))), $Rsym))
+    ex isa Expr || return ex
+    return Expr(ex.head, Any[_subst_params(a, pnames, name, Rsym) for a in ex.args]...)
+end
+
+"The `where` clause of a method on trait objects carrying trait `name`: a type variable per parameter and the representation."
+function _tobj_where(name, np::Int, T::Symbol)
+    vs = [gensym(:P) for _ in 1:np+1]
+    return Any[vs..., Expr(:(>:), T, Expr(:curly, name, vs...))]
 end
 
 macro trait(header, block = nothing)
-    name, Rsym, supers = _parse_trait_header(header)
+    name, Rsym, supers, params = _parse_trait_header(header)
     TW = TraitWorld
-    out = Any[:(Core.@__doc__ abstract type $name{$Rsym} <: $TW.Trait end)]
+    pnames = Symbol[p for (p, _) in params]
+    np = length(pnames)
+    out = Any[:(Core.@__doc__ abstract type $name{$(pnames...), $Rsym} <: $TW.Trait end)]
+    if np > 0
+        push!(out, :($TW.trait_params(::Type{$name}) = $(Tuple(pnames))))
+        for (i, (p, b)) in enumerate(params)
+            key = QuoteNode(p)
+            # at an archetype: the value a bound fixes, else an opaque stand-in
+            push!(out, :($TW.param(::Type{$name}, ::Val{$key}, ::Type{A}) where {A <: $TW.Archetype} = $TW._archparam(A, $name, $key, $i)))
+            b === nothing || push!(out, :($TW.param_bound(::Type{$name}, ::Val{$key}) = $b))
+        end
+    end
     if block === nothing
         isempty(supers) && error("@trait: `$name` has neither operations nor traits it bundles")
         push!(out, :($TW.bundle(::Type{$name}) = ($(supers...),)))
@@ -97,7 +133,10 @@ macro trait(header, block = nothing)
     fdecls = Any[]                     # (name, type expression, writable)
     for ex in block.args
         ex isa LineNumberNode && continue
-        if ex isa Expr && ex.head === :(::) && length(ex.args) == 2 && ex.args[1] isa Symbol
+        if ex isa Expr && ex.head === :(=) && ex.args[1] isa Symbol && ex.args[1] in pnames
+            # a defining equation: the parameter as a function of the representation (`T = eltype(R)`)
+            push!(out, :($TW.param(::Type{$name}, ::Val{$(QuoteNode(ex.args[1]))}, ::Type{$Rsym}) where {$Rsym} = $(ex.args[2])))
+        elseif ex isa Expr && ex.head === :(::) && length(ex.args) == 2 && ex.args[1] isa Symbol
             push!(fdecls, (ex.args[1], ex.args[2], true))          # a field, writable as in a mutable struct
         elseif ex isa Expr && ex.head === :macrocall && ex.args[1] === Symbol("@const") &&
                ex.args[end] isa Expr && ex.args[end].head === :(::) && ex.args[end].args[1] isa Symbol
@@ -122,10 +161,10 @@ macro trait(header, block = nothing)
             push!(out, :(function $(d.fexpr) end))
         end
         N = length(d.args)
-        argtypes = [t for (_, t) in d.args]
+        argtypes = [_subst_params(t, pnames, name, Rsym) for (_, t) in d.args]
         first_decl && push!(out, :($TW.op_function(::Type{$name}, ::Val{$key}) = $(d.fexpr)))
         push!(out, :($TW.op_args(::Type{$name}, ::Val{$key}, ::Type{$Rsym}, ::Val{$N}) where {$Rsym} = Tuple{$(argtypes...)}))
-        push!(out, :($TW.op_ret(::Type{$name}, ::Val{$key}, ::Type{$Rsym}, ::Val{$N}) where {$Rsym} = $(d.ret)))
+        push!(out, :($TW.op_ret(::Type{$name}, ::Val{$key}, ::Type{$Rsym}, ::Val{$N}) where {$Rsym} = $(_subst_params(d.ret, pnames, name, Rsym))))
         d.mutating && push!(out, :($TW.is_mutating(::Type{$name}, ::Val{$key}) = true))
         if d.default !== nothing
             argnames = [n for (n, _) in d.args]
@@ -136,15 +175,16 @@ macro trait(header, block = nothing)
         first_decl || continue
         # the operation on trait objects: the only methods library code can call on one
         T = gensym(:T)
-        push!(out, :(@inline $(d.fexpr)(t::$TW.TObj{$T}, args...) where {$T >: $name} =
-                         $TW.opcall($name, Val($key), $(d.fexpr), t, args...)))
+        push!(out, Expr(:macrocall, Symbol("@inline"), LineNumberNode(0),
+                        Expr(:(=), Expr(:where, :($(d.fexpr)(t::$TW.TObj{$T}, args...)), _tobj_where(name, np, T)...),
+                             Expr(:block, :($TW.opcall($name, Val($key), $(d.fexpr), t, args...))))))
     end
     # the operations on a dynamic value: dispatch on the trait object it keeps, assert the
     # declared result type where it does not depend on the representation
     for d in decls
         syms = [gensym(:a) for _ in d.args]
-        retx = _mentions(d.ret, Rsym) ? :Any : d.ret
-        push!(out, :(@inline $(d.fexpr)(dyn::$TW.Dynamic{$name}, $(syms...)) =
+        retx = (_mentions(d.ret, Rsym) || any(p -> _mentions(d.ret, p), pnames)) ? :Any : d.ret
+        push!(out, :(@inline $(d.fexpr)(dyn::$TW.Dynamic{<:$name}, $(syms...)) =
                          $TW._dyn_assert($(d.fexpr)($TW.opened(dyn), $(syms...)), $retx)))
     end
     # fields: properties of the representation, or (type R) the projection, read through a lens when written
@@ -153,11 +193,12 @@ macro trait(header, block = nothing)
         for (f, Tex, w) in fdecls
             key = QuoteNode(f)
             T = gensym(:T)
-            push!(out, :($TW.field_type(::Type{$name}, ::Val{$key}, ::Type{$Rsym}) where {$Rsym} = $Tex))
+            push!(out, :($TW.field_type(::Type{$name}, ::Val{$key}, ::Type{$Rsym}) where {$Rsym} = $(_subst_params(Tex, pnames, name, Rsym))))
             Tex === Rsym && push!(out, :($TW.field_isrep(::Type{$name}, ::Val{$key}) = true))
-            push!(out, :(@inline $TW._tgetprop(t::$TW.TObj{$T}, ::Val{$key}) where {$T >: $name} = $TW.fieldget($name, Val($key), t)))
-            push!(out, w ? :(@inline $TW._tsetprop!(t::$TW.TObj{$T}, ::Val{$key}, x) where {$T >: $name} = $TW.fieldset!($name, Val($key), t, x)) :
-                           :($TW._tsetprop!(t::$TW.TObj{$T}, ::Val{$key}, x) where {$T >: $name} = $TW._readonly($name, $key)))
+            push!(out, Expr(:(=), Expr(:where, :($TW._tgetprop(t::$TW.TObj{$T}, ::Val{$key})), _tobj_where(name, np, T)...),
+                            :($TW.fieldget($name, Val($key), t))))
+            push!(out, Expr(:(=), Expr(:where, :($TW._tsetprop!(t::$TW.TObj{$T}, ::Val{$key}, x)), _tobj_where(name, np, T)...),
+                            w ? :($TW.fieldset!($name, Val($key), t, x)) : :($TW._readonly($name, $key))))
         end
     end
     push!(out, :($TW._bump!()))

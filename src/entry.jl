@@ -135,7 +135,7 @@ end
                           "its own trait is expected (rule 2): declare every bound the callee needs, so the caller projects each."))
 end
 
-_traitlist(::Type{TObj{T,V}}) where {T,V} = join(string.(Base.uniontypes(T)), ", ")
+_traitlist(::Type{TObj{T,V}}) where {T,V} = join(unique(string.(_family.(Base.uniontypes(T)))), ", ")
 
 "The lower bound of a worker's trait position, `TObj{T} where T >: Union{…}`, or `nothing`."
 function _tobj_lb(@nospecialize(p))
@@ -169,7 +169,8 @@ function traits_at(@nospecialize(f), pos::Int, nargs::Int)
         lb = _tobj_lb(p)
         (lb === nothing || lb === Union{}) && continue
         for X in Base.uniontypes(lb)
-            _hasid(out, X) || push!(out, X)
+            F = _family(X)                     # a pattern (`ArrayLike{Float64, N, R}`): its trait family
+            _hasid(out, F) || push!(out, F)
         end
     end
     return out
@@ -226,7 +227,65 @@ end
     return merge(nt, NamedTuple{(k,)}((enter_callable(A, S, M, getfield(nt, k)),)))
 end
 
-_builder(@nospecialize(f), pos::Int, nargs::Int, @nospecialize(U)) = _builder_for(traits_at(f, pos, nargs), U)
+function _builder(@nospecialize(f), pos::Int, nargs::Int, @nospecialize(U))
+    b = _builder_for(traits_at(f, pos, nargs), U)
+    b isa Builder && _check_bound_params(f, pos, nargs, U, b)
+    return b
+end
+
+"The trait patterns each worker of `f` needs at position `pos` (`StateVector{Float64, R}`), one list per method."
+function bound_patterns(@nospecialize(f), pos::Int, nargs::Int)
+    out = Vector{Any}[]
+    for m in methods(f)
+        sig = Base.unwrap_unionall(m.sig)
+        sig isa DataType || continue
+        ps = sig.parameters::Core.SimpleVector
+        n = length(ps) - 1
+        isva = n >= 1 && Base.isvarargtype(ps[end])
+        fixed = isva ? n - 1 : n
+        if nargs == -1
+            isva || continue
+        else
+            (isva ? nargs >= fixed : nargs == fixed) || continue
+        end
+        p = pos <= fixed ? ps[pos + 1] : isva ? Base.unwrapva(ps[end]) : continue
+        lb = _tobj_lb(p)
+        (lb === nothing || lb === Union{}) && continue
+        push!(out, Any[Base.uniontypes(lb)...])
+    end
+    return out
+end
+
+"Whether trait instance `Xi` satisfies pattern `Yp`: the same trait, and the parameters the pattern fixes."
+function _pmatch(@nospecialize(Xi), @nospecialize(Yp))
+    _family(Xi) === _family(Yp) || return false
+    u = Base.unwrap_unionall(Yp)
+    u isa DataType || return true
+    for (i, q) in enumerate(u.parameters)
+        q isa TypeVar && continue
+        i <= length(Xi.parameters) && Xi.parameters[i] == q || return false
+    end
+    return true
+end
+
+"A value whose conformance is at parameters no method's bounds accept is refused at the entry, naming them."
+function _check_bound_params(@nospecialize(f), pos::Int, nargs::Int, @nospecialize(U), b::Builder)
+    insts = Any[]
+    for g in b.groups, w in g.ws
+        push!(insts, typeof(w).parameters[1])
+    end
+    pats = bound_patterns(f, pos, nargs)
+    isempty(pats) && return nothing
+    for ps in pats
+        all(Yp -> any(Xi -> _pmatch(Xi, Yp), insts), ps) && return nothing
+    end
+    Base.inferencebarrier(_bound_params_error)(f, pos, U, insts, pats)
+end
+@noinline function _bound_params_error(@nospecialize(f), pos::Int, @nospecialize(U), insts, pats)
+    need = join(unique([join(string.(Base.rewrap_unionall.(ps, Ref(Any))), " and ") for ps in pats]), "; or ")
+    throw(TraitBoundError("$U conforms as $(join(string.(insts), ", ")), but `$f` needs at argument $pos " *
+                          "a value conforming at the parameters its bounds fix: $need"))
+end
 
 "The builder of a trait object carrying the traits `needed` for a value of type `U`, or `NOTRAIT`."
 function _builder_for(needed::Vector{Any}, @nospecialize(U))
@@ -258,7 +317,7 @@ function _builder_for(needed::Vector{Any}, @nospecialize(U))
             push!(seen, Y)
             w = Y === X ? proj_witness(X, U, p) : witness(Y, p.R)
             w === nothing && throw(TraitBoundError("$(U) projects onto $(p.R) for $X, but $(p.R) does not implement $Y"))
-            push!(ws, Wit{Y}(w))
+            push!(ws, Wit{_instance(Y, p.R)}(w))     # the view carries the trait instance at the representation
         end
         wst = Tuple(ws)
         if p.field != 0 && ismutabletype(U) && !isconst(U, fieldname(U, p.field)) && fieldtype(U, p.field) === p.R

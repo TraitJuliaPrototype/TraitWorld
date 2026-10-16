@@ -105,8 +105,31 @@ end
 @inline TObj(views::Tuple) = TObj{_traitset(typeof(views)),typeof(views)}(views)
 
 @inline viewof(t::TObj, ::Type{X}) where {X} = _viewof(X, getfield(t, :views)...)
-@inline _viewof(::Type{X}, v::AbstractView{X}, rest::AbstractView...) where {X} = v
-@inline _viewof(::Type{X}, v::AbstractView, rest::AbstractView...) where {X} = _viewof(X, rest...)
+# a view carries a trait instance (`ArrayLike{Float64, 1, Vector{Float64}}`); `X` is the trait family
+@inline _viewof(::Type{X}, v::AbstractView{Y}, rest::AbstractView...) where {X,Y} = Y <: X ? v : _viewof(X, rest...)
+
+# --- trait parameters: associated types (note "Declaring a trait": Parameters) ------------
+
+"The trait family of a trait instance (`ArrayLike{Float64, 1, Vector{Float64}}` gives `ArrayLike`), or `X` itself."
+_family(@nospecialize(X)) = (u = Base.unwrap_unionall(X); u isa DataType && u <: Trait ? u.name.wrapper : X)
+"`trait_params(X)`: the names of trait `X`'s parameters besides the representation, in order."
+trait_params(@nospecialize(X)) = ()
+"""
+`param(X, Val(p), R)`: parameter `p` of trait `X` at representation `R`, an
+associated type: one value per conformance, defined by the trait's equation
+(`T = eltype(R)`) or by the conformance (`@implement ArrayLike{Float64, 1} MyVector`).
+"""
+function param end
+"`param_bound(X, Val(p))`: the bound a trait declares on its parameter `p` (`T <: NumberLike`)."
+function param_bound end
+"The trait instance a view of representation `R` carries: `X` with its parameters at `R`, the representation last."
+function _instance(@nospecialize(X), @nospecialize(R))
+    ps = trait_params(X)
+    isempty(ps) && return X{R}
+    return Core.apply_type(X, Any[param(X, Val(p), R) for p in ps]..., R)
+end
+"Whether a trait object carrying the traits `T` (a union of instances) carries `X`, a family or a partly applied instance."
+_carries(@nospecialize(T), @nospecialize(X)) = any(Y -> Y <: X, Base.uniontypes(T))
 
 # --- dynamic values ----------------------------------------------------------
 
@@ -124,7 +147,7 @@ its representation runs.
 struct Dynamic{X}
     t::Any
     function Dynamic{X}(t::TObj{T}) where {X,T}
-        X <: T || Base.inferencebarrier(_dyn_refuse)(X, T)
+        _carries(T, X) || Base.inferencebarrier(_dyn_refuse)(X, T)
         return new{X}(_kept(t))
     end
 end

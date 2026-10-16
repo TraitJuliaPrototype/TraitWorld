@@ -256,7 +256,7 @@ function _witness(@nospecialize(X), @nospecialize(R))
     isempty(found) && return nothing
     length(found) > 1 && Base.inferencebarrier(_ambiguous_generic)(X, R, found)
     k, g, subs = found[1]
-    sub = Tuple(Wit{Y}(wy) for (Y, wy) in subs)
+    sub = Tuple(Wit{_instance(Y, R)}(wy) for (Y, wy) in subs)
     w = Generic{X,k,typeof(sub),g.defaults}(sub)
     if isconcretetype(R) && !((X, R) in _FAMILY_WARNED)
         # a generic implementation's results are checked at each concrete representation, as a family's are
@@ -555,14 +555,19 @@ macro implement(args...)
     if head isa Expr && head.head === :where
         return _implement_where(mod, head, block)
     end
-    head isa Expr && head.head === :curly && length(head.args) == 2 ||
+    head isa Expr && head.head === :curly && length(head.args) >= 2 ||
         error("@implement: expected `Trait{R}`, `Trait{R} where {…}`, or `Trait T …`; got `$head`")
     X = Core.eval(mod, head.args[1])
-    Rex = head.args[2]
+    np = length(trait_params(X))
+    length(head.args) == np + 2 ||
+        error("@implement: $X takes $(np == 0 ? "the representation" : "$np parameter(s) and the representation, last"); got `$head`")
+    Rex = head.args[end]
+    pdefs = _param_methods(X, head.args[2:end-1], Rex, Any[])
     if block === nothing
         # the representation's existing methods implement the trait (Base's, or its owner's)
         rec = gensym(:implementation)
         return esc(quote
+            $(pdefs...)
             const $rec = $TW.ImplRec(:existing, ())
             $TW.implementation(::Type{$X}, ::Type{$Rex}) = $rec
             $TW._check_implementation(@__MODULE__, $X, $Rex,
@@ -574,7 +579,8 @@ macro implement(args...)
     defs = _defs(block)
     given = Tuple(unique(_defname.(defs)))
     defaults = _missing_and_defaults(X, given)
-    out = Any[_op_method(mod, X, d, Rex) for d in defs]
+    out = Any[pdefs...]
+    append!(out, Any[_op_method(mod, X, d, Rex) for d in defs])
     rec = gensym(:implementation)
     push!(out, :(const $rec = $TW.ImplRec(:methods, $defaults)))
     push!(out, :($TW.implementation(::Type{$X}, ::Type{$Rex}) = $rec))
@@ -584,9 +590,61 @@ macro implement(args...)
     return esc(Expr(:block, out...))
 end
 
+"The methods of `param` a conformance declares: parameter values at the representation `Rex`, under `wheres`."
+function _param_methods(@nospecialize(X), pexs, Rex, wheres::Vector{Any})
+    TW = TraitWorld
+    ps = trait_params(X)
+    length(pexs) == length(ps) || error("@implement: $X takes $(length(ps)) parameter(s), got $(length(pexs))")
+    out = Any[]
+    for (p, pex) in zip(ps, pexs)
+        sig = :($TW.param(::Type{$X}, ::Val{$(QuoteNode(p))}, ::Type{$Rex}))
+        push!(out, Expr(:(=), isempty(wheres) ? sig : Expr(:where, sig, wheres...), pex))
+    end
+    return out
+end
+
+"""
+A family conformance: `@implement StateVector{T, Vector{T}} where {T <: Real} begin … end`
+(the trait's parameters and the representation, a family of types), or without
+a block the family's existing methods, as in the joint form
+`@implement ArrayLike{T, 1} Series{T} where {T}`. Each member conforms at one
+value of each parameter (associated types).
+"""
+function _implement_family(mod::Module, @nospecialize(X), tr, wheres::Vector{Any}, block)
+    TW = TraitWorld
+    np = length(trait_params(X))
+    length(tr.args) == np + 2 || error("@implement: $X takes $np parameter(s) and the representation, last; got `$tr`")
+    Rex = tr.args[end]
+    out = _param_methods(X, tr.args[2:end-1], Rex, wheres)
+    rec = gensym(:implementation)
+    if block === nothing
+        push!(out, :(const $rec = $TW.ImplRec(:family, ())))
+    else
+        defs = _defs(block)
+        given = Tuple(unique(_defname.(defs)))
+        defaults = _missing_and_defaults(X, given)
+        for d in defs
+            m = _op_method(mod, X, d, Rex)
+            push!(out, Expr(m.head, Expr(:where, m.args[1], wheres...), m.args[2]))
+        end
+        push!(out, :(const $rec = $TW.ImplRec(:methods, $defaults)))
+    end
+    push!(out, Expr(:(=), Expr(:where, :($TW.implementation(::Type{$X}, ::Type{$Rex})), wheres...), rec))
+    push!(out, :($TW._check_implementation(@__MODULE__, $X, $(Expr(:where, Rex, wheres...)), ())))
+    push!(out, :($TW._bump!()))
+    push!(out, :nothing)
+    return esc(Expr(:block, out...))
+end
+
 function _implement_where(mod::Module, head, block)
     TW = TraitWorld
     tr = head.args[1]
+    if tr isa Expr && tr.head === :curly
+        Xw = Core.eval(mod, tr.args[1])
+        if !isempty(trait_params(Xw)) || !(length(tr.args) == 2 && tr.args[2] isa Symbol)
+            return _implement_family(mod, Xw, tr, Any[head.args[2:end]...], block)
+        end
+    end
     tr isa Expr && tr.head === :curly && length(tr.args) == 2 && tr.args[2] isa Symbol ||
         error("@implement: expected `Trait{R} where {…}`")
     X = Core.eval(mod, tr.args[1])
@@ -667,7 +725,7 @@ projection, composed with that type's own projection if it has one. Methods
 win over a field; partial methods, several conforming fields without `data`,
 or no conforming field are errors naming the operation or the fields.
 """
-function _implement_oneline(mod::Module, traits::Vector{Any}, Tex, Rdecl)
+function _implement_oneline(mod::Module, traits::Vector{Any}, Tex, Rdecl; pexs = nothing)
     TW = TraitWorld
     Rdecl === nothing || error("@implement: the one-line form takes no representation; write `@implement $(traits[1]){$Rdecl} $Tex project(t) = …`")
     T = Core.eval(mod, Tex)
@@ -687,6 +745,7 @@ function _implement_oneline(mod::Module, traits::Vector{Any}, Tex, Rdecl)
     if all(X -> _methods_cover(X, T), Xs)
         # the type is its own representation: its existing methods, checked as an implementation
         out = Any[]
+        pexs === nothing || append!(out, _param_methods(Xs[1], pexs, Tex, Any[]))
         for (xex, X) in zip(traits, Xs)
             rec = gensym(:implementation)
             push!(out, :(const $rec = $TW.ImplRec(:existing, ())))
@@ -753,20 +812,36 @@ function _implement_projection(mod::Module, head, rest; field::Int = 0)
     TW = TraitWorld
     traits = Any[]
     Rdecl = nothing
+    pexs = nothing
     if head isa Expr && head.head === :tuple
         append!(traits, head.args)
     elseif head isa Expr && head.head === :curly
         push!(traits, head.args[1])
-        Rdecl = head.args[2]
+        np = length(trait_params(Core.eval(mod, head.args[1])))
+        a = head.args[2:end]
+        if np > 0 && length(a) == np
+            pexs = a                              # the trait's parameters: `@implement ArrayLike{Float64, 1} MyVector`
+        elseif length(a) == np + 1
+            np > 0 && (pexs = a[1:np])
+            Rdecl = a[end]
+        else
+            error("@implement: $(head.args[1]) takes $np parameter(s)" * (np > 0 ? ", then optionally the representation" : " and the representation"))
+        end
     else
         push!(traits, head)
     end
     Tex = popfirst!(rest)
+    if Tex isa Expr && Tex.head === :where && isempty(rest)
+        # the joint family form: `@implement ArrayLike{T, 1} Series{T} where {T}`, the type its own representation
+        pexs === nothing && error("@implement: a family `$Tex` needs the trait's parameters")
+        X = Core.eval(mod, traits[1])
+        return _implement_family(mod, X, Expr(:curly, traits[1], pexs..., Tex.args[1]), Any[Tex.args[2:end]...], nothing)
+    end
     flags = Symbol[]
     while !isempty(rest) && _flag(rest[1])
         push!(flags, popfirst!(rest))
     end
-    isempty(rest) && isempty(flags) && return _implement_oneline(mod, traits, Tex, Rdecl)
+    isempty(rest) && isempty(flags) && return _implement_oneline(mod, traits, Tex, Rdecl; pexs)
     length(rest) == 1 || error("@implement: expected `project(t) = …` or a begin … end block after the type")
     body = rest[1]
     dynamic = :dynamic in flags

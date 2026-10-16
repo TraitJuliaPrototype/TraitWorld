@@ -11,8 +11,22 @@
 # bound with open parameters, is still checked per signature, at its first call.
 # ---------------------------------------------------------------------------
 
-"A stand-in representation of trait `X`: library code checked against `X` alone."
-struct Archetype{X} end
+"""
+A stand-in representation of trait `X`: library code checked against `X` alone.
+`P` holds the parameters a bound fixes (`ArrayLike{Float64}` fixes `T`), `ParamOpen` for the others.
+"""
+struct Archetype{X,P} end
+"An open parameter `p` of trait `X` at an archetype: a type with no methods."
+struct ParamArchetype{X,p} end
+struct ParamOpen end
+"Parameter `p` (the `i`th) of trait `Y` at archetype `A`: fixed by the bound, else an opaque stand-in."
+function _archparam(::Type{Archetype{X,P}}, @nospecialize(Y), p::Symbol, i::Int) where {X,P}
+    if Y === X && i <= length(P.parameters)
+        v = P.parameters[i]
+        v === ParamOpen || return v
+    end
+    return ParamArchetype{Y,p}
+end
 
 "The witness of an archetype's view: an operation answers with a value of its declared type, nothing more."
 struct ArchWit end
@@ -31,6 +45,7 @@ function _arch_traits(@nospecialize(X), out = Any[])
         end
         return out
     end
+    X = _family(X)
     _hasid(out, X) || push!(out, X)
     for S in supertraits(X)
         _arch_traits(S, out)
@@ -41,14 +56,21 @@ end
 """
     archetype_tobj(lb)
 
-The trait object a worker sees at a position bounded by the traits in `lb`,
-each bound at its own archetype, its supertraits' views sharing it.
+The trait object a worker sees at a position bounded by the trait patterns in
+`lb` (`ArrayLike{Float64, N, R}`, open parameters as type variables): each
+bound at its own archetype, which keeps the parameters the bound fixes; its
+supertraits' views share it.
 """
 function archetype_tobj(@nospecialize(lb))
     views = Any[]
-    for X in Base.uniontypes(lb)
+    for Yp in Base.uniontypes(lb)
+        X = _family(Yp)
+        u = Base.unwrap_unionall(Yp)
+        fixed = u isa DataType && length(u.parameters) > 1 ?
+                Any[p isa TypeVar ? ParamOpen : p for p in u.parameters[1:end-1]] : Any[]
+        A = Archetype{X,Tuple{fixed...}}
         for Y in _arch_traits(X)
-            push!(views, View{Y,ArchWit,Archetype{X}})
+            push!(views, View{_instance(Y, A),ArchWit,A})
         end
     end
     T = Union{Any[v.parameters[1] for v in views]...}
@@ -72,12 +94,22 @@ function archetype_sig(m::Method)
             _hascallable(q) && return nothing                                # a function from above: per signature
             push!(out, q)
         else
+            _open_params(lb) && return nothing       # an open parameter: checked per signature (note "Definition checking")
             push!(out, archetype_tobj(lb))
             bounded = true
         end
     end
     return bounded ? Tuple{out...} : nothing
 end
+"Whether a bound leaves a trait parameter (other than the representation) open."
+function _open_params(@nospecialize(lb))
+    for Yp in Base.uniontypes(lb)
+        u = Base.unwrap_unionall(Yp)
+        u isa DataType && length(u.parameters) > 1 && any(p -> p isa TypeVar, u.parameters[1:end-1]) && return true
+    end
+    return false
+end
+
 function _hascallable(@nospecialize(T))
     T isa Union && return any(_hascallable, Base.uniontypes(T))
     T = Base.unwrap_unionall(T)

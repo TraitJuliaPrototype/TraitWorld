@@ -40,6 +40,7 @@ end
 "Whether `f` is an operation function of one of the traits in `lb` (its methods on trait objects forward)."
 function _is_op(@nospecialize(f), @nospecialize(lb))
     for X in Base.uniontypes(lb)
+        X = _family(X)
         is_trait(X) || continue
         for op in _ops(X)
             _opfn(X, op) === f && return true
@@ -51,7 +52,7 @@ end
 "`Type{<:TObj}` or `Type{<:CObj}`: a declaration of the machinery's own types, not a look at the user's."
 _handle_type(@nospecialize(T)) = T isa DataType && T <: Type && (T.parameters[1] <: TObj || T.parameters[1] <: CObj)
 
-_traitnames(@nospecialize(T)) = _istobj(T) ? join(string.(Base.uniontypes(T.parameters[1])), ", ") : string(T)
+_traitnames(@nospecialize(T)) = _istobj(T) ? join(unique(string.(_family.(Base.uniontypes(T.parameters[1])))), ", ") : string(T)
 
 """
     worker_problems(sig) -> Vector{String}
@@ -216,6 +217,7 @@ function _declares_field(@nospecialize(T), f::Symbol, write::Bool)
     T isa DataType && T <: TObj || return false
     Xs = T.parameters[1]
     for X in (Xs isa TypeVar ? Base.uniontypes(Xs.lb) : Base.uniontypes(Xs))
+        X = _family(X)
         is_trait(X) || continue
         for (g, w) in trait_fields(X)
             g === f && (!write || w) && return true
