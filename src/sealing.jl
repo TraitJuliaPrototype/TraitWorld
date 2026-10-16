@@ -40,6 +40,7 @@ Also settable at startup with the environment variable `JULIA_TRAITWORLD_SEAL`.
 function piracy_mode!(m::Symbol)
     m in (:refuse, :warn) || throw(ArgumentError("piracy mode must be :refuse or :warn, got :$m"))
     SEAL_MODE[] = m
+    _bump_guard!()
     return m
 end
 
@@ -56,6 +57,7 @@ function seal!(m::Module; rescan::Bool = false)
     n in SEALED && return false
     push!(SEALED, n)
     rescan && (_RESCAN[] = true)
+    _bump_guard!()
     return true
 end
 function seal_name!(n::String)
@@ -253,8 +255,12 @@ end
 "After a top-level load: find the pirates of the sealed region among the new methods, and refuse or warn."
 function _check_loads!()
     isempty(SEALED) && return nothing
+    # with the runtime's hooks, every new method was checked when it was defined or loaded; only a
+    # new seal (which turns earlier methods into pirates) needs a scan
+    _HAS_DEF_HOOK[] && !_RESCAN[] && return nothing
     found = find_pirates!()
     isempty(found) && return nothing
+    _bump_guard!()                                       # new pirates: guards audit again
     mode = SEAL_MODE[]
     if mode === :refuse
         for p in found

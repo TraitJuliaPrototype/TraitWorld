@@ -66,6 +66,7 @@ function delegates_of(@nospecialize(o))
 end
 
 function _register_wrapper!(w::Module, pkg::Module, impls::Tuple)
+    empty!(_TYPE_ROOTS)
     k = _wrap_key(pkg)
     prev = get(WRAPPERS, k, nothing)
     prev === w && return nothing
@@ -148,6 +149,7 @@ _filter_push!() = (ccall(:jl_set_trait_world_filter, Cvoid, (Any, Any), _FILTER_
 
 "Register a trait module with the filter (its code is protected)."
 function _filter_add!(m::Module)
+    empty!(_TYPE_ROOTS)                         # the policy's per-module answers may change
     _FILTER_ON[] || return nothing
     any(x -> x === m, _FILTER_MODS) && return nothing
     push!(_FILTER_MODS, m)

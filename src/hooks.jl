@@ -28,36 +28,58 @@ function _hooks_init!()
     ccall(:jl_set_method_definition_hook, Cvoid, (Any,), _on_method_definition)
     ccall(:jl_set_image_methods_hook, Cvoid, (Any,), _on_image_methods)
     _HAS_DEF_HOOK[] = true
+    # the inference hook (piece 4): newly compiled trait-world code is audited where it is compiled,
+    # so a guard need not re-audit after every world change
+    if isdefined(Base.Compiler, :_tw_infer_hook)
+        Base.Compiler._tw_infer_hook[] = _on_inferred
+        _GUARD_BY_STAMP[] = true
+    end
+    return nothing
+end
+
+"Called by the compiler after trait-world code is inferred: audit its edges; a pirate reached makes the guards audit again."
+function _on_inferred(ci::Core.CodeInstance)
+    MODE[] === :recompile && return nothing
+    findings = @lock _LOCK _walk(ci, Base.get_world_counter())
+    isempty(findings) || _bump_guard!()
     return nothing
 end
 
 # --- the index of operations served by defaults -----------------------------------------
 
-const _OVR_INDEX = Ref{Any}(nothing)          # IdDict: operation function => [(Y, op, R, X, T)]
-const _OVR_GEN = Ref{UInt}(0)
+const _OVR_INDEX = IdDict{Any,Vector{Any}}()      # operation function => [(Y, op, R, X, T)]
+const _OVR_BUILT = Ref(false)
 
-"The conformances' default-served operations by operation function, rebuilt when the generation moves."
-function _override_index()
-    idx = _OVR_INDEX[]
-    idx !== nothing && _OVR_GEN[] == GENERATION[] && return idx::IdDict{Any,Vector{Any}}
-    d = IdDict{Any,Vector{Any}}()
-    for m in methods(_declared_defaults)
-        sig = Base.unwrap_unionall(m.sig)
-        ps = sig.parameters
-        length(ps) == 3 || continue
-        (ps[2] isa DataType && ps[3] isa DataType) || continue
-        X, T = ps[2].parameters[1], ps[3].parameters[1]
-        for (Y, R, D) in Base.invokelatest(_declared_defaults, X, T)
-            for op in D
-                f = _opfn(Y, op)
-                push!(get!(d, f, Any[]), (Y, op, R, X, T))
-            end
+"Add the records of one `_declared_defaults(X, T)` method to the index."
+function _index_declared!(m::Method)
+    sig = Base.unwrap_unionall(m.sig)
+    ps = sig.parameters
+    length(ps) == 3 || return nothing
+    (ps[2] isa DataType && ps[3] isa DataType && ps[2] <: Type && ps[3] <: Type) || return nothing
+    X, T = ps[2].parameters[1], ps[3].parameters[1]
+    for (Y, R, D) in Base.invokelatest(_declared_defaults, X, T)
+        for op in D
+            f = _opfn(Y, op)
+            push!(get!(_OVR_INDEX, f, Any[]), (Y, op, R, X, T))
         end
     end
-    _OVR_INDEX[] = d
-    _OVR_GEN[] = GENERATION[]
-    return d
+    return nothing
 end
+"""
+The conformances' default-served operations by operation function: built once from the methods of
+`_declared_defaults`, then kept current by the hooks, which see every new such method.
+"""
+function _override_index()
+    if !_OVR_BUILT[]
+        empty!(_OVR_INDEX)
+        for m in methods(_declared_defaults)
+            _index_declared!(m)
+        end
+        _OVR_BUILT[] = true
+    end
+    return _OVR_INDEX
+end
+_is_declared_defaults(m::Method) = (sig = Base.unwrap_unionall(m.sig); sig isa DataType && !isempty(sig.parameters) && sig.parameters[1] === typeof(_declared_defaults))
 
 "An override that method `m` would make after a conformance whose default serves the operation, or `nothing`."
 function _override_violation(m::Method)
@@ -88,11 +110,14 @@ function _on_method_definition(m::Method, after::Bool)
             msg = _override_violation(m)
             if msg !== nothing
                 err = ImplementError(msg)
-            elseif !isempty(SEALED) && SEAL_MODE[] === :refuse
+            elseif !isempty(SEALED)
                 p = _pirate_of_sealed(m)
-                p === nothing || (err = PiracyError(_pirate_report([p], :refuse_def)))
+                if p !== nothing
+                    SEAL_MODE[] === :refuse ? (err = PiracyError(_pirate_report([p], :refuse_def))) : _bump_guard!()
+                end
             end
         else
+            _OVR_BUILT[] && _is_declared_defaults(m) && _index_declared!(m)
             # a method added to a complete trait module: its functions' keep flags may change
             mod = _finished_trait_module(m)
             mod === nothing || _refresh_keeps!(mod)
@@ -145,27 +170,50 @@ end
 "Called by the runtime with a package image's new methods before they are activated: those to leave inactive."
 function _on_image_methods(ms::Vector{Any}, pkg::String)
     refused = Any[]
-    isempty(SEALED) && return nothing
-    for m in ms
-        m isa Method || continue
-        if SEAL_MODE[] === :refuse
-            p = _pirate_of_sealed(m)
-            if p !== nothing
+    _OWNER_MEMO[] = IdDict{Module,Any}()
+    try
+        idx = _override_index()
+        for m in ms
+            m isa Method || continue
+            _is_declared_defaults(m) && Base.invokelatest(_index_declared!, m)   # the index learns the image's conformances
+        end
+        for m in ms
+            m isa Method || continue
+            if !isempty(idx) && _override_violation(m) !== nothing
                 push!(refused, m)
-                push!(_REFUSED_AT_LOAD, p)
+                push!(_REFUSED_OVERRIDES, m)
                 continue
             end
+            isempty(SEALED) && continue
+            p = _pirate_of_sealed(m)
+            p === nothing && continue
+            if SEAL_MODE[] === :refuse
+                push!(refused, m)
+                push!(_REFUSED_AT_LOAD, p)
+            else
+                push!(_WARNED_AT_LOAD, p)            # reported after the load (warn mode)
+            end
         end
-        if _override_violation(m) !== nothing
-            push!(refused, m)
-            push!(_REFUSED_OVERRIDES, m)
-        end
+        isempty(_WARNED_AT_LOAD) || _bump_guard!()
+    catch e
+        _HOOK_FAILED[] || (_HOOK_FAILED[] = true; @warn "TraitWorld's image hook failed; the load proceeds unchecked" exception = (e, catch_backtrace()))
+    finally
+        _OWNER_MEMO[] = nothing
     end
     return isempty(refused) ? nothing : refused
 end
+const _WARNED_AT_LOAD = Pirate[]
 
-"After a load: report what the image hook left inactive."
+"After a load: report what the image hook left inactive, and (warn mode) the pirates it saw."
 function _report_refused_at_load()
+    if !isempty(_WARNED_AT_LOAD)
+        found = copy(_WARNED_AT_LOAD); empty!(_WARNED_AT_LOAD)
+        new = filter(p -> !(p.definer in _REPORTED), found)
+        for p in new
+            push!(_REPORTED, p.definer)
+        end
+        isempty(new) || @warn sprint(showerror, PiracyError(_pirate_report(new, :warn)))
+    end
     if !isempty(_REFUSED_AT_LOAD)
         found = copy(_REFUSED_AT_LOAD); empty!(_REFUSED_AT_LOAD)
         @error sprint(showerror, PiracyError(_pirate_report(found, :refuse_load)))
@@ -187,36 +235,66 @@ function _pkg_root(m::Module)
         m = p
     end
 end
-"Whether package `r` owns `t` (a type in a method's signature; `Type{T}` is a constructor of `T`; a `Union` proves nothing)."
-function _root_owns(@nospecialize(t), r::Module, depth::Int = 0)
-    depth > 2 && return false
-    t = Base.unwrap_unionall(t)
-    t isa TypeVar && (t = t.ub)
-    t isa DataType || return false
-    t.name === Type.body.name && length(t.parameters) == 1 && return _root_owns(t.parameters[1], r, depth + 1)
-    return _pkg_root(t.name.module) === r
+
+"""
+The packages (outside Base, Core and the trait world) that every value matching `t` mentions in its
+type: `t` itself (or a `Vararg`'s element, a type variable's bound) is a package's type, or a type
+parameter requires one (`Ref{T} where T<:InlineString`, `Diagonal{T, Ones{T}}`); for a `Union`, the
+packages both sides require. `Type{T}` counts as `T`: a type, like any value, reaches protected code
+only where the code was compiled for it (the premise of rule 4's policy, as for the definer's own
+types after review F1).
+"""
+function _required_roots(@nospecialize(t), depth::Int = 0)
+    out = Module[]
+    depth > 4 && return out
+    t isa UnionAll && return _required_roots(Base.unwrap_unionall(t), depth)
+    t isa TypeVar && return _required_roots(t.ub, depth + 1)
+    t isa Core.TypeofVararg && return isdefined(t, :T) ? _required_roots(t.T, depth + 1) : out
+    t isa Union && return intersect(_required_roots(t.a, depth + 1), _required_roots(t.b, depth + 1))
+    t isa DataType || return out
+    r = _type_root(t.name.module)
+    r === nothing || push!(out, r)
+    for p in t.parameters
+        union!(out, _required_roots(p, depth + 1))
+    end
+    return out
+end
+
+const _TYPE_ROOTS = IdDict{Module,Any}()           # module => its package root, or `nothing`
+"The package whose types a module's are, for the policy: `nothing` for Base's and Core's types (everyone's) and the trait world's; a standard library's types are its own (`LibGit2`, `SparseArrays`)."
+function _type_root(mod::Module)
+    r = get(_TYPE_ROOTS, mod, missing)
+    r === missing || return r
+    r = _julia_core(mod) || _trait_world_package(mod) ? nothing : _pkg_root(mod)
+    _TYPE_ROOTS[mod] = r
+    return r
 end
 
 """
     _invalidation_policy(m::Method) -> Union{Module, Nothing}
 
-The trait world's invalidation policy, registered with the patched runtime (rule 4). A definition
-in the trait world or in Julia is in every view, and a pirate (whose definer owns nothing in its
-signature) changes code compiled against what it pirates: both invalidate as usual (`nothing`).
-Otherwise the definer adds a method for its own types or function; it can change protected code
-only if that code was compiled for one of the definer's types, which the runtime checks per
-CodeInstance against the package returned here.
+The trait world's invalidation policy, registered with the patched runtime (rule 4). A new method
+can change compiled code only for the values it applies to. If its signature requires a type of
+some package outside Base, Core and the trait world (an argument of that package's type, or of a Julia
+type parametrized by it), it can change protected code only if that code was compiled for one of
+the package's types: the runtime checks this per CodeInstance against the package returned here.
+This holds whoever defines the method (the package itself, another package extending it, a standard
+library for its own types). A definition in Base or in the trait world, and a method for Base's
+types only (a pirate of Base), can change anything: they invalidate as usual (`nothing`).
 """
+_julia_core(mod::Module) = (p = _pkg_root(mod); p === Base || p === Core || p === Base.Compiler)
+"In the trait world and not one of Julia's standard libraries (whose types and methods are their own here)."
+_trait_world_package(mod::Module) = owner(_pkg_root(mod)) !== :Julia && is_trait_world(mod)
 function _invalidation_policy(m::Method)
-    mod = m.module
-    is_trait_world(mod) && return nothing
-    r = _pkg_root(mod)
-    owner(r) === :Julia && return nothing
+    (_julia_core(m.module) || _trait_world_package(m.module)) && return nothing
     sig = Base.unwrap_unionall(m.sig)
     sig isa DataType || return nothing
-    for p in sig.parameters
-        Base.isvarargtype(p) && continue
-        _root_owns(p, r) && return r
+    for (i, p) in enumerate(sig.parameters)
+        i == 1 && continue                           # the function: its owner's methods reach every caller
+        rs = _required_roots(p)
+        isempty(rs) && continue
+        i = findfirst(r -> owner(r) !== :Julia, rs)     # every value mentions all of them: prefer a package's
+        return rs[i === nothing ? 1 : i]
     end
     return nothing
 end

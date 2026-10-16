@@ -106,6 +106,15 @@ defined in a script or at the REPL (directly under `Main`) is its own owner;
 `Main` itself is the session's.
 """
 function owner(m::Module)
+    memo = _OWNER_MEMO[]
+    memo === nothing && return _owner(m)
+    o = get(memo, m, nothing)
+    o === nothing || return o
+    return memo[m] = _owner(m)
+end
+"Owners by module while one package image's methods are checked (the image hook), where they cannot change."
+const _OWNER_MEMO = Ref{Union{Nothing,IdDict{Module,Any}}}(nothing)
+function _owner(m::Module)
     r = Base.moduleroot(m)
     if r === Main && m !== Main
         # a module defined in a script or at the REPL counts as its own package

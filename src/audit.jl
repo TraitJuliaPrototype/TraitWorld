@@ -30,6 +30,7 @@ function mode!(m::Symbol)
     m in (:warn, :error, :recompile) || throw(ArgumentError("mode must be :warn, :error or :recompile, got :$m"))
     MODE[] = m
     SESSION[] += 1
+    _bump_guard!()
     return m
 end
 
@@ -67,17 +68,36 @@ end
 mutable struct GuardState
     session::UInt
     world::UInt
+    stamp::UInt
     warned::Base.IdSet{Method}
 end
-GuardState() = GuardState(typemax(UInt), UInt(0), Base.IdSet{Method}())
+GuardState() = GuardState(typemax(UInt), UInt(0), UInt(0), Base.IdSet{Method}())
+
+"""
+With the patched runtime's hooks (julia-support.md pieces 1 and 4), what a guard must notice changes
+only when a pirate of a sealed package is defined or loaded, a package is sealed, the mode changes,
+or newly compiled trait-world code reaches a pirate: each of these bumps `GUARD_STAMP`, and a guard
+compares one number. Without the hooks, any world change re-audits the signature.
+"""
+const GUARD_STAMP = Ref{UInt}(1)
+const _GUARD_BY_STAMP = Ref(false)
+_bump_guard!() = (GUARD_STAMP[] += 1; nothing)
 
 @inline function _guard(st::GuardState, @nospecialize(sig))
-    MODE[] === :recompile && return nothing
-    st.session == SESSION[] && st.world == Base.get_world_counter() && return nothing
+    if _GUARD_BY_STAMP[]
+        st.stamp == GUARD_STAMP[] && return nothing
+    else
+        MODE[] === :recompile && return nothing
+        st.session == SESSION[] && st.world == Base.get_world_counter() && return nothing
+    end
     return Base.inferencebarrier(_guard_slow)(st, sig)
 end
 
 @noinline function _guard_slow(st::GuardState, @nospecialize(sig))
+    if MODE[] === :recompile
+        st.stamp = GUARD_STAMP[]
+        return nothing
+    end
     findings = @lock _LOCK audit(sig)
     if !isempty(findings)
         MODE[] === :error && throw(PiracyError(sig, findings))      # stays poisoned: not stamped
@@ -89,6 +109,7 @@ end
     end
     st.session = SESSION[]
     st.world = Base.get_world_counter()
+    st.stamp = GUARD_STAMP[]
     return nothing
 end
 

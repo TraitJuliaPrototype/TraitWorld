@@ -203,6 +203,10 @@ end
         @test valid()
         toplevel(:(module PolOut; struct T end; Base.numerator(::T) = 1; end))   # its own type: cannot change g
         @test valid()
+        # another package extending PolOut's type (a parameter of a Julia type): it requires PolOut's type, cannot change g
+        toplevel(:(module PolExt; Base.numerator(::Ref{T}) where {T<:Main.PolOut.T} = 2; end))
+        @test valid()
+        @test TraitWorld._invalidation_policy(only(methods(numerator, Tuple{Ref{Main.PolOut.T}}))) === Main.PolOut
         toplevel(:(module PolPir; Base.numerator(::Float32) = 1f0; end))        # a pirate: invalidates, as in plain Julia
         @test !valid()
         @test TraitWorld._invalidation_policy(only(methods(numerator, Tuple{Main.PolOut.T}))) === Main.PolOut
