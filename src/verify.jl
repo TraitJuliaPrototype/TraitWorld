@@ -543,6 +543,9 @@ function _scan(mi::Core.MethodInstance, cx::_Walk)
         end
         if Meta.isexpr(st, :invoke)
             c = st.args[1]
+            # the policy's call of the worker (facts.jl, inlined from `_facts_call`): a session's path
+            # to the targets the entry's plain call enumerates; a closed world takes the plain call
+            c isa Core.CodeInstance && c.owner isa FactsOwner && continue
             cmi = c isa Core.CodeInstance ? c.def : c
             isdefined(Core, :ABIOverride) && cmi isa Core.ABIOverride && (cmi = cmi.def)
             cmi isa Core.MethodInstance || continue
