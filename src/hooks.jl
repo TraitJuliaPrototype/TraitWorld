@@ -17,6 +17,12 @@ const _REFUSED_AT_LOAD = Pirate[]
 const _REFUSED_OVERRIDES = Method[]
 
 function _hooks_init!()
+    # piece 5: an image of a package using TraitWorld keeps the machine code its workload made for
+    # upstream code (workers at upstream keys, code under the trait world's own cache owner)
+    if ccall(:jl_generating_output, Cint, ()) == 1 && get(ENV, "JULIA_TW_KEEP_COMPILED", "1") != "0" &&
+            (try; cglobal(:jl_set_image_keep_compiled) != C_NULL; catch; false; end)
+        ccall(:jl_set_image_keep_compiled, Cvoid, (Cint,), 1)
+    end
     _HAS_DEF_HOOK[] = false
     ok = try
         cglobal(:jl_set_method_definition_hook) != C_NULL
@@ -172,11 +178,12 @@ function _on_image_methods(ms::Vector{Any}, pkg::String)
     refused = Any[]
     _OWNER_MEMO[] = IdDict{Module,Any}()
     try
-        idx = _override_index()
         for m in ms
             m isa Method || continue
-            _is_declared_defaults(m) && Base.invokelatest(_index_declared!, m)   # the index learns the image's conformances
+            _is_declared_defaults(m) && (_OVR_BUILT[] = false)   # not active yet: the index is rebuilt at its next use
         end
+        # overrides are checked against the conformances already active; an image's own are its package's business
+        idx = _override_index()
         for m in ms
             m isa Method || continue
             if !isempty(idx) && _override_violation(m) !== nothing

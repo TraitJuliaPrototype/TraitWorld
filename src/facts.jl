@@ -32,6 +32,9 @@ CC.get_inference_world(i::FactsInterp) = i.world
 CC.get_inference_cache(i::FactsInterp) = i.inf_cache
 CC.cache_owner(::FactsInterp) = FactsOwner()
 CC.codegen_cache(i::FactsInterp) = i.codegen
+# keep the optimized IR in the CodeInstance: a package image then holds it (and, with piece 5 of
+# the patched runtime, machine code compiled from it); a session can compile it again
+CC.may_discard_trees(::FactsInterp) = false
 
 "Whether `T` (a call's argument types) is concrete: a fact can be recorded at it."
 _fact_sig(@nospecialize(T)) = T isa DataType && Base.isdispatchtuple(T)
@@ -55,7 +58,7 @@ function CC.find_method_matches(interp::FactsInterp, argtypes::Vector{Any}, @nos
                                 max_union_splitting::Int = CC.InferenceParams(interp).max_union_splitting,
                                 max_methods::Int = CC.InferenceParams(interp).max_methods)
     𝕃 = CC.typeinf_lattice(interp)
-    if !isempty(argtypes) && _machinery_call(argtypes[1])
+    if !_FACTS_POLICY[] || (!isempty(argtypes) && _machinery_call(argtypes[1]))
         return @invoke CC.find_method_matches(interp::CC.AbstractInterpreter, argtypes::Vector{Any}, atype::Any;
                                               max_union_splitting, max_methods)
     end
@@ -93,39 +96,62 @@ end
 
 "Whether entries call workers through the trait world's policy (`JULIA_TW_FACTS=0` turns it off)."
 const FACTS = Ref(false)
+const _FACTS_OC = Ref(true)
+const _FACTS_POLICY = Ref(true)          # false: the own cache under Julia's own policy (for diagnosis)
+const _FACTS_DEBUG = Ref(false)
 
 """
 A worker's code under the policy, for one call signature: its CodeInstance (whose validity decides
-whether the entry is current) and an opaque closure compiled from the same optimized IR, which an
-entry calls through its specialized calling convention (`invoke(f, ci, args...)` checks and boxes
-its arguments: hundreds of nanoseconds). `oc` is `nothing` where no closure could be made (the
-worker refers to itself, or its result type is wider than plain Julia's); the entry then uses `invoke`.
+whether the entry is current, and whose machine code a package image may hold), and, once the
+signature is hot, an opaque closure compiled in this session from the same optimized IR, which an
+entry calls through its specialized calling convention. Before that, the entry calls the
+CodeInstance's own machine code through its boxed calling convention (`_facts_invoke`). The
+entry lives in the generated code of `_facts_call`, so a package image may hold it: an entry from
+another session (`session`) is made again, its closure never used.
 """
-struct FactsEntry
-    ci::Core.CodeInstance
+mutable struct FactsEntry
+    const ci::Core.CodeInstance
     oc::Any
+    session::UInt
+    calls::Int
 end
+const _SESSION = Ref{UInt}(0)
+"Calls of a signature after which its entry compiles an opaque closure."
+const FACTS_HOT = Ref(1000)
 
 "The entry in `cache` if its CodeInstance is valid in the current world, else a new one stored there."
-@inline function _facts_entry(cache::Base.RefValue{Any}, @nospecialize(sig), @nospecialize(RT))
+@inline function _facts_entry(cache::Base.RefValue{Any}, @nospecialize(sig))
     e = cache[]
-    if e isa FactsEntry
+    if e isa FactsEntry && e.session == _SESSION[]      # an entry from an image is looked up again (and its code compiled if the image has none)
         ci = e.ci
         w = Base.tls_world_age()
         (ci.min_world <= w <= ci.max_world) && return e
     end
-    return Base.inferencebarrier(_facts_entry_slow)(cache, sig, RT)::FactsEntry
+    return Base.inferencebarrier(_facts_entry_slow)(cache, sig)::FactsEntry
 end
-@noinline function _facts_entry_slow(cache::Base.RefValue{Any}, @nospecialize(sig), @nospecialize(RT))
+@noinline function _facts_entry_slow(cache::Base.RefValue{Any}, @nospecialize(sig))
     ci = facts_codeinstance(sig)
-    oc = try
-        _facts_oc(sig, RT, ci.min_world)
-    catch
-        nothing
-    end
-    e = FactsEntry(ci, oc)
+    _FACTS_DEBUG[] && println(stderr, "facts entry: ", sig)
+    e = FactsEntry(ci, nothing, _SESSION[], 0)
     cache[] = e
     return e
+end
+"After `FACTS_HOT[]` calls: the opaque closure for the entry (or none, then never again)."
+@noinline function _facts_hot!(e::FactsEntry, @nospecialize(sig), @nospecialize(RT))
+    e.oc = _FACTS_OC[] ? (try
+        _facts_oc(sig, RT, e.ci.min_world)
+    catch
+        nothing
+    end) : nothing
+    _FACTS_DEBUG[] && println(stderr, "facts closure: ", sig, " => ", e.oc === nothing ? "none" : "closure")
+    return nothing
+end
+"Call a CodeInstance's machine code through its boxed calling convention, without `invoke`'s checks (its signature is the call's)."
+@inline function _facts_invoke(f, ci::Core.CodeInstance, args...)
+    p = ci.invoke
+    p == C_NULL && return invoke(f, ci, args...)
+    as = Any[args...]
+    return GC.@preserve as ccall(p, Any, (Any, Ptr{Any}, UInt32, Any), f, pointer(as), length(as) % UInt32, ci)
 end
 
 function _uses_self(ir)
@@ -180,9 +206,11 @@ Julia infers it. Not inlined, so that `verify_main` sees one call whose targets 
     return quote
         $(Expr(:meta, :noinline))
         RT = $(Core.Compiler.return_type)(f, $A)
-        e = _facts_entry($cache, $sig, RT)
+        e = _facts_entry($cache, $sig)
         oc = e.oc
         oc isa Core.OpaqueClosure{$A,RT} && return oc($(as...))::RT
-        return invoke(f, e.ci, $(as...))::RT
+        n = e.calls += 1
+        n == FACTS_HOT[] && Base.inferencebarrier(_facts_hot!)(e, $sig, RT)
+        return _facts_invoke(f, e.ci, $(as...))::RT
     end
 end

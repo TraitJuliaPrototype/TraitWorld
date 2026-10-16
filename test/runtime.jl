@@ -92,6 +92,8 @@ tobj(f, x, nargs) = TraitWorld.enter(TraitWorld.EntryPos{typeof(f),1,nargs}(), x
     mm.data = v
     # typed callers: no allocation per call
     typed(x) = RT.rtotal(x, 2)
+    # under the compiler policy a signature's first calls box their arguments, until it is hot
+    TraitWorld.FACTS[] && for _ in 1:TraitWorld.FACTS_HOT[]; typed(m); typed(mm); typed(v); end
     @test alloc1(typed, m) == 0 && alloc1(typed, mm) == 0 && alloc1(typed, v) == 0   # (ROwn's `rcol` allocates its column)
 end
 

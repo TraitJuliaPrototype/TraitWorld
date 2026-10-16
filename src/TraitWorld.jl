@@ -47,6 +47,10 @@ function __init__()
     _hooks_init!()
     FACTS[] = get(ENV, "JULIA_TW_FACTS", "1") != "0"
     LAYERING[] = get(ENV, "JULIA_TW_LAYERING", "0") == "1"
+    _SESSION[] = time_ns()
+    _FACTS_OC[] = get(ENV, "JULIA_TW_FACTS_OC", "1") != "0"
+    _FACTS_POLICY[] = get(ENV, "JULIA_TW_FACTS_POLICY", "1") != "0"
+    _FACTS_DEBUG[] = get(ENV, "JULIA_TW_FACTS_DEBUG", "0") == "1"
     push!(Base.package_callbacks, _on_package_load)
 end
 
@@ -167,6 +171,14 @@ function _finish_needed(mod::Module)
     end
     mod.__tw_finished__[] = true
     return nothing
+end
+
+
+# the compiler's specializations for the policy's interpreter (facts.jl), compiled into this image:
+# without them a session's first trait call compiles the compiler for `FactsInterp` (about 11 s)
+_facts_warm(x::Vector{Float64}) = sum(x) / length(x)
+if ccall(:jl_generating_output, Cint, ()) == 1
+    _facts_call(_facts_warm, [1.0, 2.0])
 end
 
 end
