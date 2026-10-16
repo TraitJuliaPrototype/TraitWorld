@@ -176,3 +176,47 @@ function _report_refused_at_load()
     end
     return nothing
 end
+
+# --- the invalidation policy (julia-support.md piece 2) -----------------------------------
+
+"A package's root module, as the runtime's filter counts it: a module under `Main` counts as its own package."
+function _pkg_root(m::Module)
+    while true
+        p = parentmodule(m)
+        (p === m || p === Main) && return m
+        m = p
+    end
+end
+"Whether package `r` owns `t` (a type in a method's signature; `Type{T}` is a constructor of `T`; a `Union` proves nothing)."
+function _root_owns(@nospecialize(t), r::Module, depth::Int = 0)
+    depth > 2 && return false
+    t = Base.unwrap_unionall(t)
+    t isa TypeVar && (t = t.ub)
+    t isa DataType || return false
+    t.name === Type.body.name && length(t.parameters) == 1 && return _root_owns(t.parameters[1], r, depth + 1)
+    return _pkg_root(t.name.module) === r
+end
+
+"""
+    _invalidation_policy(m::Method) -> Union{Module, Nothing}
+
+The trait world's invalidation policy, registered with the patched runtime (rule 4). A definition
+in the trait world or in Julia is in every view, and a pirate (whose definer owns nothing in its
+signature) changes code compiled against what it pirates: both invalidate as usual (`nothing`).
+Otherwise the definer adds a method for its own types or function; it can change protected code
+only if that code was compiled for one of the definer's types, which the runtime checks per
+CodeInstance against the package returned here.
+"""
+function _invalidation_policy(m::Method)
+    mod = m.module
+    is_trait_world(mod) && return nothing
+    r = _pkg_root(mod)
+    owner(r) === :Julia && return nothing
+    sig = Base.unwrap_unionall(m.sig)
+    sig isa DataType || return nothing
+    for p in sig.parameters
+        Base.isvarargtype(p) && continue
+        _root_owns(p, r) && return r
+    end
+    return nothing
+end

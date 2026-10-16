@@ -130,6 +130,12 @@ function _filter_init!()
     _filter_push!()
     # the load-time half (base/staticdata.jl of the same build): edges of trait-world
     # code in a package image are not failed by outside, owned methods
+    # the invalidation policy (patched runtime with the policy hook): one callable for both halves
+    if (try; cglobal(:jl_set_invalidation_policy) != C_NULL; catch; false; end)
+        ccall(:jl_set_invalidation_policy, Cvoid, (Any,), _invalidation_policy)
+        L0 = _load_filter_module()
+        isdefined(L0, :_tw_policy) && (L0._tw_policy[] = _invalidation_policy)
+    end
     L = _load_filter_module()
     if isdefined(L, :_tw_load_filter)
         L._tw_modules[] = _FILTER_MODS

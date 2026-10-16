@@ -189,3 +189,25 @@ end
         @test !TraitWorld._HAS_DEF_HOOK[]
     end
 end
+
+@testset "the invalidation policy (patched runtime): owned definitions kept, a later pirate invalidates" begin
+    if TraitWorld._FILTER_ON[] && (try; cglobal(:jl_set_invalidation_policy) != C_NULL; catch; false; end)
+        toplevel(quote
+            @trait_module module PolTW
+            g(v::Vector{Any}) = numerator(v[1])
+            end
+            PolTW.g(Any[1//2])
+        end)
+        mi = only(Base.specializations(only(methods(Main.PolTW.g))))
+        valid() = mi.cache.max_world == typemax(UInt)
+        @test valid()
+        toplevel(:(module PolOut; struct T end; Base.numerator(::T) = 1; end))   # its own type: cannot change g
+        @test valid()
+        toplevel(:(module PolPir; Base.numerator(::Float32) = 1f0; end))        # a pirate: invalidates, as in plain Julia
+        @test !valid()
+        @test TraitWorld._invalidation_policy(only(methods(numerator, Tuple{Main.PolOut.T}))) === Main.PolOut
+        @test TraitWorld._invalidation_policy(only(methods(numerator, Tuple{Float32}))) === nothing
+    else
+        @test true
+    end
+end
