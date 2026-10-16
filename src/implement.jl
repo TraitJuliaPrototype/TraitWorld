@@ -35,8 +35,10 @@ struct ProjRec
     copies::Bool
     dyn::Any
     field::Int        # the user type's field the projection reads as is, or 0: a field projection can be a lens
+    inverse::Any      # `unproject(t, r)` written by the conformer, or nothing (note "Results like the input")
 end
-ProjRec(project, R, copies::Bool, dyn) = ProjRec(project, R, copies, dyn, 0)
+ProjRec(project, R, copies::Bool, dyn) = ProjRec(project, R, copies, dyn, 0, nothing)
+ProjRec(project, R, copies::Bool, dyn, field::Int) = ProjRec(project, R, copies, dyn, field, nothing)
 "`projection(X, T)`: a `ProjRec`, or `nothing`. A representation is its own projection."
 projection(@nospecialize(X), @nospecialize(T)) = nothing
 
@@ -808,6 +810,20 @@ function _implement_oneline(mod::Module, traits::Vector{Any}, Tex, Rdecl; pexs =
     return _implement_projection(mod, headex, Any[Tex, :(project(t) = $pex)]; field = all(p -> p === nothing, ps) ? fld : 0)
 end
 
+"The field a projection body reads from its argument as is (`t.cols`, `getfield(t, :cols)`), or nothing."
+function _field_read(body, tname)
+    while body isa Expr && body.head === :block
+        stmts = filter(x -> !(x isa LineNumberNode), body.args)
+        length(stmts) == 1 || return nothing
+        body = stmts[1]
+    end
+    body isa Expr || return nothing
+    body.head === :. && body.args[1] === tname && body.args[2] isa QuoteNode && return body.args[2].value
+    body.head === :call && body.args[1] === :getfield && length(body.args) == 3 && body.args[2] === tname &&
+        body.args[3] isa QuoteNode && return body.args[3].value
+    return nothing
+end
+
 function _implement_projection(mod::Module, head, rest; field::Int = 0)
     TW = TraitWorld
     traits = Any[]
@@ -850,16 +866,34 @@ function _implement_projection(mod::Module, head, rest; field::Int = 0)
     pdefs = filter(d -> d isa Expr && d.args[1] isa Expr && d.args[1].args[1] === :project, defs)
     length(pdefs) == 1 || error("@implement: a projection needs exactly one `project(t) = …`")
     pdef = pdefs[1]
-    ops = filter(d -> d !== pdef, defs)
+    udefs = filter(d -> d isa Expr && d.args[1] isa Expr && d.args[1].args[1] === :unproject, defs)
+    length(udefs) <= 1 || error("@implement: at most one `unproject(t, r) = …`")
+    ops = filter(d -> d !== pdef && !(d in udefs), defs)
     pcall = pdef.args[1]
     length(pcall.args) == 2 || error("@implement: `project` takes the value only")
     targ = pcall.args[2]
     tname = targ isa Expr ? targ.args[1] : targ
+    if field == 0 && !dynamic && !copies
+        # a written projection that reads a field as is (`project(t) = t.cols`) is a field projection:
+        # a lens, and its inverse a copy with the field replaced
+        f = _field_read(pdef.args[2], tname)
+        T = f === nothing ? nothing : Core.eval(mod, Tex)
+        T isa Type && f in fieldnames(T) && (field = Base.fieldindex(T, f))
+    end
     pfn = gensym(:project)
     rec = gensym(:projection)
     Rconst = gensym(:R)
     out = Any[]
     push!(out, Expr(:function, Expr(:call, pfn, :($tname::$Tex)), pdef.args[2]))
+    invex = :nothing
+    if !isempty(udefs)
+        # the inverse of the projection: a value of the user's type from a representation
+        ucall = udefs[1].args[1]
+        length(ucall.args) == 3 || error("@implement: `unproject` takes the value and a representation, `unproject(t, r)`")
+        ufn = gensym(:unproject)
+        push!(out, Expr(:function, Expr(:call, ufn, ucall.args[2:end]...), udefs[1].args[2]))
+        invex = ufn
+    end
     push!(out, :(const $Rconst = $TW._rep_of($pfn, $Tex, $(Rdecl === nothing ? nothing : Rdecl))))
     dynex = :nothing
     if !isempty(ops)
@@ -892,7 +926,7 @@ function _implement_projection(mod::Module, head, rest; field::Int = 0)
     elseif dynamic
         error("@implement: `dynamic` needs operations in the block")
     end
-    push!(out, :(const $rec = $TW.ProjRec($pfn, $Rconst, $copies, $dynex, $field)))
+    push!(out, :(const $rec = $TW.ProjRec($pfn, $Rconst, $copies, $dynex, $field, $invex)))
     for X in traits
         push!(out, :($TW.projection(::Type{$X}, ::Type{$Tex}) = $rec))
     end

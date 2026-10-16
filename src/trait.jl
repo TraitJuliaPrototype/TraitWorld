@@ -184,8 +184,10 @@ macro trait(header, block = nothing)
     for d in decls
         syms = [gensym(:a) for _ in d.args]
         retx = (_mentions(d.ret, Rsym) || any(p -> _mentions(d.ret, p), pnames)) ? :Any : d.ret
-        push!(out, :(@inline $(d.fexpr)(dyn::$TW.Dynamic{<:$name}, $(syms...)) =
-                         $TW._dyn_assert($(d.fexpr)($TW.opened(dyn), $(syms...)), $retx)))
+        # a constructor operation (result R) gives a dynamic value of the same conformance
+        call = :($(d.fexpr)($TW.opened(dyn), $(syms...)))
+        rhs = d.ret === Rsym ? :($TW._dyn_like(dyn, $call)) : :($TW._dyn_assert($call, $retx))
+        push!(out, :(@inline $(d.fexpr)(dyn::$TW.Dynamic{<:$name}, $(syms...)) = $rhs))
     end
     # fields: properties of the representation, or (type R) the projection, read through a lens when written
     if !isempty(fdecls)

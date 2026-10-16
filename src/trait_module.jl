@@ -360,6 +360,15 @@ function _expand_defaults(mod::Module, head, fname, rawargs, kwparams, wheres, r
     return worker, rest
 end
 
+"`return x` in a `Like` body returns `like(t, x)`: the representation made a trait object like `t` (nested functions keep their own returns)."
+function _like_returns(ex, t)
+    ex isa Expr || return ex
+    ex.head in (:function, :->, :quote) && return ex
+    ex.head === :(=) && ex.args[1] isa Expr && ex.args[1].head === :call && return ex   # a short local function
+    ex.head === :return && return Expr(:return, :($TraitWorld.like($t, $(_like_returns(isempty(ex.args) ? nothing : ex.args[1], t)))))
+    return Expr(ex.head, Any[_like_returns(a, t) for a in ex.args]...)
+end
+
 function _rewrite_fdef(mod::Module, ex)
     head = ex.head
     sig, body = ex.args[1], ex.args[2]
@@ -374,6 +383,14 @@ function _rewrite_fdef(mod::Module, ex)
         sig = sig.args[1]
     end
     fname = sig.args[1]
+    likearg = nothing
+    if ret isa Expr && ret.head === :curly && ret.args[1] in (:Like, :(TraitWorld.Like)) && length(ret.args) == 2
+        # a result like the input: the body's value is a representation; the worker makes it a
+        # trait object of the argument's conformance, the entry a value of the caller's type
+        likearg = ret.args[2]
+        ret = nothing
+        body = :($TraitWorld.like($likearg, $(_like_returns(body, likearg))))
+    end
     rawargs = sig.args[2:end]
     kwparams = Any[]
     if !isempty(rawargs) && rawargs[1] isa Expr && rawargs[1].head === :parameters
@@ -457,9 +474,14 @@ function _rewrite_fdef(mod::Module, ex)
               x.ann === nothing ? x.name : :($(x.name)::$(x.ann))
         push!(wkws, x.required ? lhs : Expr(:kw, lhs, x.default))
     end
+    if likearg !== nothing
+        any(x -> x.kind === :trait && x.name === likearg, args) ||
+            error("@trait_module: `::Like{$likearg}` names no trait-bounded argument of `$fname`")
+    end
     wsig = _mksig(fname, wargs, wkws, ret, Any[wheres..., newwheres...])
     worker = Expr(head, wsig, _rethrow_piracy(body))
     rest = Any[]
+    likearg === nothing || push!(rest, :($TraitWorld._like!($fname)))
     # --- the entry, once per shape
     existing = entries === nothing ? Any[] : get(entries, key, Any[])
     if !(pattern in existing)
@@ -544,10 +566,14 @@ function _rewrite_fdef(mod::Module, ex)
                 push!(stmts, :($ntname = $TraitWorld.enter_kw_callable($(x.A), $(x.S), $(x.M === nothing ? :nothing : x.M), $k, $ntname)))
             end
         end
+        # the result goes back through `_out`: a trait object like an argument becomes a value of its caller's type
+        tr = [i for (i, x) in enumerate(args) if x.kind === :trait]
+        us = Expr(:tuple, [args[i].name for i in tr]...)
+        vs = Expr(:tuple, [newnames[i] for i in tr]...)
         if haskw
-            push!(stmts, :(return $TraitWorld.checked_kwcall($ntname, $fname, $(newnames...))))
+            push!(stmts, :(return $TraitWorld._out($TraitWorld.checked_kwcall($ntname, $fname, $(newnames...)), $us, $vs)))
         else
-            push!(stmts, :(return $TraitWorld.checked_call($fname, $(newnames...))))
+            push!(stmts, :(return $TraitWorld._out($TraitWorld.checked_call($fname, $(newnames...)), $us, $vs)))
         end
         kept = Any[w for w in wheres if any(x -> x.kind in (:plain, :vararg) && x.ann !== nothing && _uses(x.ann, _wherevar(w)), args)]
         esig = haskw ? Expr(:call, fname, Expr(:parameters, Expr(:..., kwname)), eargs...) : Expr(:call, fname, eargs...)

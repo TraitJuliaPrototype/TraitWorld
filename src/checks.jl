@@ -94,7 +94,8 @@ function _worker_problems(@nospecialize(sig), seen, out, root::Bool)
     world = Base.get_world_counter()
     for (src, rt) in Base.code_typed_by_type(sig; optimize = false, world)
         mi = src.parent
-        if root && _escapes(rt)
+        if root && _escapes(rt) && !(mi isa Core.MethodInstance && mi.def isa Method &&
+                                     Base.unwrap_unionall(mi.def.sig).parameters[1] in _LIKE_FUNCS)
             m = mi isa Core.MethodInstance ? mi.def : nothing
             push!(out, "$(m isa Method ? string(basename(string(m.file)), ":", m.line) : "?"): returns a trait object " *
                        "to ordinary code: a trait object is a handle, not a value")
@@ -153,6 +154,7 @@ function _worker_problems(@nospecialize(sig), seen, out, root::Bool)
             end
             # keeping a trait object where a Dynamic is declared (note "Dynamic values")
             _keeps_dynamic(f, ats, ex, src, sptypes) && continue
+            f === like && continue                # a result like the input: a trait object of the same conformance
             if f === nothing
                 push!(out, "$line: a trait object is passed to a function not known at compile time")
                 continue
@@ -327,7 +329,7 @@ signature (rule 4 places it). The call to the worker is static.
         # a dynamic call: the check's reflection stays out of compiled code (and out of trimmed binaries)
         $(flag)[] || CLOSED_WORLD[] || Base.inferencebarrier(_check_once)($flag, $sig)
         _guard($guard, $sig)
-        return _noescape(f(args...))
+        return f(args...)                    # the entry's `_out` makes the result a value for its caller
     end
 end
 
@@ -345,7 +347,7 @@ fills the defaults inside the trait world.
     return quote
         $(flag)[] || CLOSED_WORLD[] || Base.inferencebarrier(_check_once)($flag, $sig)
         _guard($guard, $sig)
-        return _noescape(Core.kwcall(nt, f, args...))
+        return Core.kwcall(nt, f, args...)   # the entry's `_out` makes the result a value for its caller
     end
 end
 

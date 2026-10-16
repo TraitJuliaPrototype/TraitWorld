@@ -444,6 +444,15 @@ function _projected_types(@nospecialize(T))
     return out
 end
 
+"Whether an entry's result comes from a worker of a function declared `::Like{t}`."
+function _like_result(src, sptypes, @nospecialize(a))
+    r = _ssa_root(src, a)
+    r isa Core.SSAValue || return false
+    s = src.code[r.id]
+    (Meta.isexpr(s, :call) || Meta.isexpr(s, :invoke)) || return false
+    return any(x -> _argT(src, sptypes, x) in _LIKE_FUNCS, s.args)
+end
+
 "Follow an SSA value back through `PiNode`s (the entry's `=== NOTRAIT` check narrows it)."
 function _ssa_root(src, @nospecialize(a))
     while a isa Core.SSAValue && src.code[a.id] isa Core.PiNode
@@ -671,6 +680,10 @@ function _scan(mi::Core.MethodInstance, cx::_Walk)
                     continue
                 elseif f === Core.finalizer
                     rc === nothing && hole(:closure, i, :finalizer, ats)
+                elseif f === _out
+                    # the entry's way out: the identity, unless the worker returns a result like
+                    # the input, whose inverse runs per user type (not listed for AOT yet)
+                    _like_result(src, sptypes, st.args[2]) && hole(:inverse, i, f, ats)
                 elseif f === checked_call || f === checked_kwcall
                     # the entry's call of the worker: one target per combination of what the entry built
                     choices = Vector{Any}[]

@@ -467,3 +467,76 @@ function enter_callables(sigs::Tuple, @nospecialize(f))
     f isa CallAs && (M = typeof(f).parameters[1]; f = f.f; sigs = map(s -> (s[1], s[2], M), sigs))
     return CMulti(map(s -> enter_callable(s[1], s[2], s[3], f), sigs))
 end
+
+# --- results like the input (note "Results like the input") -----------------------
+
+"Functions with a method declared `::Like{t}`: their workers return a trait object, which their entry makes into the caller's type."
+const _LIKE_FUNCS = Base.IdSet{Any}()
+_like!(@nospecialize(f)) = (push!(_LIKE_FUNCS, typeof(f)); nothing)
+
+"""
+    like(t, r)
+
+A trait object of `t`'s conformance holding the representation `r`: what a
+function declared `::Like{t}` returns inside the trait world. Its entry makes
+it a value of the caller's type, through the conformance's inverse.
+"""
+@inline like(t::TObj, r) = TObj(_withreps(r, getfield(t, :views)...))
+@inline _withreps(r) = ()
+@inline _withreps(r, v::AbstractView, rest::AbstractView...) = (_withrep(v, r), _withreps(r, rest...)...)
+@inline _withrep(v::AbstractView{X,W,R}, r::R) where {X,W,R} = View{X,W,R}(getfield(v, :w), r)
+_withrep(v::AbstractView, r) = Base.inferencebarrier(_sibling_view)(v, r)
+"A representation of another type in the same family (`Vector{Float32}` for `Vector{Float64}`): its own instance and witness."
+function _sibling_view(v::AbstractView{X}, r) where {X}
+    F = _family(X)
+    R2 = typeof(r)
+    w = witness(F, R2)
+    w === nothing && throw(TraitBoundError("$(R2) is no representation of $F: a result like the input cannot hold it"))
+    return View{_instance(F, R2),typeof(w),R2}(w, r)
+end
+
+"How an entry returns: a trait object a `Like` function returned becomes a value of the caller's type; any other trait object is refused."
+@inline _out(res, us::Tuple, vs::Tuple) = _noescape(res)
+_out(res::TObj, us::Tuple, vs::Tuple) = Base.inferencebarrier(_like_out)(res, us, vs)
+function _like_out(res::TObj, us::Tuple, vs::Tuple)
+    fams = sort!(unique([string(_family(Y)) for Y in Base.uniontypes(typeof(res).parameters[1])]))
+    for i in eachindex(vs)
+        v = vs[i]
+        v isa TObj || continue
+        sort!(unique([string(_family(Y)) for Y in Base.uniontypes(typeof(v).parameters[1])])) == fams || continue
+        u = us[i]
+        u isa Dynamic && return typeof(u)(res)                 # a dynamic value in, a dynamic value of the same trait out
+        X = _family(typeof(getfield(res, :views)[1]).parameters[1])
+        return _unproject(X, u, _rep(getfield(res, :views)[1]))
+    end
+    return _noescape(res)
+end
+
+"""
+The conformance's inverse: a value of the user's type `typeof(u)` holding the
+representation `r`. The identity for a type that is its own representation, a
+copy with the field replaced for a field projection, the conformer's
+`unproject(t, r)` for a computed one.
+"""
+function _unproject(@nospecialize(X), u, r)
+    U = typeof(u)
+    p = proj_lookup(X, U)
+    p === nothing && throw(TraitBoundError("$U does not conform to $X"))
+    if p.project === identity
+        r isa Base.typename(U).wrapper && return r
+        throw(TraitBoundError("$U is its own representation for $X, but the result is a $(typeof(r)): " *
+                              "a result like the input must be a $(Base.typename(U).wrapper)"))
+    end
+    p.field != 0 && return _rebuild(u, p.field, r)
+    p.inverse === nothing || return p.inverse(u, r)
+    throw(TraitBoundError("$U conforms to $X through a computed projection without `unproject(t, r)`, " *
+                          "so a result like it cannot be built"))
+end
+"A copy of `u` with field `i` replaced by `r`, built by the type's constructor, which recomputes its parameters (`Series{Float32}` from a `Vector{Float32}`)."
+function _rebuild(u, i::Int, r)
+    U = typeof(u)
+    fs = ntuple(j -> j == i ? r : getfield(u, j), fieldcount(U))
+    return Base.typename(U).wrapper(fs...)
+end
+"An operation returning the representation, on a dynamic value: a dynamic value of the same conformance."
+@inline _dyn_like(d::Dynamic{X}, r) where {X} = Dynamic{X}(like(opened(d), r))
