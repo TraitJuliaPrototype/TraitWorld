@@ -85,6 +85,7 @@ end
 
 # builtins and functions whose use of an abstract value is free or narrows it
 _benign(@nospecialize(f)) = f === Core.typeassert || f === Core.isa || f === Core.:(===) ||
+    (_HAS_FIELD_INTRINSICS && (f === Core.Intrinsics.getfield_at_offset || f === Core.Intrinsics.setfield_at_offset)) ||
     f === Core.typeof || f === Core.ifelse || f === Core.tuple || f === Core.isdefined ||
     f === Core.throw || f === Core.setfield! || f === Core.throw_methoderror || f === Core.:(!==)
 

@@ -142,9 +142,15 @@ end
 end
 "No implementing type (every operation served by a default): there is no implementing value."
 @inline _loadpart(::Type{Nothing}, o, s::Slot) = nothing
+"Whether the runtime has the field-offset intrinsics (patched Julia, julia-support.md piece 3)."
+const _HAS_FIELD_INTRINSICS = isdefined(Core.Intrinsics, :getfield_at_offset)
+
 @generated function _loadfield(::Type{T}, o, s::Slot) where {T}
     k = _storage(T)
     k === :singleton && return :($(T.instance))
+    # the runtime's intrinsic: a load at the offset with Julia's alias metadata, and the null check
+    _HAS_FIELD_INTRINSICS && k in (:bits, :ref) &&
+        return :(Core.Intrinsics.getfield_at_offset(o, $T, getfield(s, :off))::$T)
     # no GC.@preserve: the trait object holding `o` is live for the call, and no safepoint lies
     # between computing the address and the load (a preserve region boxes values in loops)
     k === :bits && return :(_tbaa_load(Ptr{$T}(_objptr(o) + getfield(s, :off))))
@@ -157,6 +163,8 @@ end
 end
 "Write a field of the user's (mutable) object: an isbits field at its offset, any other through `setfield!` and its write barrier."
 @generated function _storefield(::Type{T}, o, s::Slot, x) where {T}
+    _HAS_FIELD_INTRINSICS && _storage(T) in (:bits, :ref) &&
+        return :(Core.Intrinsics.setfield_at_offset(o, $T, getfield(s, :off), x::$T); nothing)
     _storage(T) === :bits && return :(_tbaa_store(Ptr{$T}(_objptr(o) + getfield(s, :off)), x::$T); nothing)
     return :(setfield!(o, getfield(s, :idx), x::$T); nothing)
 end
