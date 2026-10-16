@@ -17,45 +17,25 @@ struct TraitBoundError <: Exception
 end
 Base.showerror(io::IO, e::TraitBoundError) = print(io, "TraitBoundError: ", e.msg)
 
-"One projection and the views it serves: `p(t)::R`, then one view per trait (with supertraits)."
-struct Group{P,R,WS<:Tuple}
-    p::P
-    ws::WS
+"""
+How the builder makes one trait's view for a user type: the witness, the slot of the
+implementing value (the object itself, or its forwarding field), and the slots of the
+declared fields. The view's type is `View{X, W, K, N}`, the same for every user type of key `K`.
+"""
+struct VSpec{X,W,K,N}
+    w::W
+    r::Slot
+    fs::NTuple{N,Slot}
 end
-Group{R}(p::P, ws::WS) where {P,R,WS} = Group{P,R,WS}(p, ws)
 
-"Builds the trait object for one argument of a user type: compiled per type."
-struct Builder{G<:Tuple}
-    groups::G
+"Builds the trait object for one argument of a user type: the user's object with its views."
+struct Builder{S<:Tuple}
+    specs::S
 end
-@inline (b::Builder)(t) = TObj(_build(t, b.groups...))
+@inline (b::Builder)(t) = TObj(_build(t, getfield(b, :specs)...))
 @inline _build(t) = ()
-@inline function _gviews(g::Group{P,R}, t) where {P,R}
-    r = g.p(t)::R
-    return _subviews(r, g.ws...)
-end
-
-"""
-The projection of a field of a mutable user type, which can be rebound: the
-views remember the user's object and the field, so a kept value follows the
-field (`FieldView`), or read through it at every use when a trait writes the
-projection field (`LiveView`, `L = true`).
-"""
-struct FieldGroup{R,L,WS<:Tuple}
-    i::Int
-    ws::WS
-end
-FieldGroup{R,L}(i::Int, ws::WS) where {R,L,WS} = FieldGroup{R,L,WS}(i, ws)
-@inline function _gviews(g::FieldGroup{R,L}, t) where {R,L}
-    i = getfield(g, :i)
-    return L ? _liveviews(t, i, R, getfield(g, :ws)...) : _fieldviews(t, i, getfield(t, i)::R, getfield(g, :ws)...)
-end
-@inline _fieldviews(t, i, r) = ()
-@inline _fieldviews(t, i, r, s::Wit{X}, rest...) where {X} = (FieldView{X}(s.w, r, t, i), _fieldviews(t, i, r, rest...)...)
-@inline _liveviews(t, i, ::Type{R}) where {R} = ()
-@inline _liveviews(t, i, ::Type{R}, s::Wit{X}, rest...) where {R,X} =
-    (LiveView{X,typeof(s.w),R}(s.w, t, i), _liveviews(t, i, R, rest...)...)
-@inline _build(t, g::Union{Group,FieldGroup}, rest...) = (_gviews(g, t)..., _build(t, rest...)...)
+@inline _build(t, s::VSpec{X,W,K,N}, rest...) where {X,W,K,N} =
+    (View{X,W,K,N}(getfield(s, :w), t, getfield(s, :r), getfield(s, :fs)), _build(t, rest...)...)
 
 """
 TraitWorld's generation: bumped by everything that can change what an entry
@@ -271,8 +251,8 @@ end
 "A value whose conformance is at parameters no method's bounds accept is refused at the entry, naming them."
 function _check_bound_params(@nospecialize(f), pos::Int, nargs::Int, @nospecialize(U), b::Builder)
     insts = Any[]
-    for g in b.groups, w in g.ws
-        push!(insts, typeof(w).parameters[1])
+    for sp in b.specs
+        push!(insts, typeof(sp).parameters[1])
     end
     pats = bound_patterns(f, pos, nargs)
     isempty(pats) && return nothing
@@ -295,40 +275,38 @@ function _builder_for(needed::Vector{Any}, @nospecialize(U))
         p === nothing || push!(found, (X, p))
     end
     isempty(found) && return NOTRAIT
-    # one group per projection function: a joint projection runs once
-    groups = Any[]                   # (p::ProjRec, traits)
-    for (X, p) in found
-        i = 0
-        for (k, g) in enumerate(groups)
-            q = g[1]::ProjRec
-            if q.project === p.project && q.R === p.R
-                i = k
-                break
-            end
-        end
-        i == 0 ? push!(groups, (p, Any[X])) : push!(groups[i][2]::Vector{Any}, X)
-    end
     seen = Any[]
-    built = Any[]
-    for (p, traits) in groups
-        ws = Any[]
-        for X in traits, Y in trait_closure(X)
-            _hasid(seen, Y) && continue
-            push!(seen, Y)
-            w = Y === X ? proj_witness(X, U, p) : witness(Y, p.R)
-            w === nothing && throw(TraitBoundError("$(U) projects onto $(p.R) for $X, but $(p.R) does not implement $Y"))
-            push!(ws, Wit{_instance(Y, p.R)}(w))     # the view carries the trait instance at the representation
-        end
-        wst = Tuple(ws)
-        if p.field != 0 && ismutabletype(U) && !isconst(U, fieldname(U, p.field)) && fieldtype(U, p.field) === p.R
-            # a field that can be rebound: a lens when one of the traits writes its projection field
-            live = any(X -> any(((f, w),) -> w && field_isrep(X, Val(f)), trait_fields(X)), traits)
-            push!(built, FieldGroup{p.R,live}(p.field, wst))
-        else
-            push!(built, Group{p.R}(p.project, wst))
-        end
+    specs = Any[]
+    for (X, p) in found, Y in trait_closure(X)
+        _hasid(seen, Y) && continue
+        push!(seen, Y)
+        w = Y === X ? proj_witness(X, U, p) : witness(Y, p.R)
+        w === nothing && throw(TraitBoundError("$(U) forwards $X to $(p.R), which does not implement $Y"))
+        K, fs = _key_and_slots(Y, p, U)
+        r = p.field == 0 ? SELF : _slot(U, p.field)
+        push!(specs, VSpec{_instance(Y, K),typeof(w),K,length(fs)}(w, r, fs))
     end
-    return Builder(Tuple(built))
+    return Builder(Tuple(specs))
+end
+
+"The slot of field `i` of type `U`: its byte offset and index."
+_slot(@nospecialize(U), i::Int) = Slot(Int(fieldoffset(U, i)), i)
+"The stored field of `U` that declared field `f` maps to: written in the conformance, else the same name."
+_mapped(p::ProjRec, f::Symbol) = (m = p.fmap; m === nothing ? f : get(m, f, f))
+"""
+The key of trait `Y` for user type `U` conforming through `p`, and the slots of `Y`'s
+declared fields: the implementing type alone for a trait without fields; else a `Key`
+with the declared fields' types in `U` (the implementing type `Nothing` for a trait with
+fields only).
+"""
+function _key_and_slots(@nospecialize(Y), p::ProjRec, @nospecialize(U))
+    fl = trait_fields(Y)
+    isempty(fl) && return p.R, ()
+    names = Symbol[f for (f, _) in fl]
+    idx = Int[Base.fieldindex(U, _mapped(p, f)) for f in names]
+    I = isempty(_ops(Y)) ? Nothing : p.R
+    F = NamedTuple{Tuple(names),Tuple{Any[fieldtype(U, i) for i in idx]...}}
+    return Key{I,F}, Tuple(_slot(U, i) for i in idx)
 end
 
 "Whether `f` has the tagged untyped fallback for these arguments (a vararg entry accepts the tag too, so `hasmethod` is not enough)."
@@ -470,76 +448,104 @@ end
 
 # --- results like the input (note "Results like the input") -----------------------
 
-"Functions with a method declared `::Like{t}`: their workers return a trait object, which their entry makes into the caller's type."
+"Functions with a method declared `::Like{t}`: their workers return a pending result, which their entry makes into the caller's type."
 const _LIKE_FUNCS = Base.IdSet{Any}()
 _like!(@nospecialize(f)) = (push!(_LIKE_FUNCS, typeof(f)); nothing)
 
-"""
-    like(t, r)
+"No new implementing value: a result like the input with only fields replaced."
+struct KeepSelf end
 
-A trait object of `t`'s conformance holding the representation `r`: what a
-function declared `::Like{t}` returns inside the trait world. Its entry makes
-it a value of the caller's type, through the conformance's inverse.
 """
-@inline like(t::TObj, r) = TObj(_withreps(r, getfield(t, :views)...))
-@inline _withreps(r) = ()
-@inline _withreps(r, v::AbstractView, rest::AbstractView...) = (_withrep(v, r), _withreps(r, rest...)...)
-@inline _withrep(v::AbstractView{X,W,R}, r::R) where {X,W,R} = View{X,W,R}(getfield(v, :w), r)
-_withrep(v::AbstractView, r) = Base.inferencebarrier(_sibling_view)(v, r)
-"A representation of another type in the same family (`Vector{Float32}` for `Vector{Float64}`): its own instance and witness."
-function _sibling_view(v::AbstractView{X}, r) where {X}
-    F = _family(X)
-    R2 = typeof(r)
-    w = witness(F, R2)
-    w === nothing && throw(TraitBoundError("$(R2) is no representation of $F: a result like the input cannot hold it"))
-    return View{_instance(F, R2),typeof(w),R2}(w, r)
+A result like the input (note "Results like the input"): the input's trait object, a new
+implementing value or `KeepSelf()`, and new values of declared fields. Nothing operates on
+it; only the entry inverts it, rebuilding the user's type.
+"""
+struct LikeResult{T<:TObj,S,F<:NamedTuple}
+    t::T
+    x::S
+    f::F
 end
 
-"How an entry returns: a trait object a `Like` function returned becomes a value of the caller's type; any other trait object is refused."
+"""
+    like(t, x)
+
+A result like `t` holding the new implementing value `x`: what a function declared
+`::Like{t}` returns inside the trait world.
+"""
+@inline like(t::TObj, x) = LikeResult(t, x, NamedTuple())
+@inline like(t::TObj, l::LikeResult) = l
+"""
+    withfields(t; f = v, …)
+
+A result like `t` with declared fields replaced; also on a result of `like`.
+"""
+@inline withfields(t::TObj; kw...) = LikeResult(t, KeepSelf(), values(kw))
+@inline withfields(l::LikeResult; kw...) = LikeResult(l.t, l.x, merge(l.f, values(kw)))
+
+"How an entry returns: a result like the input becomes a value of the caller's type; a trait object is refused."
 @inline _out(res, us::Tuple, vs::Tuple) = _noescape(res)
-_out(res::TObj, us::Tuple, vs::Tuple) = Base.inferencebarrier(_like_out)(res, us, vs)
-function _like_out(res::TObj, us::Tuple, vs::Tuple)
-    fams = sort!(unique([string(_family(Y)) for Y in Base.uniontypes(typeof(res).parameters[1])]))
+_out(res::LikeResult, us::Tuple, vs::Tuple) = Base.inferencebarrier(_like_out)(res, us, vs)
+function _like_out(res::LikeResult, us::Tuple, vs::Tuple)
     for i in eachindex(vs)
-        v = vs[i]
-        v isa TObj || continue
-        sort!(unique([string(_family(Y)) for Y in Base.uniontypes(typeof(v).parameters[1])])) == fams || continue
+        vs[i] === res.t || continue
         u = us[i]
-        u isa Dynamic && return typeof(u)(res)                 # a dynamic value in, a dynamic value of the same trait out
-        X = _family(typeof(getfield(res, :views)[1]).parameters[1])
-        return _unproject(X, u, _rep(getfield(res, :views)[1]))
+        v = getfield(res.t, :views)[1]
+        X = _family(typeof(v).parameters[1])
+        if u isa Dynamic
+            # a dynamic value in, a dynamic value of the same trait out
+            nu = _invert(X, v, getfield(v, :o), res)
+            b = _builder_for(Any[X], typeof(nu))
+            b === NOTRAIT && throw(TraitBoundError("$(typeof(nu)) does not conform to $X"))
+            return typeof(u)(b(nu))
+        end
+        return _invert(X, v, u, res)
     end
-    return _noescape(res)
+    throw(TraitBoundError("a result like the input names no trait object the entry passed"))
 end
 
 """
-The conformance's inverse: a value of the user's type `typeof(u)` holding the
-representation `r`. The identity for a type that is its own representation, a
-copy with the field replaced for a field projection, the conformer's
-`unproject(t, r)` for a computed one.
+The conformance's inverse: a value of the user's type `typeof(u)` with the new parts of `res`.
+A type that implements the operations itself is replaced by the new value (of the same type);
+otherwise the user's object is rebuilt by its constructor with the forwarding field and the
+declared fields replaced, so its parameters follow the new fields.
 """
-function _unproject(@nospecialize(X), u, r)
-    U = typeof(u)
-    p = proj_lookup(X, U)
-    p === nothing && throw(TraitBoundError("$U does not conform to $X"))
-    if p.project === identity
-        r isa Base.typename(U).wrapper && return r
-        throw(TraitBoundError("$U is its own representation for $X, but the result is a $(typeof(r)): " *
-                              "a result like the input must be a $(Base.typename(U).wrapper)"))
+function _invert(@nospecialize(X), v::View, u, res::LikeResult)
+    x = res.x
+    r = getfield(v, :r)
+    if !(x isa KeepSelf) && getfield(r, :off) < 0
+        typeof(x) <: Base.typename(typeof(u)).wrapper ||
+            throw(TraitBoundError("$(typeof(u)) implements $X itself, but the result is a $(typeof(x)): " *
+                                  "a result like the input must be a $(Base.typename(typeof(u)).wrapper)"))
+        u = x
+        x = KeepSelf()
     end
-    p.field != 0 && return _rebuild(u, p.field, r)
-    p.inverse === nothing || return p.inverse(u, r)
-    throw(TraitBoundError("$U conforms to $X through a computed projection without `unproject(t, r)`, " *
-                          "so a result like it cannot be built"))
+    repl = Dict{Int,Any}()
+    x isa KeepSelf || (repl[getfield(r, :idx)] = x)
+    fs = getfield(v, :fs)
+    for (f, val) in pairs(res.f)
+        repl[getfield(fs[_fieldpos(X, Val(f))], :idx)] = val
+    end
+    isempty(repl) && return u
+    return _rebuild(u, repl)
 end
-"A copy of `u` with field `i` replaced by `r`, built by the type's constructor, which recomputes its parameters (`Series{Float32}` from a `Vector{Float32}`)."
-function _rebuild(u, i::Int, r)
+"A copy of `u` with fields replaced, built by the type's constructor, which recomputes its parameters (`Series{Float32}` from a `Vector{Float32}`)."
+function _rebuild(u, repl::Dict{Int,Any})
     U = typeof(u)
-    fs = ntuple(j -> j == i ? r : getfield(u, j), fieldcount(U))
-    return Base.typename(U).wrapper(fs...)
+    fs = ntuple(j -> haskey(repl, j) ? repl[j] : getfield(u, j), fieldcount(U))
+    try
+        return Base.typename(U).wrapper(fs...)
+    catch e
+        e isa MethodError || rethrow()
+        throw(TraitBoundError("$U cannot be rebuilt from its fields by its constructor, so a result like it cannot be built"))
+    end
 end
-"An operation returning the representation, on a dynamic value: a dynamic value of the same conformance."
-@inline _dyn_like(d::Dynamic{X}, r) where {X} = Dynamic{X}(like(opened(d), r))
+"An operation returning `Self`, on a dynamic value: a dynamic value of the new value, which implements the trait itself."
+function _dyn_like(d::Dynamic{X}, x) where {X}
+    t = opened(d)
+    v = getfield(t, :views)[1]
+    isempty(getfield(v, :fs)) || throw(TraitBoundError("$X declares fields, so a new value of its implementing type alone does not conform"))
+    return Dynamic{X}(TObj(map(w -> View{typeof(w).parameters[1]}(getfield(w, :w), x), getfield(t, :views))))
+end
 
 # --- membership (note "Traits as abstract types") ----------------------------------
 

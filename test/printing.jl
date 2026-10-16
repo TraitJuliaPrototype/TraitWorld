@@ -32,7 +32,7 @@ frames(f) = try f(); "" catch; sprint(Base.show_backtrace, catch_backtrace()) en
     bt2 = frames(() -> P.apply(x -> 2x, [1.0]))
     @test occursin("Callable{Tuple{Float64}, Float64} at ", bt2)
     T = TraitWorld.TObj{P.PVec{Float64, Vector{Float64}},
-                        Tuple{TraitWorld.View{P.PVec{Float64, Vector{Float64}}, TraitWorld.Impl{()}, Vector{Float64}}}}
+                        Tuple{TraitWorld.View{P.PVec{Float64, Vector{Float64}}, TraitWorld.Impl{()}, Vector{Float64}, 0}}}
     @test sprint(show, T) == "$(sprint(show, P.PVec)){Float64} at Vector{Float64}"
     @test sprint(show, TraitWorld.TObj) == "TraitWorld.TObj" || sprint(show, TraitWorld.TObj) == "TObj"   # not concrete: as Julia prints it
     E = TraitWorld.CObj{Tuple{Float64}, Float64, TraitWorld.Erased{Tuple{Float64}, Float64}}

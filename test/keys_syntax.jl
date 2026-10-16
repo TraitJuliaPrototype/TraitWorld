@@ -41,6 +41,7 @@ toplevel(quote
         t::Float64
     end
     kadvance(i::KInteg, dt::Float64) = (i.t = i.t + dt; i.t)
+    knorm(i::KInteg) = (s = 0.0; for x in i.u; s += x * x; end; s * i.p[1])   # reads only
     end
 end)
 
@@ -57,6 +58,9 @@ toplevel(quote
     @implement KCols.KTable KRamp                              # the type implements the operations
     mutable struct KState; u::Vector{Float64}; p::Tuple{Float64,Float64}; t::Float64; end
     @implement KCols.KInteg KState
+    mutable struct KState2; tag::Symbol; t::Float64; p::Tuple{Float64,Float64}; u::Vector{Float64}; end
+    @implement KCols.KInteg KState2                             # another layout, the same key
+    struct KFrozen; p::Tuple{Float64,Float64}; u::Vector{Float64}; t::Float64; end
 end)
 
 @testset "Keys: the design's trait syntax" begin
@@ -73,8 +77,18 @@ end)
     @test TraitWorld.param(K.KVec, Val(:T), Vector{Int}) === Int
     st = Main.KState([1.0], (2.0, 3.0), 0.0)
     @test K.kadvance(st, 0.5) == 0.5 && st.t == 0.5
-    @test TraitWorld.param(K.KInteg, Val(:U), Main.KState) === Vector{Float64}
-    @test TraitWorld.param(K.KInteg, Val(:P), Main.KState) === Tuple{Float64,Float64}
+    key = first(TraitWorld._key_and_slots(K.KInteg, TraitWorld.proj_lookup(K.KInteg, Main.KState), Main.KState))
+    @test key === TraitWorld.Key{Nothing,@NamedTuple{u::Vector{Float64}, p::Tuple{Float64,Float64}, t::Float64}}
+    @test TraitWorld.param(K.KInteg, Val(:U), key) === Vector{Float64}
+    @test TraitWorld.param(K.KInteg, Val(:P), key) === Tuple{Float64,Float64}
+    # one worker per key: two mutable types and an immutable one, in different field orders
+    @test K.kadvance(Main.KState2(:a, 1.0, (1.0, 1.0), [0.0]), 0.5) == 1.5
+    @test K.knorm(st) == 2.0 && K.knorm(Main.KState2(:b, 0.0, (2.0, 0.0), [1.0, 1.0])) == 4.0
+    e = try toplevel(:(@implement KCols.KInteg KFrozen)); nothing catch err; err end   # `t` is writable: refused
+    while e isa LoadError; e = e.error; end
+    @test e isa ImplementError && occursin("cannot be written", sprint(showerror, e))
+    wk = only(m for m in methods(K.knorm) if Base.unwrap_unionall(m.sig).parameters[2] !== Any)
+    @test length(collect(Base.specializations(wk))) == 1
     @test isempty(check_definitions(K))
     # a parameter defined by a field and by an equation is refused
     e = try toplevel(quote

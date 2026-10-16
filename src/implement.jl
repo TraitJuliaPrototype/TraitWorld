@@ -28,17 +28,24 @@ struct GenericRec
     defaults::Tuple
 end
 
-"A projection: the function, its representation, whether it copies the user's data, and dynamic operations if any."
+"""
+A conformance (note "How a type conforms to a trait"): the implementing type `R`, the
+forwarding field (`field`, or 0 when the type implements the operations itself), a
+type's own operations called indirectly (`dyn`) if any, and the mapping of declared
+fields to stored fields (`fmap`, `nothing` for the same names).
+"""
 struct ProjRec
     project::Any
     R::Any
     copies::Bool
     dyn::Any
-    field::Int        # the user type's field the projection reads as is, or 0: a field projection can be a lens
-    inverse::Any      # `unproject(t, r)` written by the conformer, or nothing (note "Results like the input")
+    field::Int
+    inverse::Any
+    fmap::Any
 end
-ProjRec(project, R, copies::Bool, dyn) = ProjRec(project, R, copies, dyn, 0, nothing)
-ProjRec(project, R, copies::Bool, dyn, field::Int) = ProjRec(project, R, copies, dyn, field, nothing)
+ProjRec(project, R, copies::Bool, dyn) = ProjRec(project, R, copies, dyn, 0, nothing, nothing)
+ProjRec(project, R, copies::Bool, dyn, field::Int) = ProjRec(project, R, copies, dyn, field, nothing, nothing)
+ProjRec(project, R, copies::Bool, dyn, field::Int, inverse) = ProjRec(project, R, copies, dyn, field, inverse, nothing)
 "`projection(X, T)`: a `ProjRec`, or `nothing`. A representation is its own projection."
 projection(@nospecialize(X), @nospecialize(T)) = nothing
 
@@ -291,17 +298,26 @@ end
 "The type of the trait object a generic implementation's body receives at `R`."
 function _subobj_type(sub::Tuple, @nospecialize(R))
     Xs = Any[typeof(s).parameters[1] for s in sub]
-    vs = Any[View{typeof(s).parameters[1],typeof(s.w),R} for s in sub]
+    vs = Any[View{typeof(s).parameters[1],typeof(s.w),R,0} for s in sub]
     return TObj{Union{Xs...},Tuple{vs...}}
 end
 
 _hasfirst(v::Vector{Any}, @nospecialize(y)) = (for s in v; (s::Tuple)[1] === y && return true; end; false)
 
-"The projection of `T` for `X`: an explicit one, or `T` itself if it is a representation of `X`."
+"""
+The conformance of `T` to `X`: a declared one, or `T` itself when it implements `X` and has
+the fields `X` and its supertraits declare, under their own names. A type that implements
+the operations but lacks the fields is an implementing type, not a member.
+"""
 function proj_lookup(@nospecialize(X), @nospecialize(T))
     p = _proj(X, T)
     p isa ProjRec && return p
     witness(X, T) === nothing && return nothing
+    # a trait with fields: membership is declared per type, never conferred by a generic implementation
+    any(Y -> !isempty(trait_fields(Y)), trait_closure(X)) && implementation(X, T) === nothing && return nothing
+    for Y in trait_closure(X)
+        isempty(_field_problems(Y, T, nothing, T)) || return nothing
+    end
     return ProjRec(identity, T, false, nothing)
 end
 
@@ -389,10 +405,9 @@ function _check_implementation(mod::Module, @nospecialize(X), @nospecialize(R), 
                 "(`@implement $X{…}` without a block), or let the owner of $(R) implement it."))
         end
     end
-    isconcretetype(R) || return nothing          # families and generic implementations are checked per representation
-    deep_concrete(R) || throw(ImplementError("$R is not deeply concrete, so it cannot be a representation"))
-    ps = conformance_problems(X, R, given)
-    append!(ps, _field_problems(X, R))
+    isconcretetype(R) || return nothing          # families and generic implementations are checked per type
+    deep_concrete(R) || throw(ImplementError("$R is not deeply concrete, so it cannot implement a trait"))
+    ps = conformance_problems(X, R, given)       # fields belong to a conformance, not to an implementation
     isempty(ps) || throw(ImplementError("the implementation of $X for $R does not conform:\n  " * join(ps, "\n  ")))
     for S in trait_closure(X)[2:end]
         witness(S, R) === nothing &&
@@ -406,60 +421,58 @@ function _check_projection(mod::Module, @nospecialize(X), @nospecialize(T))
     p = _proj(X, T)::ProjRec
     definer = owner(mod)
     (definer === owner(parentmodule(X)) || _owns(definer, T)) ||
-        throw(ImplementError("$(mod) may not project $T onto $X: it owns neither (rule 3)"))
+        throw(ImplementError("$(mod) may not declare that $T conforms to $X: it owns neither (rule 3)"))
     R = p.R
-    (R isa Type && deep_concrete(R)) ||
-        throw(ImplementError("the projection of $T for $X returns $R, which is not deeply concrete"))
+    (R isa Type && (deep_concrete(R) || R === Nothing)) ||
+        throw(ImplementError("$T forwards $X to a field of type $R, which is not deeply concrete"))
     for Y in trait_closure(X)
         w = Y === X ? proj_witness(X, T, p) : witness(Y, R)
-        w === nothing && throw(ImplementError("the projection of $T for $X returns $R, which does not implement $Y"))
-        if p.copies
-            for op in _ops(Y)
-                _mutating(Y, op) && throw(ImplementError(
-                    "$Y has the mutating operation `$op`, so it accepts only projections that share the user's data; " *
-                    "the projection of $T copies (rule 2)"))
-            end
-            for (f, w) in trait_fields(Y)
-                w && throw(ImplementError("$Y declares the writable field `$f`, so it accepts only projections that share " *
-                                          "the user's data; the projection of $T copies (rule 2)"))
-            end
-        end
-        ps = _field_problems(Y, R)
-        isempty(ps) || throw(ImplementError("the projection of $T for $X returns $R, which lacks fields $Y declares:\n  " * join(ps, "\n  ")))
-        for (f, w) in trait_fields(Y)
-            field_isrep(Y, Val(f)) || continue
-            hasfield(T, f) && fieldtype(T, f) === R ||
-                throw(ImplementError("$Y declares `$f::R` as its projection field: $T needs a field `$f` of exactly the representation's type $R"))
-            if w && !(p.field != 0 && ismutabletype(T) && !isconst(T, f))
-                throw(ImplementError("$Y declares its projection field `$f` writable, so $T must be a mutable type with a field `$f` that is not `const`, " *
-                                     "projected as the field itself (a lens)"))
-            end
-        end
+        w === nothing && throw(ImplementError("$T forwards $X to a field of type $R, which does not implement $Y"))
+        ps = _field_problems(Y, T, p.fmap, R)
+        isempty(ps) || throw(ImplementError("$T does not have the fields $Y declares:\n  " * join(ps, "\n  ")))
     end
     return nothing
 end
 
-"Problems of representation `R` with the fields trait `X` declares (not its projection field): a stored field of the declared type, exactly that type and writable where the trait writes it, or a computed property."
-function _field_problems(@nospecialize(X), @nospecialize(R))
+"A type declared to conform by its own methods has the fields the trait and its supertraits declare."
+function _check_own_fields(@nospecialize(X), @nospecialize(T))
+    for Y in trait_closure(X)
+        ps = _field_problems(Y, T, nothing, isempty(_ops(Y)) ? Nothing : T)
+        isempty(ps) || throw(ImplementError("$T does not have the fields $Y declares:\n  " * join(ps, "\n  ")))
+    end
+    return nothing
+end
+
+"""
+Problems of user type `T` with the fields trait `X` declares, mapped by `fmap` (else by
+name): a stored field of the declared type, exactly that type and writable where the trait
+writes it. A type with a `getproperty` of its own maps every field explicitly, because a
+declared field is read with `getfield` and plain `x.name` may differ.
+"""
+function _field_problems(@nospecialize(X), @nospecialize(T), fmap, @nospecialize(R))
     ps = String[]
+    isempty(trait_fields(X)) && return ps
+    T isa DataType || return ["$T is not a concrete type with fields"]
+    own_gp = which(getproperty, Tuple{T,Symbol}).sig.parameters[2] !== Any
     for (f, w) in trait_fields(X)
-        field_isrep(X, Val(f)) && continue
-        FT = field_type(X, Val(f), R)
-        if R isa DataType && hasfield(R, f)
-            ST = fieldtype(R, f)
-            if w
-                (ismutabletype(R) && !isconst(R, f)) ||
-                    push!(ps, "field `$f` is writable in $X, but $R's field `$f` cannot be written (an immutable type or a `const` field)")
-                ST === FT || push!(ps, "field `$f` is writable in $X with type `$FT`, so $R's field must have exactly that type, not `$ST`")
-            else
-                ST <: FT || push!(ps, "field `$f` of $R has type `$ST`, but $X declares `$FT`")
-            end
-        elseif R isa Type && which(getproperty, Tuple{R,Symbol}).sig.parameters[2] !== Any
-            # a computed property: its result is asserted at every read
-            w && which(setproperty!, Tuple{R,Symbol,FT}).sig.parameters[2] === Any &&
-                push!(ps, "field `$f` is writable in $X, but $R defines no `setproperty!`")
+        g = fmap === nothing ? f : get(fmap, f, f)
+        if own_gp && (fmap === nothing || !haskey(fmap, f))
+            push!(ps, "$T defines its own `getproperty`, so field `$f` of $X must be mapped explicitly (`$f => storedfield`); " *
+                      "it is read with `getfield`, and plain `x.$f` may differ")
+            continue
+        end
+        if !hasfield(T, g)
+            push!(ps, "$T has no field `$g`" * (g === f ? ", which $X declares" : " (mapped from $X's `$f`)"))
+            continue
+        end
+        ST = fieldtype(T, g)
+        FT = field_type(X, Val(f), Key{isempty(_ops(X)) ? Nothing : R,NamedTuple{(f,),Tuple{ST}}})
+        if w
+            (ismutabletype(T) && !isconst(T, g)) ||
+                push!(ps, "field `$f` is writable in $X, but $T's field `$g` cannot be written (an immutable type or a `const` field)")
+            ST === FT || push!(ps, "field `$f` is writable in $X with type `$FT`, so $T's field `$g` must have exactly that type, not `$ST`")
         else
-            push!(ps, "$R has no field `$f`, which $X declares")
+            ST <: FT || push!(ps, "field `$g` of $T has type `$ST`, but $X declares `$FT` for `$f`")
         end
     end
     return ps
@@ -554,7 +567,12 @@ function _keys_implement(mod::Module, args)
     head = args[1]
     X, pexs = (head isa Symbol || (head isa Expr && head.head === :.)) ? (head, Any[]) :
               head isa Expr && head.head === :curly ? (head.args[1], Any[head.args[2:end]...]) : (nothing, nothing)
-    X === nothing && return args
+    if X === nothing
+        # several traits at once, `(ColTable, RowTable) T by f`: forwarding only
+        head isa Expr && head.head === :tuple && length(args) == 4 && args[3] === :by && args[4] isa Symbol &&
+            return (head, args[2], :(project(t) = getfield(t, $(QuoteNode(args[4])))))
+        return args
+    end
     Xv = try Core.eval(mod, X) catch; return args end
     Xv isa Type && Xv <: Trait || return args
     np = length(trait_params(Xv))
@@ -563,6 +581,24 @@ function _keys_implement(mod::Module, args)
     length(pexs) == np || return args            # `X{P…, R}`: the earlier spelling
     T = args[2]
     rest = collect(args[3:end])
+    # field mappings: `name => stored`, alone, in a tuple, or after `by f,`
+    fmap = Any[]
+    ispair(e) = e isa Expr && e.head === :call && e.args[1] === :(=>) && length(e.args) == 3
+    if !isempty(rest) && rest[end] isa Expr && rest[end].head === :tuple && length(rest) >= 2 && rest[end-1] === :by
+        tup = rest[end].args
+        rest[end] = tup[1]
+        append!(fmap, tup[2:end])
+    end
+    while !isempty(rest) && (ispair(rest[end]) || (rest[end] isa Expr && rest[end].head === :tuple && all(ispair, rest[end].args)))
+        e = pop!(rest)
+        ispair(e) ? pushfirst!(fmap, e) : prepend!(fmap, e.args)
+    end
+    if !isempty(fmap)
+        all(ispair, fmap) && all(e -> e.args[2] isa Symbol && e.args[3] isa Symbol, fmap) ||
+            error("@implement: a field mapping is `name => storedfield`")
+        mapex = Expr(:fieldmap, [QuoteNode(e.args[2]) => QuoteNode(e.args[3]) for e in fmap]...)
+        return (_keys_implement(mod, (args[1], T, rest...))..., mapex)
+    end
     withR(R) = Expr(:curly, X, pexs..., R)
     # X A where {…}, with or without a block
     if T isa Expr && T.head === :where && T.args[1] isa Symbol
@@ -596,12 +632,18 @@ macro implement(args...)
     TW = TraitWorld
     isempty(args) && error("@implement: nothing to implement")
     args = _keys_implement(mod, args)
+    fmap = nothing
+    if !isempty(args) && args[end] isa Expr && args[end].head === :fieldmap
+        fmap = Dict{Symbol,Symbol}(p.first.value => p.second.value for p in args[end].args)
+        args = args[1:end-1]
+    end
     head = args[1]
     rest = collect(args[2:end])
     # --- projections: @implement X T …, @implement (X, Y) T …, @implement X{R} T …
     if !isempty(rest) && !(rest[1] isa Expr && rest[1].head === :block)
-        return _implement_projection(mod, head, rest)
+        return _implement_projection(mod, head, rest; fmap)
     end
+    fmap === nothing || error("@implement: a field mapping belongs to a conformance, `@implement X T name => stored`")
     block = isempty(rest) ? nothing : rest[1]
     # --- generic and family implementations: X{R} where {...}
     if head isa Expr && head.head === :where
@@ -652,6 +694,9 @@ function _param_methods(@nospecialize(X), pexs, Rex, wheres::Vector{Any})
         pex === :_ && continue              # defined by the trait's equation or field
         sig = :($TW.param(::Type{$X}, ::Val{$(QuoteNode(p))}, ::Type{$Rex}))
         push!(out, Expr(:(=), isempty(wheres) ? sig : Expr(:where, sig, wheres...), pex))
+        # the same parameter at a key with declared fields, whose implementing type is Rex
+        ksig = :($TW.param(::Type{$X}, ::Val{$(QuoteNode(p))}, ::Type{$TW.Key{$Rex,F__}}))
+        push!(out, Expr(:(=), Expr(:where, ksig, wheres..., :F__), pex))
     end
     return out
 end
@@ -778,7 +823,7 @@ projection, composed with that type's own projection if it has one. Methods
 win over a field; partial methods, several conforming fields without `data`,
 or no conforming field are errors naming the operation or the fields.
 """
-function _implement_oneline(mod::Module, traits::Vector{Any}, Tex, Rdecl; pexs = nothing)
+function _implement_oneline(mod::Module, traits::Vector{Any}, Tex, Rdecl; pexs = nothing, fmap = nothing)
     TW = TraitWorld
     Rdecl === nothing || error("@implement: the one-line form takes no representation; write `@implement $(traits[1]){$Rdecl} $Tex project(t) = …`")
     T = Core.eval(mod, Tex)
@@ -793,11 +838,21 @@ function _implement_oneline(mod::Module, traits::Vector{Any}, Tex, Rdecl; pexs =
         f = pfs[1]
         hasfield(T, f) || throw(ImplementError("$Tex has no field `$f`, which $(join(string.(Xs), ", ")) declares as its projection"))
         headex = length(traits) == 1 ? traits[1] : Expr(:tuple, traits...)
-        return _implement_projection(mod, headex, Any[Tex, :(project(t) = getfield(t, $(QuoteNode(f))))]; field = Base.fieldindex(T, f))
+        return _implement_projection(mod, headex, Any[Tex, :(project(t) = getfield(t, $(QuoteNode(f))))]; field = Base.fieldindex(T, f), fmap)
     end
     if all(X -> _methods_cover(X, T), Xs)
-        # the type is its own representation: its existing methods, checked as an implementation
+        # the type implements the operations itself: its existing methods, checked as an implementation
         out = Any[]
+        if fmap !== nothing || any(X -> isempty(_ops(X)) && !isempty(trait_fields(X)), Xs)
+            # a declared conformance with its field mapping (a trait with fields only conforms this way too)
+            for (xex, X) in zip(traits, Xs)
+                prec = gensym(:conformance)
+                Iex = isempty(_ops(X)) ? :Nothing : Tex
+                push!(out, :(const $prec = $TW.ProjRec(identity, $Iex, false, nothing, 0, nothing, $(fmap === nothing ? :nothing : QuoteNode(fmap)))))
+                push!(out, :($TW.projection(::Type{$xex}, ::Type{$Tex}) = $prec))
+                push!(out, :($TW._check_projection(@__MODULE__, $xex, $Tex)))
+            end
+        end
         pexs === nothing || append!(out, _param_methods(Xs[1], pexs, Tex, Any[]))
         for (xex, X) in zip(traits, Xs)
             rec = gensym(:implementation)
@@ -805,6 +860,8 @@ function _implement_oneline(mod::Module, traits::Vector{Any}, Tex, Rdecl; pexs =
             push!(out, :($TW.implementation(::Type{$xex}, ::Type{$Tex}) = $rec))
             push!(out, :($TW._check_implementation(@__MODULE__, $xex, $Tex,
                            Tuple(op for op in $TW._ops($xex) if !(op in $TW._existing_defaults($xex, $Tex))))))
+            # the one-line form declares that the type conforms: it must have the declared fields
+            fmap === nothing && push!(out, :($TW._check_own_fields($xex, $Tex)))
         end
         push!(out, :($TW._bump!()))
         push!(out, :nothing)
@@ -823,7 +880,7 @@ function _implement_oneline(mod::Module, traits::Vector{Any}, Tex, Rdecl; pexs =
     for i in 1:fieldcount(T)
         FT = fieldtype(T, i)
         FT isa Type || continue
-        all(X -> proj_lookup(X, FT) !== nothing, Xs) || continue
+        all(X -> witness(X, FT) !== nothing, Xs) || continue
         deep_concrete(FT) ? push!(conforming, i) : push!(abstract_conforming, i)
     end
     idata = findfirst(==(:data), fns)
@@ -846,19 +903,11 @@ function _implement_oneline(mod::Module, traits::Vector{Any}, Tex, Rdecl; pexs =
     end
     FT = fieldtype(T, fld)
     fsym = QuoteNode(fns[fld])
-    # compose with the field type's own projection, when it is not a representation itself
-    ps = Any[_proj(X, FT) for X in Xs]
-    pex = if all(p -> p === nothing, ps)
-        :(getfield(t, $fsym))
-    elseif all(p -> p isa ProjRec && p.project === ps[1].project, ps)
-        p1 = ps[1]
-        p1.dyn === nothing || throw(ImplementError("field `$(fns[fld])` of $Tex conforms through dynamic operations; write the projection out"))
-        :($(p1.project)(getfield(t, $fsym)))
-    else
-        throw(ImplementError("the fields of $Tex conform to $(join(string.(Xs), ", ")) through different projections; write one `project(t) = …`"))
-    end
+    # the field's type must implement the trait itself: forwarding does not chain
+    any(X -> _proj(X, FT) !== nothing, Xs) && throw(ImplementError(
+        "field `$(fns[fld])` of $Tex forwards $(join(string.(Xs), ", ")) to a field of its own; forward to a field whose type implements the operations"))
     headex = length(traits) == 1 ? traits[1] : Expr(:tuple, traits...)
-    return _implement_projection(mod, headex, Any[Tex, :(project(t) = $pex)]; field = all(p -> p === nothing, ps) ? fld : 0)
+    return _implement_projection(mod, headex, Any[Tex, :(project(t) = getfield(t, $fsym))]; field = fld, fmap)
 end
 
 "The field a projection body reads from its argument as is (`t.cols`, `getfield(t, :cols)`), or nothing."
@@ -875,7 +924,7 @@ function _field_read(body, tname)
     return nothing
 end
 
-function _implement_projection(mod::Module, head, rest; field::Int = 0)
+function _implement_projection(mod::Module, head, rest; field::Int = 0, fmap = nothing)
     TW = TraitWorld
     traits = Any[]
     Rdecl = nothing
@@ -908,7 +957,7 @@ function _implement_projection(mod::Module, head, rest; field::Int = 0)
     while !isempty(rest) && _flag(rest[1])
         push!(flags, popfirst!(rest))
     end
-    isempty(rest) && isempty(flags) && return _implement_oneline(mod, traits, Tex, Rdecl; pexs)
+    isempty(rest) && isempty(flags) && return _implement_oneline(mod, traits, Tex, Rdecl; pexs, fmap)
     length(rest) == 1 || error("@implement: expected `project(t) = …` or a begin … end block after the type")
     body = rest[1]
     dynamic = :dynamic in flags
@@ -924,13 +973,17 @@ function _implement_projection(mod::Module, head, rest; field::Int = 0)
     length(pcall.args) == 2 || error("@implement: `project` takes the value only")
     targ = pcall.args[2]
     tname = targ isa Expr ? targ.args[1] : targ
-    if field == 0 && !dynamic && !copies
-        # a written projection that reads a field as is (`project(t) = t.cols`) is a field projection:
-        # a lens, and its inverse a copy with the field replaced
+    copies && throw(ImplementError("copying projections are not part of the design; a library converts explicitly (note \"Types that only convert\")"))
+    isempty(udefs) || throw(ImplementError("`unproject` is gone with computed projections; a result like the input replaces fields"))
+    if field == 0
+        # forwarding: the projection reads a field as is (`by data`, or `project(t) = t.data`)
         f = _field_read(pdef.args[2], tname)
         T = f === nothing ? nothing : Core.eval(mod, Tex)
         T isa Type && f in fieldnames(T) && (field = Base.fieldindex(T, f))
     end
+    field == 0 && throw(ImplementError("`$(pdef.args[1]) = …` computes a value: a type conforms by implementing the operations or by " *
+                        "forwarding them to a field (`@implement X T by field`); a library that needs another layout converts explicitly " *
+                        "(note \"Types that only convert\")"))
     pfn = gensym(:project)
     rec = gensym(:projection)
     Rconst = gensym(:R)
@@ -977,7 +1030,7 @@ function _implement_projection(mod::Module, head, rest; field::Int = 0)
     elseif dynamic
         error("@implement: `dynamic` needs operations in the block")
     end
-    push!(out, :(const $rec = $TW.ProjRec($pfn, $Rconst, $copies, $dynex, $field, $invex)))
+    push!(out, :(const $rec = $TW.ProjRec($pfn, $Rconst, $copies, $dynex, $field, $invex, $(fmap === nothing ? :nothing : QuoteNode(fmap)))))
     for X in traits
         push!(out, :($TW.projection(::Type{$X}, ::Type{$Tex}) = $rec))
     end

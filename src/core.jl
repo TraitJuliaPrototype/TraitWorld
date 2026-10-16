@@ -42,51 +42,112 @@ compiled_call(f::F) where {F} = CallAs{CompiledCall,Nothing,Nothing,F}(f)
 dynamic_call(f::F) where {F} = CallAs{DynamicCall,Nothing,Nothing,F}(f)
 (::Type{Callable{A,S,M}})(f::F) where {A,S,M<:CallMode,F} = CallAs{M,A,S,F}(f)
 
-"One trait's view of a value: the witness that says where its operations come from, and the representation."
-abstract type AbstractView{X,W,R} end
+"One trait's view of a value: the witness that says where its operations come from, and the key `K`."
+abstract type AbstractView{X,W,K} end
 
-"A view holding its representation: what an entry builds, and what a worker sees within a call."
-struct View{X,W,R} <: AbstractView{X,W,R}
-    w::W
-    r::R
+"""
+Where a part of the user's object lives: its byte offset and its field index. The
+offset -1 means the object itself (a type that implements the operations).
+"""
+struct Slot
+    off::Int
+    idx::Int
 end
-View{X}(w::W, r::R) where {X,W,R} = View{X,W,R}(w, r)
+const SELF = Slot(-1, 0)
 
 """
-A view of a field projection of a mutable user type: the representation held,
-as in `View`, and the user's object and the field's index, so that a value kept
-beyond the call can follow the field (note "Dynamic values": kept values follow
-the user's fields).
+    Key{I, F}
+
+The key of a trait that declares fields (note "Terms": what a bound can see): the
+implementing type `I` (`Nothing` for a trait with fields only) and `F`, a named-tuple
+type of the declared fields' types in the conforming type. A trait without fields is
+keyed by its implementing type alone.
 """
-struct FieldView{X,W,R} <: AbstractView{X,W,R}
+struct Key{I,F} end
+"The implementing type of a key."
+_impl(::Type{K}) where {K} = K
+_impl(::Type{Key{I,F}}) where {I,F} = I
+"The type of declared field `f` in a key."
+_keyfield(::Type{Key{I,F}}, f::Symbol) where {I,F} = fieldtype(F, f)
+
+"""
+A view: the user's object `o` itself, the witness, and the slots of the implementing
+value and of the declared fields (note "Declaring a trait": every access reads the
+user's object). Its type depends on the trait and the key, never on the user's type,
+so a worker compiled per key serves every conforming type.
+"""
+struct View{X,W,K,N} <: AbstractView{X,W,K}
     w::W
-    r::R
     o::Any
-    i::Int
+    r::Slot
+    fs::NTuple{N,Slot}
 end
-FieldView{X}(w::W, r::R, o, i::Int) where {X,W,R} = FieldView{X,W,R}(w, r, o, i)
+"A view of a value that is its own implementing value, with no declared fields: generic implementations' constraints, `Like` results."
+View{X}(w::W, r) where {X,W} = View{X,W,typeof(r),0}(w, r, SELF, ())
 
+"The implementing value a view stands for: the user's object, or its forwarding field, read now."
+@inline _rep(v::View{X,W,K}) where {X,W,K} = _loadpart(_impl(K), getfield(v, :o), getfield(v, :r))
+"The key of a view type."
+_reptype(::Type{<:AbstractView{X,W,K}}) where {X,W,K} = K
+
+# --- reading and writing the user's object at an offset (experiments/lens/layout.md) ---------------
+#
+# The loads and stores carry Julia's own alias metadata (TBAA `jtbaa_mutab`), so a loop
+# that reads `t.data[i]` while storing into another array vectorizes as in plain Julia;
+# without it, LLVM reloads the field after every store (5× on such loops).
+
+@inline _objptr(o) = ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), o)
+const _TBAA_MD = """
+!0 = !{!"jtbaa"}
+!1 = !{!"jtbaa", !0, i64 0}
+!2 = !{!"jtbaa_value", !1, i64 0}
+!3 = !{!"jtbaa_mutab", !2, i64 0}
+!4 = !{!3, !3, i64 0}
 """
-A live view, a lens: the representation read from the user's field at every
-use, and written there. Made for a trait that declares its projection field
-writable, and for a kept field projection.
-"""
-struct LiveView{X,W,R} <: AbstractView{X,W,R}
-    w::W
-    o::Any
-    i::Int
+const _LLVM_PRIM = IdDict{Any,String}(Float64 => "double", Float32 => "float", Int64 => "i64", UInt64 => "i64",
+                                      Int32 => "i32", UInt32 => "i32", Int16 => "i16", UInt16 => "i16")
+@generated function _tbaa_load(p::Ptr{T}) where {T}
+    t = T <: Ptr ? "ptr" : get(_LLVM_PRIM, T, nothing)
+    t === nothing && return :(unsafe_load(p))
+    ir = "define $t @entry(ptr %p) #0 {\n  %v = load $t, ptr %p, align $(Base.datatype_alignment(T)), !tbaa !4\n  ret $t %v\n}\nattributes #0 = { alwaysinline }\n" * _TBAA_MD
+    return :(Base.llvmcall(($ir, "entry"), $T, Tuple{Ptr{$T}}, p))
+end
+@generated function _tbaa_store(p::Ptr{T}, x::T) where {T}
+    t = get(_LLVM_PRIM, T, nothing)
+    t === nothing && return :(unsafe_store!(p, x); nothing)
+    ir = "define void @entry(ptr %p, $t %x) #0 {\n  store $t %x, ptr %p, align $(Base.datatype_alignment(T)), !tbaa !4\n  ret void\n}\nattributes #0 = { alwaysinline }\n" * _TBAA_MD
+    return :(Base.llvmcall(($ir, "entry"), Cvoid, Tuple{Ptr{$T},$T}, p, x); nothing)
 end
 
-"The representation a view stands for: held, or read through the lens."
-@inline _rep(v::View) = getfield(v, :r)
-@inline _rep(v::FieldView) = getfield(v, :r)
-@inline _rep(v::LiveView{X,W,R}) where {X,W,R} = getfield(getfield(v, :o), getfield(v, :i))::R
-_reptype(::Type{<:AbstractView{X,W,R}}) where {X,W,R} = R
-"Write the representation through a lens: the user's field is rebound, as `t.data = v` in plain Julia."
-@inline _setrep!(v::LiveView{X,W,R}, x) where {X,W,R} = (setfield!(getfield(v, :o), getfield(v, :i), x::R); nothing)
-_setrep!(v::AbstractView, x) = Base.inferencebarrier(_notlens)(typeof(v))
-@noinline _notlens(@nospecialize(V)) =
-    throw(ArgumentError("this trait object holds its representation, so its projection field cannot be rebound ($V)"))
+"How a field of declared type `T` is stored: `:singleton`, `:bits` (inline, isbits), `:ref` (a pointer), or `:other` (read with `getfield`)."
+function _storage(@nospecialize(T))
+    T isa DataType && Base.issingletontype(T) && return :singleton
+    isbitstype(T) && return :bits
+    (T isa Union && Base.isbitsunion(T)) && return :other
+    T isa DataType && Base.allocatedinline(T) && return :other
+    return :ref
+end
+"A part of the user's object, of exactly the type `T` in the key: the object itself, or its field at slot `s`."
+@inline function _loadpart(::Type{T}, o, s::Slot) where {T}
+    getfield(s, :off) < 0 && return o::T
+    return _loadfield(T, o, s)
+end
+@generated function _loadfield(::Type{T}, o, s::Slot) where {T}
+    k = _storage(T)
+    k === :singleton && return :($(T.instance))
+    k === :bits && return :(GC.@preserve o _tbaa_load(Ptr{$T}(_objptr(o) + getfield(s, :off))))
+    k === :other && return :(getfield(o, getfield(s, :idx))::$T)
+    return quote
+        p = GC.@preserve o _tbaa_load(Ptr{Ptr{Cvoid}}(_objptr(o) + getfield(s, :off)))
+        p == C_NULL && throw(UndefRefError())
+        GC.@preserve o unsafe_pointer_to_objref(p)::$T
+    end
+end
+"Write a field of the user's (mutable) object: an isbits field at its offset, any other through `setfield!` and its write barrier."
+@generated function _storefield(::Type{T}, o, s::Slot, x) where {T}
+    _storage(T) === :bits && return :(GC.@preserve o _tbaa_store(Ptr{$T}(_objptr(o) + getfield(s, :off)), x::$T); nothing)
+    return :(setfield!(o, getfield(s, :idx), x::$T); nothing)
+end
 
 """
     TObj{T, V}
@@ -148,7 +209,7 @@ struct Dynamic{X}
     t::Any
     function Dynamic{X}(t::TObj{T}) where {X,T}
         _carries(T, X) || Base.inferencebarrier(_dyn_refuse)(X, T)
-        return new{X}(_kept(t))
+        return new{X}(t)                 # the trait object is the user's object: a kept value follows its fields
     end
 end
 Dynamic{X}(d::Dynamic{X}) where {X} = d
@@ -161,7 +222,7 @@ Base.convert(::Type{Dynamic{X}}, t::TObj) where {X} = Dynamic{X}(t)
 Base.:(==)(a::Dynamic{X}, b::Dynamic{X}) where {X} = getfield(a, :t) === getfield(b, :t)
 Base.hash(d::Dynamic, h::UInt) = hash(getfield(d, :t), hash(:TraitWorldDynamic, h))
 Base.show(io::IO, d::Dynamic{X}) where {X} = print(io, "Dynamic{", X, "} at ", _represented(typeof(getfield(d, :t))))
-_represented(@nospecialize(T)) = T <: TObj ? join(unique([string(v.parameters[3]) for v in T.parameters[2].parameters]), ", ") : string(T)
+_represented(@nospecialize(T)) = T <: TObj ? join(unique([sprint(_show_key, v.parameters[3]) for v in T.parameters[2].parameters]), ", ") : string(T)
 @inline _dyn_assert(x, ::Type{S}) where {S} = x::S
 
 # --- printing by bound and representation (note "Identical or error", findings §16, §17) --------
@@ -172,7 +233,7 @@ _represented(@nospecialize(T)) = T <: TObj ? join(unique([string(v.parameters[3]
 
 "Whether `T` is a trait object's concrete type, with views whose parameters are all known."
 _printable_tobj(@nospecialize(T)) = T isa DataType && T <: TObj && T.parameters[2] isa DataType &&
-    all(v -> v isa DataType && v <: AbstractView && length(v.parameters) == 3 && v.parameters[1] isa DataType, T.parameters[2].parameters)
+    all(v -> v isa DataType && v <: AbstractView && v.parameters[1] isa DataType, T.parameters[2].parameters)
 
 "A trait instance without its representation: `StateVector{Float64}` for `StateVector{Float64, Vector{Float64}}`."
 function _show_bound(io::IO, @nospecialize(X))
@@ -191,8 +252,8 @@ function _show_tobj(io::IO, @nospecialize(T))
     # views grouped by representation and how it is held: `ColTable & RowTable at Vector{Vector{Float64}}`
     groups = Any[]
     for V in T.parameters[2].parameters
-        X, W, R = V.parameters
-        how = V <: LiveView ? " by lens" : W <: Dyn ? " (dynamic)" : ""
+        X, W, R = V.parameters[1], V.parameters[2], V.parameters[3]
+        how = W <: Dyn ? " (dynamic)" : ""
         k = findfirst(g -> g[1] === R && g[2] == how, groups)
         k === nothing ? push!(groups, (R, how, Any[X])) : push!(groups[k][3], X)
     end
@@ -203,7 +264,7 @@ function _show_tobj(io::IO, @nospecialize(T))
             _show_bound(io, X)
         end
         print(io, " at ")
-        show(io, R)
+        _show_key(io, R)
         print(io, how)
     end
 end
@@ -213,10 +274,18 @@ function Base.show(io::IO, T::Type{<:TObj})
     return _show_tobj(io, T)
 end
 Base.show(io::IO, t::TObj) = (print(io, "trait object "); _show_tobj(io, typeof(t)))
-# keeping a trait object: a field projection of a mutable user type is kept as a lens
-@inline _kept(t::TObj) = TObj(map(_keepview, getfield(t, :views)))
-@inline _keepview(v::FieldView{X,W,R}) where {X,W,R} = LiveView{X,W,R}(getfield(v, :w), getfield(v, :o), getfield(v, :i))
-@inline _keepview(v::AbstractView) = v
+"A key as a reader wants it: the implementing type, then the declared fields' types, `Vector{Float64}; u::Vector{Float64}, p::Params`."
+function _show_key(io::IO, @nospecialize(K))
+    if K isa DataType && K <: Key && length(K.parameters) == 2
+        I, F = K.parameters
+        I === Nothing || (show(io, I); print(io, "; "))
+        F isa DataType && F <: NamedTuple || return show(io, F)
+        names, types = F.parameters[1], F.parameters[2].parameters
+        print(io, join(("$n::$(sprint(show, t))" for (n, t) in zip(names, types)), ", "))
+    else
+        show(io, K)
+    end
+end
 
 # --- fields: properties a trait declares --------------------------------------
 
@@ -224,7 +293,7 @@ Base.show(io::IO, t::TObj) = (print(io, "trait object "); _show_tobj(io, typeof(
 trait_fields(@nospecialize(X)) = ()
 "`field_type(X, Val(f), R)`: the declared type of field `f` at representation `R`."
 function field_type end
-"`field_isrep(X, Val(f))`: whether field `f` has the type `R`: it names the projection."
+"`field_isrep(X, Val(f))`: whether field `f` is declared with the implementing type: it names the forwarding field of a one-line conformance."
 field_isrep(@nospecialize(X), @nospecialize(f)) = false
 
 # `t.f` on a trait object: a field one of its traits declares (methods added by @trait), else an error
@@ -238,18 +307,25 @@ field_isrep(@nospecialize(X), @nospecialize(f)) = false
 Base.getproperty(d::Dynamic, s::Symbol) = getproperty(getfield(d, :t), s)
 Base.setproperty!(d::Dynamic, s::Symbol, x) = setproperty!(getfield(d, :t), s, x)
 
-"A field `f` of trait `X` read on a trait object: the representation itself for the projection field, else its property."
+"`_fieldpos(X, Val(f))`: the position of declared field `f` among trait `X`'s fields (methods added by @trait)."
+function _fieldpos end
+"The type of declared field `f` in key `K`: the conforming type's own field type."
+_fieldkeytype(::Type{X}, ::Val{f}, ::Type{K}) where {X,f,K} = K <: Key ? _keyfield(K, f) : field_type(X, Val(f), K)
+
+"A field `f` of trait `X` read on a trait object: a load from the user's object."
 @inline function fieldget(::Type{X}, ::Val{f}, t::TObj) where {X,f}
     v = viewof(t, X)
     return _fget(X, Val(f), getfield(v, :w), v, _reptype(typeof(v)))
 end
-@inline _fget(::Type{X}, ::Val{f}, w, v, ::Type{R}) where {X,f,R} =
-    (field_isrep(X, Val(f)) ? _rep(v) : getproperty(_rep(v), f))::field_type(X, Val(f), R)
-"A field `f` of trait `X` written on a trait object: the projection field through the lens, else the representation's property."
+@inline _fget(::Type{X}, ::Val{f}, w, v, ::Type{K}) where {X,f,K} =
+    _loadpart(_fieldkeytype(X, Val(f), K), getfield(v, :o), getfield(v, :fs)[_fieldpos(X, Val(f))])
+"A field `f` of trait `X` written on a trait object: a store into the user's object, as `u.f = x` in plain Julia."
 @inline function fieldset!(::Type{X}, ::Val{f}, t::TObj, x) where {X,f}
     v = viewof(t, X)
-    y = x::field_type(X, Val(f), _reptype(typeof(v)))
-    field_isrep(X, Val(f)) ? _setrep!(v, y) : setproperty!(_rep(v), f, y)
+    K = _reptype(typeof(v))
+    T = _fieldkeytype(X, Val(f), K)
+    y = x::T
+    _storefield(T, getfield(v, :o), getfield(v, :fs)[_fieldpos(X, Val(f))], y)
     return y
 end
 
@@ -321,10 +397,10 @@ the declared type. Everything folds for a known view type.
 """
 @inline function opcall(::Type{X}, ::Val{op}, f::F, t::TObj, args::Vararg{Any,N}) where {X,op,F,N}
     v = viewof(t, X)
-    R = _reptype(typeof(v))
-    args isa op_args(X, Val(op), R, Val(N)) || throw(TraitArgumentError(X, op, R, args))
+    K = _reptype(typeof(v))
+    args isa op_args(X, Val(op), K, Val(N)) || throw(TraitArgumentError(X, op, K, args))
     x = _dispatch(X, Val(op), f, getfield(v, :w), _rep(v), t, args...)
-    return x::op_ret(X, Val(op), R, Val(N))
+    return x::op_ret(X, Val(op), K, Val(N))
 end
 
 # A default receives the whole trait object, with its supertraits' views, so it

@@ -1,8 +1,9 @@
-# Results like the input (note "Results like the input"): constructor operations return the
-# representation, a function declared `::Like{t}` returns a value of the caller's type built
-# by the conformance's inverse (identity, field copy, written `unproject`), a Dynamic in gives
-# a Dynamic out, and a sibling representation rebuilds the user's type at another parameter
-# (a solver's state in Float32 from one in Float64).
+# Results like the input (note "Results like the input"): constructor operations return
+# `Self`, a function declared `::Like{t}` returns a value of the caller's type built by the
+# conformance's inverse (the new value for a type that implements the operations, the user's
+# object with fields replaced otherwise), `withfields` replaces declared fields, a Dynamic in
+# gives a Dynamic out, and a sibling implementing type rebuilds the user's type at another
+# parameter (a solver's state in Float32 from one in Float64).
 # Runs inside runtests.jl, or alone: julia --project=. test/like.jl
 using Test, TraitWorld
 isdefined(Main, :toplevel) || (toplevel(ex) = Core.eval(Main, ex isa Expr && ex.head === :block ? Expr(:toplevel, ex.args...) : ex))
@@ -40,7 +41,13 @@ toplevel(quote
         nel(r) = length(r)
         getel(r, i) = r[i]
     end
-    tof32(s::SVec)::Like{s} = Float32[getel(s, i) for i in 1:nel(s)]   # a sibling representation
+    tof32(s::SVec)::Like{s} = Float32[getel(s, i) for i in 1:nel(s)]   # a sibling implementing type
+
+    @trait LRec{U} begin                     # fields only: results like the input replace fields
+        @const u::U
+        @const label::String
+    end
+    shifted(r::LRec{Vector{Float64}})::Like{r} = withfields(r; u = r.u .+ 1.0)
     end
 
     @trait_module module LikeBad
@@ -53,20 +60,20 @@ end)
 
 toplevel(quote
     struct LMeas; cols::Vector{Vector{Float64}}; label::String; end
-    @implement LikeLib.ColTable LMeas project(m) = m.cols            # a field projection: copied with the field replaced
+    @implement LikeLib.ColTable LMeas by cols                   # forwarding: rebuilt with the field replaced
 
-    struct LRamp; n::Int; end                                   # computed, without an inverse
-    @implement LikeLib.ColTable LRamp project(r) = [collect(1.0:r.n)]
-
-    struct LRamp2; n::Int; end                                  # computed, with an inverse
-    @implement LikeLib.ColTable LRamp2 begin
-        project(r) = [collect(1.0:r.n)]
-        unproject(r, cs) = LRamp2(length(cs[1]))
+    struct LOwn; cs::Vector{Vector{Float64}}; end               # implements the operations itself
+    @implement LikeLib.ColTable LOwn begin
+        ncols(r) = length(r.cs)
+        col(r, i) = r.cs[i]
+        withcols(r, cs) = LOwn(cs)
     end
+    struct LBox; u::Vector{Float64}; label::String; end
+    @implement LikeLib.LRec LBox
 
     struct LSeries{T}; data::Vector{T}; end
-    @implement LikeLib.SVec LSeries{Float64} project(s) = s.data   # field projections, one per parameter value
-    @implement LikeLib.SVec LSeries{Float32} project(s) = s.data   # (a projection for the whole family: not yet)
+    @implement LikeLib.SVec LSeries{Float64} by data           # forwarding, one conformance per parameter value
+    @implement LikeLib.SVec LSeries{Float32} by data           # (forwarding for the whole family: not yet)
 end)
 
 @testset "Results like the input" begin
@@ -79,11 +86,16 @@ end)
     @test v == [[2.0]] && v isa Vector{Vector{Float64}}
     @test L.earlyout(m, true).cols == m.cols && isempty(L.earlyout(m, false).cols)
     @test L.doubled(m) == 4
-    @test_throws TraitBoundError L.colmap(x -> x, Main.LRamp(3))   # no inverse: refused, naming the conformance
-    e = try L.colmap(x -> x, Main.LRamp(3)); nothing catch err; err end
-    @test occursin("unproject", sprint(showerror, e))
-    r2 = L.colmap(x -> x, Main.LRamp2(3))
-    @test r2 isa Main.LRamp2 && r2.n == 3
+    r2 = L.colmap(x -> 2x, Main.LOwn([[1.0]]))                 # the type implements the operations: the new value
+    @test r2 isa Main.LOwn && r2.cs == [[2.0]]
+    b = L.shifted(Main.LBox([1.0, 2.0], "b"))                  # withfields: the user's object with `u` replaced
+    @test b isa Main.LBox && b.u == [2.0, 3.0] && b.label == "b"
+    e = try toplevel(quote                                      # a computed projection is refused at the conformance
+        struct LRamp; n::Int; end
+        @implement LikeLib.ColTable LRamp project(r) = [collect(1.0:r.n)]
+    end); nothing catch err; err end
+    while e isa LoadError; e = e.error; end
+    @test e isa ImplementError && occursin("computes a value", sprint(showerror, e))
     d = L.keeptable(m)
     dr = L.colmap(x -> -x, d)                                  # a Dynamic in, a Dynamic out
     @test dr isa Dynamic{L.ColTable} && L.col(dr, 1) == [-1.0, -2.0]

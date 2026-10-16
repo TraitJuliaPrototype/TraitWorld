@@ -18,7 +18,7 @@ export Trait, Callable, CallMode, DynamicCall, CompiledCall, compiled_call, dyna
        @trait, @implement, @trait_module, @workload, @trait_wrapper, @handle, @call, Handle,
        TraitBoundError, TraitUseError, ImplementError, LayeringError, OwnershipError, PiracyError, mode!, verify_main, isclosed,
        piracy_mode!, check_no_piracy, viewcache_flush,
-       @warn_on_abstract, @error_on_abstract, AbstractTypeError, check_concrete, check_definitions, conforms
+       @warn_on_abstract, @error_on_abstract, AbstractTypeError, check_concrete, check_definitions, conforms, withfields
 
 function __init__()
     m = get(ENV, "JULIA_TRAITWORLD", "")
@@ -114,7 +114,7 @@ PrecompileTools.@compile_workload begin
     _PC.pcboth(v, _PCProj(v))
     _PC.pcmap(abs, v); _PC.pcmap(x -> 2x, _PCProj(v))
     macroexpand(_PC, :(@implement PCT{Vector{Int}} begin pn(r) = 1; pv(r, i) = 1.0 end))
-    macroexpand(_PC, :(@implement PCT Int project(t) = [1.0]))
+    macroexpand(TraitWorld, :(@implement _PC.PCT _PCProj by v))
     macroexpand(_PC, :(@trait Q{R} begin q(r::R)::Int; q2(r::R, i::Int)::Float64 = 1.0 end))
     macroexpand(_PC, :(f(t::PCT, i::Int) = pv(t, i)))
     conformance_problems(_PC.PCT, Vector{Float64}, (:pn, :pv))

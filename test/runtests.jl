@@ -302,25 +302,26 @@ end
 normalize!(t::(ColTable, ColStore), i::Int) = (c = col(t, i); setcol!(t, i, c ./ sum(c)); nothing)
 end
 using .Views
-const PROJ = Ref(0)
 struct Sep3; cols::Vector{Vector{Float64}}; rows::Matrix{Float64}; end
-@implement ColTable Sep3 project(t) = (PROJ[] += 1; t.cols)
-@implement Main.Rows.RowTable Sep3 project(t) = (PROJ[] += 1; t.rows)
+@implement ColTable Sep3 by cols                      # each trait forwarded to its own field
+@implement Main.Rows.RowTable Sep3 by rows
 struct Joint3; m::Matrix{Float64}; end
-@implement (ColTable, Main.Rows.RowTable) Joint3 project(t) = (PROJ[] += 1; t.m)
+@implement (ColTable, Main.Rows.RowTable) Joint3 by m # both forwarded to one field
 struct Live3; cols::Vector{Vector{Float64}}; end
-@implement (ColTable, ColStore) Live3 project(t) = t.cols
+@implement (ColTable, ColStore) Live3 by cols
 
 @testset "M3: views and joint projections" begin
     m = [1.0 2.0; 3.0 4.0]
-    PROJ[] = 0; @test overview(Sep3([[1.0, 3.0], [2.0, 4.0]], m)) == (2.0, [1.0, 2.0]); @test PROJ[] == 2
-    PROJ[] = 0; @test overview(Joint3(m)) == (2.0, [1.0, 2.0]); @test PROJ[] == 1
+    @test overview(Sep3([[1.0, 3.0], [2.0, 4.0]], m)) == (2.0, [1.0, 2.0])
+    @test overview(Joint3(m)) == (2.0, [1.0, 2.0])
     @test overview2(Joint3(m)) == overview(m)
     x = Live3([[1.0, 3.0]]); normalize!(x, 1); @test x.cols[1] == [0.25, 0.75]
     toplevel(:(struct Frozen3; cols::Vector{Vector{Float64}}; end))
+    # copying and computed projections are not part of the design (note "Types that only convert")
     e = thrown(:(@implement ColStore Frozen3 copies project(t) = deepcopy(t.cols)))
-    @test e isa ImplementError && occursin("rule 2", sprint(showerror, e))
-    @test thrown(:(@implement ColTable Frozen3 copies project(t) = deepcopy(t.cols))) === nothing
+    @test e isa ImplementError && occursin("copying", sprint(showerror, e))
+    e = thrown(:(@implement ColTable Frozen3 project(t) = deepcopy(t.cols)))
+    @test e isa ImplementError && occursin("computes a value", sprint(showerror, e))
 end
 
 # --- M4: dispatch, types first, then traits ----------------------------------------------------
@@ -475,9 +476,9 @@ end
 # --- the review's findings, one test each -----------------------------------------------------
 userf2(x) = 2x
 struct MyRep2; m::Matrix{Float64}; end
-struct Wrapped2; m::Matrix{Float64}; end
-@implement ColTable{MyRep2} Wrapped2 begin               # projection with operations for its own representation
-    project(t) = MyRep2(t.m)
+struct Wrapped2; r::MyRep2; end
+@implement ColTable{MyRep2} Wrapped2 begin               # forwarding with the operations for the field's type
+    project(t) = t.r
     ncols(r) = size(r.m, 2)
     col(r, i) = r.m[:, i]
 end
@@ -550,8 +551,8 @@ end
         end
     end)
     @test Main.FamDef.twice_len([1, 2, 3]) == 6 && Main.FamDef.twice_len((1, 2)) == 4
-    # 7. the projection-with-operations form
-    @test colmean(Wrapped2([1.0 2.0; 3.0 4.0]), 1) == 2.0
+    # 7. the forwarding-with-operations form
+    @test colmean(Wrapped2(MyRep2([1.0 2.0; 3.0 4.0])), 1) == 2.0
     # 8. a lower-bounded type variable confers no ownership
     e = thrown(quote
         @trait_module module LBPirate
@@ -682,8 +683,6 @@ end
         Columns.ncols(r::Ramp1) = r.n
         Columns.col(r::Ramp1, i::Int) = r.base .* i
         @implement ColTable Ramp1
-        struct Nested; data::Meas1; end                           # a field whose type conforms by projection: composed
-        @implement ColTable Nested
         struct Grid1; data::Matrix{Float64}; end                  # one projection for two traits
         @implement (ColTable, Main.Rows.RowTable) Grid1
     end)
@@ -691,7 +690,9 @@ end
     @test colmean(Main.Meas2(1, [[1.0, 3.0]]), 1) == 2.0
     @test colmean(Main.Ramp1([1.0, 3.0], 2), 2) == 4.0
     @test TraitWorld.implementation(ColTable, Main.Ramp1) isa TraitWorld.ImplRec
-    @test colmean(Main.Nested(Main.Meas1([[1.0, 3.0]])), 1) == 2.0
+    # forwarding does not chain: a field whose type itself forwards is not an implementing type
+    e = thrown(quote struct Nested; data::Meas1; end; @implement ColTable Nested end)
+    @test e isa ImplementError
     @test overview(Main.Grid1([1.0 2.0; 3.0 4.0])) == (2.0, [1.0, 2.0])
     e = thrown(quote struct TwoF; a::Vector{Vector{Float64}}; b::Vector{Vector{Float64}}; end; @implement ColTable TwoF end)
     @test e isa ImplementError && occursin("several fields", e.msg) && occursin("a, b", e.msg)

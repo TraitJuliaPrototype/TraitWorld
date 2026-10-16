@@ -199,7 +199,8 @@ macro trait(header, block = nothing)
         ex isa LineNumberNode && continue
         if ex isa Expr && ex.head === :(=) && ex.args[1] isa Symbol && ex.args[1] in pnames
             # a defining equation: the parameter as a function of the representation (`T = eltype(R)`)
-            push!(out, :($TW.param(::Type{$name}, ::Val{$(QuoteNode(ex.args[1]))}, ::Type{$Rsym}) where {$Rsym} = $(ex.args[2])))
+            push!(out, :($TW.param(::Type{$name}, ::Val{$(QuoteNode(ex.args[1]))}, ::Type{K__}) where {K__} =
+                             (let $Rsym = $TW._impl(K__); $(ex.args[2]); end)))
         elseif ex isa Expr && ex.head === :(::) && length(ex.args) == 2 && ex.args[1] isa Symbol
             push!(fdecls, (ex.args[1], ex.args[2], true))          # a field, writable as in a mutable struct
         elseif ex isa Expr && ex.head === :macrocall && ex.args[1] === Symbol("@const") &&
@@ -215,7 +216,7 @@ macro trait(header, block = nothing)
     for (p, f) in fieldparams
         any(ex -> ex isa Expr && ex.head === :(=) && ex.args[1] === p, block.args) &&
             error("@trait: parameter `$p` of `$name` is defined by the field `$f` and by an equation; define it once")
-        push!(out, :($TW.param(::Type{$name}, ::Val{$(QuoteNode(p))}, ::Type{$Rsym}) where {$Rsym} = fieldtype($Rsym, $(QuoteNode(f)))))
+        push!(out, :($TW.param(::Type{$name}, ::Val{$(QuoteNode(p))}, ::Type{K__}) where {K__ <: $TW.Key} = $TW._keyfield(K__, $(QuoteNode(f)))))
     end
     sigs = [(d.name, length(d.args)) for d in decls]
     length(unique(sigs)) == length(sigs) || error("@trait: an operation is declared twice with the same arity in `$name`")
@@ -231,10 +232,12 @@ macro trait(header, block = nothing)
             push!(out, :(function $(d.fexpr) end))
         end
         N = length(d.args)
-        argtypes = [_subst_params(t, pnames, name, Rsym) for (_, t) in d.args]
+        argtypes = [_subst_params(t, pnames, name, :K__) for (_, t) in d.args]
         first_decl && push!(out, :($TW.op_function(::Type{$name}, ::Val{$key}) = $(d.fexpr)))
-        push!(out, :($TW.op_args(::Type{$name}, ::Val{$key}, ::Type{$Rsym}, ::Val{$N}) where {$Rsym} = Tuple{$(argtypes...)}))
-        push!(out, :($TW.op_ret(::Type{$name}, ::Val{$key}, ::Type{$Rsym}, ::Val{$N}) where {$Rsym} = $(_subst_params(d.ret, pnames, name, Rsym))))
+        push!(out, :($TW.op_args(::Type{$name}, ::Val{$key}, ::Type{K__}, ::Val{$N}) where {K__} =
+                         (let $Rsym = $TW._impl(K__); Tuple{$(argtypes...)}; end)))
+        push!(out, :($TW.op_ret(::Type{$name}, ::Val{$key}, ::Type{K__}, ::Val{$N}) where {K__} =
+                         (let $Rsym = $TW._impl(K__); $(_subst_params(d.ret, pnames, name, :K__)); end)))
         d.mutating && push!(out, :($TW.is_mutating(::Type{$name}, ::Val{$key}) = true))
         if d.default !== nothing
             argnames = [n for (n, _) in d.args]
@@ -265,7 +268,9 @@ macro trait(header, block = nothing)
         for (f, Tex, w) in fdecls
             key = QuoteNode(f)
             T = gensym(:T)
-            push!(out, :($TW.field_type(::Type{$name}, ::Val{$key}, ::Type{$Rsym}) where {$Rsym} = $(_subst_params(Tex, pnames, name, Rsym))))
+            push!(out, :($TW.field_type(::Type{$name}, ::Val{$key}, ::Type{K__}) where {K__} =
+                             (let $Rsym = $TW._impl(K__); $(_subst_params(Tex, pnames, name, :K__)); end)))
+            push!(out, :($TW._fieldpos(::Type{$name}, ::Val{$key}) = $(findfirst(x -> x[1] === f, fdecls))))
             Tex === Rsym && push!(out, :($TW.field_isrep(::Type{$name}, ::Val{$key}) = true))
             push!(out, Expr(:(=), Expr(:where, :($TW._tgetprop(t::$TW.TObj{$T}, ::Val{$key})), _tobj_where(name, np, T)...),
                             :($TW.fieldget($name, Val($key), t))))

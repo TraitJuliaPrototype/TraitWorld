@@ -61,7 +61,7 @@ Problems in the worker selected by the concrete call signature `sig`, and in
 the workers it calls.
 """
 _escapes(@nospecialize(T)) = T isa Union ? any(_escapes, Base.uniontypes(T)) :
-    (T isa DataType && (T <: TObj || T <: AbstractView || T <: CObj || T <: CMulti ||
+    (T isa DataType && (T <: TObj || T <: AbstractView || T <: CObj || T <: CMulti || T <: LikeResult ||
                         (T <: Tuple && any(_escapes, T.parameters))))
 
 function worker_problems(@nospecialize(sig), seen = Base.IdSet{Any}(), out = String[]; root::Bool = true)
@@ -154,7 +154,9 @@ function _worker_problems(@nospecialize(sig), seen, out, root::Bool)
             end
             # keeping a trait object where a Dynamic is declared (note "Dynamic values")
             _keeps_dynamic(f, ats, ex, src, sptypes) && continue
-            f === like && continue                # a result like the input: a trait object of the same conformance
+            # a result like the input, which only the entry inverts
+            (f === like || f === withfields || (f isa Type && f <: LikeResult) ||
+             (f === Core.kwcall && length(ats) >= 3 && _CC.widenconst(ats[3]) === typeof(withfields))) && continue
             if f === nothing
                 push!(out, "$line: a trait object is passed to a function not known at compile time")
                 continue
@@ -356,7 +358,7 @@ _worker_ftype(@nospecialize(sig)) = sig.parameters[1] === typeof(Core.kwcall) ? 
 
 # a trait object never reaches ordinary code: one dispatch at the boundary, folded per signature
 @inline _noescape(x) = x
-_noescape(::Union{TObj,AbstractView,CObj,CMulti}) = throw(TraitUseError(["a trait object was returned to ordinary code: a trait object is a handle, not a value"]))
+_noescape(::Union{TObj,AbstractView,CObj,CMulti,LikeResult}) = throw(TraitUseError(["a trait object was returned to ordinary code: a trait object is a handle, not a value"]))
 
 @noinline function _check_once(flag::Base.RefValue{Bool}, @nospecialize(sig))
     CLOSED_WORLD[] && (flag[] = true; return nothing)      # checked by verify_main at build time
