@@ -359,13 +359,28 @@ function _checked_call_body(@nospecialize(f), argtypes, argsyms)
         Base.@_inline_meta
         # a dynamic call: the check's reflection stays out of compiled code (and out of trimmed binaries)
         $(flag)[] || CLOSED_WORLD[] || Base.inferencebarrier(_check_once)($flag, $sig)
-        _guard($guard, $sig)
-        # the worker and its static callees compiled under rule R (facts.jl); a closed world (a
-        # trimmed binary) calls the worker as compiled into it
-        FACTS[] && !CLOSED_WORLD[] && return _checked_out(_facts_call(f, $(argsyms...)))
-        return _checked_out(f($(argsyms...)))      # a result like the input goes on to the entry, which inverts it
+        # the piracy guard audits native code; under rule R a winning pirate is followed as in
+        # plain Julia (wrapping-by-facts.md, G1), so the policy's path has none
+        $(_policy_path() ? nothing : :(_guard($guard, $sig)))
+        # a result like the input goes on to the entry, which inverts it
+        $(_worker_call(:f, argsyms))
     end
 end
+"""
+The entry's call of the worker, chosen when the code is generated. In a session, the worker and its
+static callees compiled under rule R (facts.jl). The plain call is not in the code at all: inferring
+it would compile the worker natively and make the entry depend on that code's abstract edges.
+A trimmed build (`--trim`) compiles the plain call (its world is closed), and so does code
+generated while `FACTS[]` is off (diagnosis: `JULIA_TW_FACTS=0`; an image keeps the code it was
+built with).
+"""
+function _worker_call(f, argsyms)
+    _policy_path() || return :(return _checked_out($f($(argsyms...))))
+    return :(return _checked_out(_facts_call($f, $(argsyms...))))
+end
+_closed_build() = Base.JLOptions().trim != 0
+"Whether generated entry code calls workers under the policy (rule R)."
+_policy_path() = FACTS[] && !_closed_build()
 @generated checked_call(f, args...) = _checked_call_body(f, args, [:(args[$i]) for i in 1:length(args)])
 # fixed arities: a call from an untyped entry dispatches on these through Julia's fast cache
 # (a varargs method makes every dynamic call build its argument tuple type)
@@ -387,8 +402,8 @@ fills the defaults inside the trait world.
     sig = Tuple{typeof(Core.kwcall),nt,f,args...}
     return quote
         $(flag)[] || CLOSED_WORLD[] || Base.inferencebarrier(_check_once)($flag, $sig)
-        _guard($guard, $sig)
-        return _checked_out(Core.kwcall(nt, f, args...))
+        $(_policy_path() ? nothing : :(_guard($guard, $sig)))
+        $(_worker_call(:(Core.kwcall), [:nt, :f, :(args...)]))
     end
 end
 

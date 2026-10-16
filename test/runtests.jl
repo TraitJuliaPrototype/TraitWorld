@@ -425,12 +425,17 @@ using .Weights
     m = [1.0 2.0; 3.0 4.0]
     @test weighted(m, 1) == 4.0
     toplevel(:(module Pirate2; using ..Weights; Weights.weight(x::Float64) = 2.0; end))
-    TraitWorld.mode!(:error)
-    @test_throws PiracyError weighted(m, 1)
-    TraitWorld.mode!(:recompile)
-    @test weighted(m, 1) == 8.0                                  # the opt-out: plain Julia
-    TraitWorld.mode!(:warn)
-    @test (@test_logs (:warn, r"PiracyError") match_mode=:any weighted(m, 1)) == 8.0
+    if TraitWorld._policy_path()
+        # wrapping by facts: a winning pirate is followed as plain Julia follows it (G1)
+        @test weighted(m, 1) == 8.0
+    else
+        TraitWorld.mode!(:error)
+        @test_throws PiracyError weighted(m, 1)
+        TraitWorld.mode!(:recompile)
+        @test weighted(m, 1) == 8.0                                  # the opt-out: plain Julia
+        TraitWorld.mode!(:warn)
+        @test (@test_logs (:warn, r"PiracyError") match_mode=:any weighted(m, 1)) == 8.0
+    end
     @test TraitWorld._rethrow_piracy(:(try f() catch; 0 end)).args[3].args[1].head === :&&   # catch rethrows PiracyError
 end
 
@@ -591,7 +596,9 @@ end
         end
     end)
     TraitWorld.mode!(:error)
-    @test_throws PiracyError Main.Catcher.safe([[1.0]])
+    # wrapping by facts follows the pirate (G1): no PiracyError to rethrow
+    TraitWorld._policy_path() ? (@test Main.Catcher.safe([[1.0]]) == 2.0 * 1.0 + 2.0 * 2.0) :
+        (@test_throws PiracyError Main.Catcher.safe([[1.0]]))
     TraitWorld.mode!(:warn)
     r = verify_main(VMain.main, (Vector{String},); close = true)
     @test TraitWorld.CLOSED_WORLD[]

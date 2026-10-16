@@ -82,135 +82,57 @@ import Core.OptimizedGenerics.CompilerPlugins: typeinf, typeinf_edge
     CC.typeinf_edge(FactsInterp(world), mi.def, mi.specTypes, Core.svec(), parent_frame, false, false)
 
 """
-    facts_codeinstance(sig) -> CodeInstance
+    facts_codeinstance(sig, world = current) -> CodeInstance
 
 The CodeInstance compiled under the trait world's policy for the call signature `sig`
-(`Tuple{typeof(f), argument types...}`), valid in the current world.
+(`Tuple{typeof(f), argument types...}`), valid in `world`; `nothing` if no method matches.
 """
-function facts_codeinstance(@nospecialize(sig))
-    world = Base.tls_world_age()
+function facts_codeinstance(@nospecialize(sig), world::UInt = Base.tls_world_age())
     mi = ccall(:jl_method_lookup_by_tt, Any, (Any, Csize_t, Any), sig, world, nothing)
-    mi isa Core.MethodInstance || throw(MethodError(sig.parameters[1], Tuple{sig.parameters[2:end]...}, world))
+    mi isa Core.MethodInstance || return nothing
     return Base.invokelatest(CC.typeinf_ext_toplevel, FactsInterp(world), mi, CC.SOURCE_MODE_ABI)::Core.CodeInstance
 end
 
 "Whether entries call workers through the trait world's policy (`JULIA_TW_FACTS=0` turns it off)."
 const FACTS = Ref(false)
-const _FACTS_OC = Ref(true)
 const _FACTS_POLICY = Ref(true)          # false: the own cache under Julia's own policy (for diagnosis)
 const _FACTS_DEBUG = Ref(false)
 
 """
-A worker's code under the policy, for one call signature: its CodeInstance (whose validity decides
-whether the entry is current, and whose machine code a package image may hold), and, once the
-signature is hot, an opaque closure compiled in this session from the same optimized IR, which an
-entry calls through its specialized calling convention. Before that, the entry calls the
-CodeInstance's own machine code through its boxed calling convention (`_facts_invoke`). The
-entry lives in the generated code of `_facts_call`, so a package image may hold it: an entry from
-another session (`session`) is made again, its closure never used.
+The generator of `_facts_call`, given the world it generates for: it compiles the worker under the
+policy in that world and emits `invoke(f, ci, args...)` of the resulting CodeInstance `ci`, a
+constant. Inference types the call by `ci`'s result type and records one edge, to `ci` alone
+(`InvokeCICallInfo`): the entry is invalidated exactly when the worker's code under the policy is
+(a fact broken, the method replaced), never by the native code of the same method instance. The
+call is marked `@noinline`: Julia's inliner resolves `:invoke ci` by the method instance in the
+caller's own cache, so a native caller would inline the worker's native code (sound, since its
+edge is then to that code, but with abstract edges again).
+Not a `CachedGenerator`: its result is generated again whenever the entry is inferred again.
 """
-mutable struct FactsEntry
-    const ci::Core.CodeInstance
-    oc::Any
-    session::UInt
-    calls::Int
-end
-const _SESSION = Ref{UInt}(0)
-"Calls of a signature after which its entry compiles an opaque closure."
-const FACTS_HOT = Ref(1000)
-
-"The entry in `cache` if its CodeInstance is valid in the current world, else a new one stored there."
-@inline function _facts_entry(cache::Base.RefValue{Any}, @nospecialize(sig))
-    e = cache[]
-    if e isa FactsEntry && e.session == _SESSION[]      # an entry from an image is looked up again (and its code compiled if the image has none)
-        ci = e.ci
-        w = Base.tls_world_age()
-        (ci.min_world <= w <= ci.max_world) && return e
-    end
-    return Base.inferencebarrier(_facts_entry_slow)(cache, sig)::FactsEntry
-end
-@noinline function _facts_entry_slow(cache::Base.RefValue{Any}, @nospecialize(sig))
-    ci = facts_codeinstance(sig)
-    _FACTS_DEBUG[] && println(stderr, "facts entry: ", sig)
-    e = FactsEntry(ci, nothing, _SESSION[], 0)
-    cache[] = e
-    return e
-end
-"After `FACTS_HOT[]` calls: the opaque closure for the entry (or none, then never again)."
-@noinline function _facts_hot!(e::FactsEntry, @nospecialize(sig), @nospecialize(RT))
-    e.oc = _FACTS_OC[] ? (try
-        _facts_oc(sig, RT, e.ci.min_world)
-    catch
-        nothing
-    end) : nothing
-    _FACTS_DEBUG[] && println(stderr, "facts closure: ", sig, " => ", e.oc === nothing ? "none" : "closure")
-    return nothing
-end
-"Call a CodeInstance's machine code through its boxed calling convention, without `invoke`'s checks (its signature is the call's)."
-@inline function _facts_invoke(f, ci::Core.CodeInstance, args...)
-    p = ci.invoke
-    p == C_NULL && return invoke(f, ci, args...)
-    as = Any[args...]
-    return GC.@preserve as ccall(p, Any, (Any, Ptr{Any}, UInt32, Any), f, pointer(as), length(as) % UInt32, ci)
+struct _FactsCallGen end
+function (::_FactsCallGen)(world::UInt, source::Method, self, f, args)
+    sig = Tuple{f, args...}
+    as = Any[:(getfield(args, $i)) for i in 1:length(args)]
+    ci = facts_codeinstance(sig, world)
+    _FACTS_DEBUG[] && println(stderr, "facts entry: ", sig, " in world ", world)
+    # no method: the plain call, which raises the plain `MethodError`
+    call = ci === nothing ? :(f($(as...))) : :(Core.invoke(f, $ci, $(as...)))
+    body = Expr(:block, Expr(:meta, :noinline),
+                Expr(:noinline, true), Expr(:local, Expr(:(=), :val, call)), Expr(:noinline, false),
+                Expr(:return, :val))
+    lam = Expr(:lambda, Any[Symbol("#self#"), :f, :args], Expr(:var"scope-block", body))
+    return Base.generated_body_to_codeinfo(lam, @__MODULE__, true)
 end
 
-function _uses_self(ir)
-    for st in ir.stmts.stmt
-        st isa Expr || continue
-        for a in st.args
-            a isa Core.Argument && a.n == 1 && return true
-        end
-    end
-    return false
+@eval function _facts_call(f, args...)
+    $(Expr(:meta, :generated, _FactsCallGen()))
+    $(Expr(:meta, :generated_only))
 end
-
-function _facts_oc(@nospecialize(sig), @nospecialize(RT), world::UInt)
-    world = Base.tls_world_age()
-    mi = ccall(:jl_method_lookup_by_tt, Any, (Any, Csize_t, Any), sig, world, nothing)::Core.MethodInstance
-    m = mi.def::Method
-    res = Base.code_ircode_by_type(sig; world, interp = FactsInterp(world))
-    length(res) == 1 || return nothing
-    ir, rt = res[1]
-    ir isa CC.IRCode || return nothing
-    rt <: RT || return nothing
-    _uses_self(ir) && return nothing
-    ir = CC.copy(ir)
-    ir.argtypes[1] = Tuple{}
-    nargtypes = length(ir.argtypes)
-    src = ccall(:jl_new_code_info_uninit, Ref{Core.CodeInfo}, ())
-    src.slotnames = fill(:none, nargtypes)
-    src.slotflags = fill(zero(UInt8), nargtypes)
-    src.slottypes = copy(ir.argtypes)
-    src.min_world = ir.valid_worlds.min_world
-    src.max_world = ir.valid_worlds.max_world
-    src.isva = m.isva
-    src.nargs = UInt(nargtypes)
-    src = CC.ir_to_codeinf!(src, ir)
-    src.rettype = RT
-    A = Tuple{sig.parameters[2:end]...}
-    return Base.Experimental.generate_opaque_closure(A, Union{}, RT, src, nargtypes - 1, m.isva)
-end
-
 """
     _facts_call(f, args...)
 
-The call of a worker under the policy, made by `checked_call`: through the opaque closure of its
-`FactsEntry` (one per call signature), or `invoke` of its CodeInstance; the result typed as plain
-Julia infers it. Not inlined, so that `verify_main` sees one call whose targets are the worker's.
+The call of a worker under the policy, made by `checked_call`: a direct call of its CodeInstance
+compiled under the policy (see `_FactsCallGen`), typed by that code's result type. Not inlined,
+so that `verify_main` sees one call whose targets are the worker's.
 """
-@generated function _facts_call(f, args...)
-    cache = Ref{Any}(nothing)
-    sig = Tuple{f,args...}
-    A = Tuple{args...}
-    as = [:(args[$i]) for i in 1:length(args)]
-    return quote
-        $(Expr(:meta, :noinline))
-        RT = $(Core.Compiler.return_type)(f, $A)
-        e = _facts_entry($cache, $sig)
-        oc = e.oc
-        oc isa Core.OpaqueClosure{$A,RT} && return oc($(as...))::RT
-        n = e.calls += 1
-        n == FACTS_HOT[] && Base.inferencebarrier(_facts_hot!)(e, $sig, RT)
-        return _facts_invoke(f, e.ci, $(as...))::RT
-    end
-end
+_facts_call
