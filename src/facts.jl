@@ -52,6 +52,40 @@ function _machinery_call(@nospecialize(ft))
     return Base.moduleroot(m) === TraitWorld
 end
 
+"""
+`return_type` (and so `promote_op`, broadcasting's and `map`'s element types) asks what *plain
+Julia's* inference gives, so under the policy it is folded from plain Julia's inference, never
+from the policy's own (which types a run-time site `Any`: `map(x -> 1, Integer[])` would be a
+`Vector{Any}`, acceptance G1.8). At a concrete signature the fold records the dispatch fact at
+the signature and an edge to the native CodeInstance it read (`_NativeRT`): the trait code is
+invalidated exactly when plain Julia's answer can change. At an abstract signature the call is
+left to run time, where it is plain Julia's inference in the current world.
+"""
+struct _NativeRT <: CC.CallInfo
+    sig::Any
+    ci::Core.CodeInstance
+end
+CC.add_edges_impl(edges::Vector{Any}, info::_NativeRT) = (push!(edges, info.sig); push!(edges, info.ci); nothing)
+CC.nsplit_impl(::_NativeRT) = 0
+
+function CC.return_type_tfunc(interp::FactsInterp, argtypes::Vector{Any}, si::CC.StmtInfo, sv::CC.AbsIntState)
+    _FACTS_POLICY[] || return @invoke CC.return_type_tfunc(interp::CC.AbstractInterpreter, argtypes::Vector{Any}, si::CC.StmtInfo, sv::CC.AbsIntState)
+    UNKNOWN = CC.Future(CC.CallMeta(Type, Any, CC.Effects(CC.EFFECTS_THROWS; nortcall = false), CC.NoCallInfo()))
+    2 <= length(argtypes) <= 3 || return UNKNOWN
+    tt = CC.widenslotwrapper(argtypes[end])
+    T = tt isa CC.Const ? tt.val : (CC.isType(tt) && !CC.has_free_typevars(tt)) ? tt.parameters[1] : nothing
+    (T isa DataType && T <: Tuple) || return UNKNOWN
+    sig = length(argtypes) == 3 ? Tuple{CC.widenconst(CC.widenslotwrapper(argtypes[2])), T.parameters...} : T
+    _fact_sig(sig) || return UNKNOWN
+    world = CC.get_inference_world(interp)
+    mi = ccall(:jl_method_lookup_by_tt, Any, (Any, Csize_t, Any), sig, world, nothing)
+    mi isa Core.MethodInstance || return UNKNOWN
+    nci = CC.typeinf_ext_toplevel(CC.NativeInterpreter(world), mi, CC.SOURCE_MODE_NOT_REQUIRED)
+    nci isa Core.CodeInstance || return UNKNOWN
+    CC.update_valid_age!(sv, CC.WorldRange(nci.min_world, nci.max_world))
+    return CC.Future(CC.CallMeta(CC.Const(nci.rettype), Union{}, CC.Effects(CC.EFFECTS_TOTAL; nortcall = false), _NativeRT(sig, nci)))
+end
+
 const _ABSTRACT_SITE = CC.FailedMethodMatch("trait world: argument types not concrete, dispatched at run time")
 
 function CC.find_method_matches(interp::FactsInterp, argtypes::Vector{Any}, @nospecialize(atype);
@@ -101,27 +135,63 @@ const _FACTS_DEBUG = Ref(false)
 """
 The generator of `_facts_call`, given the world it generates for: it compiles the worker under the
 policy in that world and emits `invoke(f, ci, args...)` of the resulting CodeInstance `ci`, a
-constant. Inference types the call by `ci`'s result type and records one edge, to `ci` alone
-(`InvokeCICallInfo`): the entry is invalidated exactly when the worker's code under the policy is
-(a fact broken, the method replaced), never by the native code of the same method instance. The
-call is marked `@noinline`: Julia's inliner resolves `:invoke ci` by the method instance in the
-caller's own cache, so a native caller would inline the worker's native code (sound, since its
-edge is then to that code, but with abstract edges again).
-Not a `CachedGenerator`: its result is generated again whenever the entry is inferred again.
+constant. Inference types the call by `ci`'s result type and records the edge `(method sig, ci)`
+(`InvokeCICallInfo`): the entry is invalidated when the worker's code under the policy is (a fact
+broken) or the method is replaced, never by the native code of the same method instance.
+That edge says nothing about dispatch at the call's own signature: the generated code adds the
+edge `(sig, ci)`, a dispatch fact at the concrete signature (as native code records for a call
+whose method instance is wider than the call), and the lookup's world bounds. A method added
+later that is more specific at `sig` invalidates the entry (acceptance G1.6).
+The call is marked `@noinline`: Julia's inliner resolves `:invoke ci` by the method instance in
+the caller's own cache, so a native caller would inline the worker's native code, and the edge
+to that code would be dropped as a duplicate of `ci`'s (a stale-code hole, review of 2026-10-17).
+A worker that calls its own function's entry again (recursion through an entry) would make the
+generator infer the worker again while it is being inferred: on re-entry the call is left to run
+time. Not a `CachedGenerator`: its result is generated again whenever the entry is inferred again.
 """
 struct _FactsCallGen end
 function (::_FactsCallGen)(world::UInt, source::Method, self, f, args)
     sig = Tuple{f, args...}
     as = Any[:(getfield(args, $i)) for i in 1:length(args)]
-    ci = facts_codeinstance(sig, world)
-    _FACTS_DEBUG[] && println(stderr, "facts entry: ", sig, " in world ", world)
-    # no method: the plain call, which raises the plain `MethodError`
-    call = ci === nothing ? :(f($(as...))) : :(Core.invoke(f, $ci, $(as...)))
+    active = get!(() -> Any[], task_local_storage(), :tw_facts_generating)::Vector{Any}
+    if any(s -> s === sig, active)
+        # recursion through an entry: the worker's code is being made; call it at run time
+        call = :(Base.inferencebarrier(_facts_call)(f, $(as...)))
+        lo, hi = UInt(1), typemax(UInt)
+        edges = nothing
+    else
+        lo_r, hi_r = Ref{UInt}(typemin(UInt)), Ref{UInt}(typemax(UInt))
+        ms = Base._methods_by_ftype(sig, nothing, -1, world, false, lo_r, hi_r, Ptr{Int32}(C_NULL))
+        push!(active, sig)
+        ci = try
+            facts_codeinstance(sig, world)
+        finally
+            pop!(active)
+        end
+        _FACTS_DEBUG[] && Core.println("facts entry: ", sig, " in world ", world)
+        if ci === nothing
+            # no method: the plain call, which raises the plain `MethodError` (its inference
+            # records the method table edge that a later method breaks)
+            call = :(f($(as...)))
+            lo, hi = UInt(1), typemax(UInt)
+            edges = nothing
+        else
+            call = :(Core.invoke(f, $ci, $(as...)))
+            lo, hi = lo_r[], hi_r[]
+            edges = Core.svec(sig, ci)
+        end
+    end
     body = Expr(:block, Expr(:meta, :inline),
                 Expr(:noinline, true), Expr(:local, Expr(:(=), :val, call)), Expr(:noinline, false),
                 Expr(:return, :val))
     lam = Expr(:lambda, Any[Symbol("#self#"), :f, :args], Expr(:var"scope-block", body))
-    return Base.generated_body_to_codeinfo(lam, @__MODULE__, true)
+    src = Base.generated_body_to_codeinfo(lam, @__MODULE__, true)
+    if edges !== nothing
+        src.edges = src.edges === nothing ? edges : Core.svec(src.edges..., edges...)
+        src.min_world = lo
+        src.max_world = hi
+    end
+    return src
 end
 
 @eval function _facts_call(f, args...)

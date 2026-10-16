@@ -105,7 +105,7 @@ end
 # TraitWorld when the new method comes from outside the trait world and Julia and
 # its definer owns a type or the function of its signature (the note: a definition
 # elsewhere, for the definer's own types, can never apply). On stock Julia this
-# does nothing. `JULIA_TW_FILTER=0` switches it off, for comparisons.
+# does nothing. Off unless `JULIA_TW_FILTER=1` (rule P: nothing is skipped), for comparisons.
 const _FILTER_MODS = Any[]          # rooted here, read by the C side
 const _FILTER_NAMES = Any[]
 const _FILTER_ON = Ref(false)
@@ -117,7 +117,7 @@ const _PROTECT = String[]
 
 function _filter_init!()
     _FILTER_ON[] = false
-    get(ENV, "JULIA_TW_FILTER", "1") == "0" && return nothing
+    get(ENV, "JULIA_TW_FILTER", "0") == "1" || return nothing
     ok = try
         cglobal(:jl_tw_skipped, Csize_t) != C_NULL
     catch
