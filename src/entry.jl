@@ -483,8 +483,7 @@ A result like `t` with declared fields replaced; also on a result of `like`.
 @inline withfields(l::LikeResult; kw...) = LikeResult(l.t, l.x, merge(l.f, values(kw)))
 
 "How an entry returns: a result like the input becomes a value of the caller's type; a trait object is refused."
-@inline _out(res, us::Tuple, vs::Tuple) = _noescape(res)
-_out(res::LikeResult, us::Tuple, vs::Tuple) = Base.inferencebarrier(_like_out)(res, us, vs)
+@inline _out(res, us::Tuple, vs::Tuple) = res isa LikeResult ? Base.inferencebarrier(_like_out)(res, us, vs) : res
 function _like_out(res::LikeResult, us::Tuple, vs::Tuple)
     for i in eachindex(vs)
         vs[i] === res.t || continue

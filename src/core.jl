@@ -135,17 +135,19 @@ end
 @generated function _loadfield(::Type{T}, o, s::Slot) where {T}
     k = _storage(T)
     k === :singleton && return :($(T.instance))
-    k === :bits && return :(GC.@preserve o _tbaa_load(Ptr{$T}(_objptr(o) + getfield(s, :off))))
+    # no GC.@preserve: the trait object holding `o` is live for the call, and no safepoint lies
+    # between computing the address and the load (a preserve region boxes values in loops)
+    k === :bits && return :(_tbaa_load(Ptr{$T}(_objptr(o) + getfield(s, :off))))
     k === :other && return :(getfield(o, getfield(s, :idx))::$T)
     return quote
-        p = GC.@preserve o _tbaa_load(Ptr{Ptr{Cvoid}}(_objptr(o) + getfield(s, :off)))
+        p = _tbaa_load(Ptr{Ptr{Cvoid}}(_objptr(o) + getfield(s, :off)))
         p == C_NULL && throw(UndefRefError())
-        GC.@preserve o unsafe_pointer_to_objref(p)::$T
+        unsafe_pointer_to_objref(p)::$T
     end
 end
 "Write a field of the user's (mutable) object: an isbits field at its offset, any other through `setfield!` and its write barrier."
 @generated function _storefield(::Type{T}, o, s::Slot, x) where {T}
-    _storage(T) === :bits && return :(GC.@preserve o _tbaa_store(Ptr{$T}(_objptr(o) + getfield(s, :off)), x::$T); nothing)
+    _storage(T) === :bits && return :(_tbaa_store(Ptr{$T}(_objptr(o) + getfield(s, :off)), x::$T); nothing)
     return :(setfield!(o, getfield(s, :idx), x::$T); nothing)
 end
 

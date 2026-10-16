@@ -738,6 +738,10 @@ function _scan(mi::Core.MethodInstance, cx::_Walk)
                          :latest : :builtin, i, f, ats)
                 elseif _is_return_type(f)
                     hole(:inference, i, f, ats)
+                elseif f === _like_out
+                    # an entry's inverse of a result like the input: reached only for a function declared `::Like{t}`,
+                    # whose inverses are not listed for AOT yet
+                    mi.def isa Method && Base.unwrap_unionall(mi.def.sig).parameters[1] in _LIKE_FUNCS && hole(:inverse, i, f, ats)
                 elseif rc === nothing
                     ts = _bounded_targets(f, ats, world)
                     ts === nothing ? hole(:dispatch, i, f, ats) : site(:bounded, i, f, ats, ts)

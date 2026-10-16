@@ -331,7 +331,7 @@ signature (rule 4 places it). The call to the worker is static.
         # a dynamic call: the check's reflection stays out of compiled code (and out of trimmed binaries)
         $(flag)[] || CLOSED_WORLD[] || Base.inferencebarrier(_check_once)($flag, $sig)
         _guard($guard, $sig)
-        return f(args...)                    # the entry's `_out` makes the result a value for its caller
+        return _checked_out(f(args...))      # a result like the input goes on to the entry, which inverts it
     end
 end
 
@@ -349,7 +349,7 @@ fills the defaults inside the trait world.
     return quote
         $(flag)[] || CLOSED_WORLD[] || Base.inferencebarrier(_check_once)($flag, $sig)
         _guard($guard, $sig)
-        return Core.kwcall(nt, f, args...)   # the entry's `_out` makes the result a value for its caller
+        return _checked_out(Core.kwcall(nt, f, args...))
     end
 end
 
@@ -358,6 +358,8 @@ _worker_ftype(@nospecialize(sig)) = sig.parameters[1] === typeof(Core.kwcall) ? 
 
 # a trait object never reaches ordinary code: one dispatch at the boundary, folded per signature
 @inline _noescape(x) = x
+@inline _checked_out(x) = _noescape(x)
+@inline _checked_out(x::LikeResult) = x
 _noescape(::Union{TObj,AbstractView,CObj,CMulti,LikeResult}) = throw(TraitUseError(["a trait object was returned to ordinary code: a trait object is a handle, not a value"]))
 
 @noinline function _check_once(flag::Base.RefValue{Bool}, @nospecialize(sig))
