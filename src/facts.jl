@@ -36,8 +36,21 @@ CC.codegen_cache(i::FactsInterp) = i.codegen
 # the patched runtime, machine code compiled from it); a session can compile it again
 CC.may_discard_trees(::FactsInterp) = false
 
-"Whether `T` (a call's argument types) is concrete: a fact can be recorded at it."
-_fact_sig(@nospecialize(T)) = T isa DataType && Base.isdispatchtuple(T)
+"""
+Whether `T` (a call's argument types) is concrete enough for a fact: a dispatch tuple, or one whose
+other parts are kinds (`DataType`, `UnionAll`, `Union`: a type passed as a value, as in
+`any(p -> p === Union{}, types)`). A fact at a kind is broken only by a method of the same function
+with a `Type{...}` argument: the function's owner, a pirate, or the owner of a type that may flow
+there, which plain Julia's code at that call depends on just the same.
+"""
+_fact_sig(@nospecialize(T)) = T isa DataType && (Base.isdispatchtuple(T) ||
+    (T <: Tuple && _kinds_ok(T.parameters)))
+function _kinds_ok(ps::Core.SimpleVector)
+    for p in ps
+        (p isa Type && (Base.isdispatchelem(p) || p === DataType || p === UnionAll || p === Union)) || return false
+    end
+    return true
+end
 
 """
 Whether the call's function is the machinery's own (defined in TraitWorld): a call with abstract
@@ -180,28 +193,42 @@ end
 
 function CC.return_type_tfunc(interp::FactsInterp, argtypes::Vector{Any}, si::CC.StmtInfo, sv::CC.AbsIntState)
     _FACTS_POLICY[] || return @invoke CC.return_type_tfunc(interp::CC.AbstractInterpreter, argtypes::Vector{Any}, si::CC.StmtInfo, sv::CC.AbsIntState)
-    UNKNOWN = CC.Future(CC.CallMeta(Type, Any, CC.Effects(CC.EFFECTS_THROWS; nortcall = false), CC.NoCallInfo()))
-    2 <= length(argtypes) <= 3 || return UNKNOWN
+    UNKNOWN = CC.CallMeta(Type, Any, CC.Effects(CC.EFFECTS_THROWS; nortcall = false), CC.NoCallInfo())
+    2 <= length(argtypes) <= 3 || return CC.Future(UNKNOWN)
     tt = CC.widenslotwrapper(argtypes[end])
     T = tt isa CC.Const ? tt.val : (CC.isType(tt) && !CC.has_free_typevars(tt)) ? tt.parameters[1] : nothing
-    (T isa DataType && T <: Tuple) || return UNKNOWN
+    (T isa DataType && T <: Tuple) || return CC.Future(UNKNOWN)
     sig = length(argtypes) == 3 ? Tuple{CC.widenconst(CC.widenslotwrapper(argtypes[2])), T.parameters...} : T
-    _fact_sig(sig) || return UNKNOWN
+    _fact_sig(sig) || return CC.Future(UNKNOWN)
+    # 1. the policy's own answer, with its facts as edges: when it is a concrete type (or Union{}),
+    #    plain Julia's (at least as precise) is that type or Union{}, a difference A3 allows
+    own = @invoke CC.return_type_tfunc(interp::CC.AbstractInterpreter, argtypes::Vector{Any}, si::CC.StmtInfo, sv::CC.AbsIntState)
+    return CC.Future{CC.CallMeta}(own, interp, sv) do call, interp, sv
+        rt = call.rt
+        if rt isa CC.Const && rt.val isa Type && (rt.val === Union{} || isconcretetype(rt.val))
+            return call
+        end
+        # 2. plain Julia's answer, folded when it rests on concrete facts; 3. otherwise at run time
+        r = _native_return_type(interp, sig, sv)
+        return r === nothing ? UNKNOWN : r
+    end
+end
+
+"Plain Julia's `return_type` at `sig` from native inference at the match's own signature (not the compilation signature, which `@nospecialize`, `Function`, `Type` and long Vararg arguments widen), when it rests on concrete facts."
+function _native_return_type(interp::FactsInterp, @nospecialize(sig), sv::CC.AbsIntState)
     world = CC.get_inference_world(interp)
-    # plain `return_type` infers at the match's own signature, not at the method's compilation
-    # signature (which `@nospecialize`, `Function`, `Type` and long Vararg arguments widen)
     lo, hi = Ref{UInt}(typemin(UInt)), Ref{UInt}(typemax(UInt))
     ms = Base._methods_by_ftype(sig, nothing, 1, world, false, lo, hi, Ptr{Int32}(C_NULL))
-    (ms isa Vector && length(ms) == 1) || return UNKNOWN
+    (ms isa Vector && length(ms) == 1) || return nothing
     match = ms[1]::Core.MethodMatch
-    match.fully_covers || return UNKNOWN
+    match.fully_covers || return nothing
     mi = CC.specialize_method(match)
     nci = CC.typeinf_ext_toplevel(CC.NativeInterpreter(world), mi, CC.SOURCE_MODE_NOT_REQUIRED)
-    nci isa Core.CodeInstance || return UNKNOWN
-    _concrete_deps(nci) || return UNKNOWN
+    nci isa Core.CodeInstance || return nothing
+    _concrete_deps(nci) || return nothing
     CC.update_valid_age!(sv, CC.WorldRange(max(lo[], nci.min_world), min(hi[], nci.max_world)))
-    return CC.Future(CC.CallMeta(CC.Const(nci.rettype), Union{}, CC.Effects(CC.EFFECTS_TOTAL; nortcall = false),
-                                 CC.MethodResultPure(_NativeRT(sig, nci))))
+    return CC.CallMeta(CC.Const(nci.rettype), Union{}, CC.Effects(CC.EFFECTS_TOTAL; nortcall = false),
+                       CC.MethodResultPure(_NativeRT(sig, nci)))
 end
 
 """
