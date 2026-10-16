@@ -75,16 +75,16 @@ function deep_concrete(@nospecialize(T); seen = Base.IdSet{Any}())
     return true
 end
 
-# --- lookups, all through invokelatest: the machinery takes no edges --------
+# --- lookups, in the decision world (`_in_decision_world`; the latest outside a decision) --------
 
-_impl(@nospecialize(X), @nospecialize(R)) = Base.invokelatest(implementation, X, R)
-_proj(@nospecialize(X), @nospecialize(T)) = Base.invokelatest(projection, X, T)
-_supers(@nospecialize(X)) = Base.invokelatest(supertraits, X)::Tuple
-_bundle(@nospecialize(X)) = Base.invokelatest(bundle, X)
-_ops(@nospecialize(X)) = Base.invokelatest(trait_ops, X)::Tuple
-_opfn(@nospecialize(X), op::Symbol) = Base.invokelatest(op_function, X, Val(op))
-_hasdefault(@nospecialize(X), op::Symbol) = Base.invokelatest(has_default, X, Val(op))::Bool
-_mutating(@nospecialize(X), op::Symbol) = Base.invokelatest(is_mutating, X, Val(op))::Bool
+_impl(@nospecialize(X), @nospecialize(R)) = _in_decision_world(implementation, X, R)
+_proj(@nospecialize(X), @nospecialize(T)) = _in_decision_world(projection, X, T)
+_supers(@nospecialize(X)) = _in_decision_world(supertraits, X)::Tuple
+_bundle(@nospecialize(X)) = _in_decision_world(bundle, X)
+_ops(@nospecialize(X)) = _in_decision_world(trait_ops, X)::Tuple
+_opfn(@nospecialize(X), op::Symbol) = _in_decision_world(op_function, X, Val(op))
+_hasdefault(@nospecialize(X), op::Symbol) = _in_decision_world(has_default, X, Val(op))::Bool
+_mutating(@nospecialize(X), op::Symbol) = _in_decision_world(is_mutating, X, Val(op))::Bool
 
 "Arities declared for an operation (the number of arguments after `r`)."
 function _arities(@nospecialize(X), op::Symbol)
@@ -99,8 +99,8 @@ function _arities(@nospecialize(X), op::Symbol)
 end
 "All parameters concrete, by a loop (`all(isconcretetype, sv)` on a `SimpleVector` is generic Base code)."
 _allconcrete(sv::Core.SimpleVector) = (for p in sv; (p isa Type && isconcretetype(p)) || return false; end; true)
-_declared_args(@nospecialize(X), op::Symbol, @nospecialize(R), N::Int) = Base.invokelatest(op_args, X, Val(op), R, Val(N))
-_declared_ret(@nospecialize(X), op::Symbol, @nospecialize(R), N::Int) = Base.invokelatest(op_ret, X, Val(op), R, Val(N))
+_declared_args(@nospecialize(X), op::Symbol, @nospecialize(R), N::Int) = _in_decision_world(op_args, X, Val(op), R, Val(N))
+_declared_ret(@nospecialize(X), op::Symbol, @nospecialize(R), N::Int) = _in_decision_world(op_ret, X, Val(op), R, Val(N))
 
 "A trait and its supertraits, transitively, the trait first."
 function trait_closure(@nospecialize(X))
@@ -154,13 +154,13 @@ function conformance_problems(@nospecialize(X), @nospecialize(R), ops)
             if !_allconcrete(A.parameters)
                 # an abstract declared argument (an iteration state, say): inference there says little,
                 # so ask only that a method exists that does not always throw; every call asserts the result
-                ms = Base._methods_by_ftype(Tuple{typeof(f),sig.parameters...}, -1, Base.get_world_counter())
+                ms = Base._methods_by_ftype(Tuple{typeof(f),sig.parameters...}, -1, _decision_world())
                 if !(ms isa Vector) || isempty(ms)
                     push!(problems, "`$op` has no method for $sig")
                 end
                 continue
             end
-            if !hasmethod(f, sig; world = Base.get_world_counter())       # the latest world: a check may run in an older one
+            if !hasmethod(f, sig; world = _decision_world())       # the latest world: a check may run in an older one
                 push!(problems, "`$op` has no method for $sig")
                 continue
             end
@@ -185,7 +185,7 @@ const _WITNESS = Dict{Pair{Any,Any},Any}()
 const _WITNESS_WORLD = Ref{UInt}(0)
 
 function _flush_if_stale!(cache::Dict, worldref::Ref{UInt})
-    w = Base.get_world_counter()
+    w = _decision_world()
     if worldref[] != w
         empty!(cache)
         worldref[] = w
@@ -217,9 +217,9 @@ function _has_op_method(@nospecialize(X), op::Symbol, @nospecialize(R))
         A = _declared_args(X, op, R, N)
         sig = Tuple{typeof(f),R,A.parameters...}
         if _allconcrete(A.parameters)
-            hasmethod(f, Tuple{R,A.parameters...}; world = Base.get_world_counter()) || return false
+            hasmethod(f, Tuple{R,A.parameters...}; world = _decision_world()) || return false
         else
-            ms = Base._methods_by_ftype(sig, -1, Base.get_world_counter())
+            ms = Base._methods_by_ftype(sig, -1, _decision_world())
             (ms isa Vector && !isempty(ms)) || return false
         end
     end
@@ -255,7 +255,7 @@ function _witness(@nospecialize(X), @nospecialize(R))
     end
     found = Any[]
     for k in _generic_keys(X)
-        g = Base.invokelatest(generic_rec, X, Val(k))::GenericRec
+        g = _in_decision_world(generic_rec, X, Val(k))::GenericRec
         subs = Any[]
         ok = true
         for C in g.constraints, Y in trait_closure(C)
@@ -265,7 +265,7 @@ function _witness(@nospecialize(X), @nospecialize(R))
             push!(subs, (Y, wy))
         end
         ok || continue
-        g.pred === nothing || Base.invokelatest(g.pred, R)::Bool || continue
+        g.pred === nothing || _in_decision_world(g.pred, R)::Bool || continue
         push!(found, (k, g, subs))
     end
     isempty(found) && return nothing
@@ -481,7 +481,7 @@ function _field_problems(@nospecialize(X), @nospecialize(T), fmap, @nospecialize
         end
         ST = fieldtype(T, g)
         FT = try
-            Base.invokelatest(field_type, X, Val(f), Kfull)
+            _in_decision_world(field_type, X, Val(f), Kfull)
         catch e
             e isa MethodError || rethrow()
             # a parameter defined by matching a field's type, and the field's type does not match
@@ -577,7 +577,7 @@ function check_overrides()
         length(ps) == 3 || continue
         (ps[2] isa DataType && ps[3] isa DataType) || continue
         X, T = ps[2].parameters[1], ps[3].parameters[1]
-        recs = Base.invokelatest(_declared_defaults, X, T)
+        recs = _in_decision_world(_declared_defaults, X, T)
         for (Y, R, D) in recs
             for op in D
                 _has_op_method(Y, op, R) || continue
@@ -1068,7 +1068,7 @@ function _implement_projection(mod::Module, head, rest; field::Int = 0, fmap = n
         X = Core.eval(mod, traits[1])
         if pexs === nothing
             # a family conforming by its fields: the trait's parameters are defined by the fields' types
-            all(q -> q in Base.invokelatest(trait_field_params, X), trait_params(X)) ||
+            all(q -> q in _in_decision_world(trait_field_params, X), trait_params(X)) ||
                 error("@implement: a family `$Tex` needs the trait's parameters")
             Tb, wh = Tex.args[1], Tex.args[2:end]
             Iex = isempty(_ops(X)) ? :Nothing : Tb

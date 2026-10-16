@@ -371,3 +371,18 @@ after them need not infer it again. Its abstract sites call plain Julia's code a
 """
 _latest_under_policy(f, args...) =
     _policy_path() ? Base.invokelatest(_facts_call, f, args...) : Base.invokelatest(f, args...)
+
+"""
+The world the machinery decides conformances in: the caller's (`tls_world_age()` where an entry's
+slow path starts), as plain Julia dispatches in the caller's world. A task pinned to an older world
+then sees the conformances of its world, not of the latest. Outside a decision, the latest world.
+"""
+const _DECISION_WORLD = Base.ScopedValues.ScopedValue{UInt}(UInt(0))
+_decision_world() = (w = _DECISION_WORLD[]; w == 0 ? Base.get_world_counter() : w)
+_in_decision_world(f, args...) =
+    (w = _DECISION_WORLD[]; w == 0 ? Base.invokelatest(f, args...) : Base.invoke_in_world(w, f, args...))
+"`_latest_under_policy` in world `w`, deciding in `w`."
+_in_world_under_policy(w::UInt, f, args...) = Base.ScopedValues.with(_DECISION_WORLD => w) do
+    _policy_path() ? Base.invoke_in_world(w, _facts_call, f, args...) : Base.invoke_in_world(w, f, args...)
+end
+

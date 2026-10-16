@@ -928,7 +928,7 @@ function close_world!(plans)
         d[key] = b
     end
     _SLOW[] = d
-    _SLOW_GEN[] = GENERATION[]
+    _SLOW_WORLD[] = Base.get_world_counter()
     CLOSED_WORLD[] = true
     MODE[] = :recompile
     return nothing

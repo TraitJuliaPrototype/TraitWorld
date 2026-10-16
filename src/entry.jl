@@ -120,23 +120,24 @@ function _conformance_builder(@nospecialize(X), @nospecialize(T))
 end
 
 const _SLOW = Ref(IdDict{Any,Any}())                  # Pair(X, U) => Builder or NOTRAIT; copy-on-write
-const _SLOW_GEN = Ref{UInt}(0)
+const _SLOW_WORLD = Ref{UInt}(0)                  # the world `_SLOW` was decided in: any definition makes it stale
 "The conformance of a type with no method of its own: a generic implementation, a family, a dynamic one."
 @noinline function _conformance_slow(@nospecialize(X), @nospecialize(u))
     U = typeof(u)
     key = Pair{Any,Any}(X, U)
-    if CLOSED_WORLD[] || _SLOW_GEN[] == GENERATION[]
+    w = Base.tls_world_age()                            # decided in the caller's world, as dispatch is
+    if CLOSED_WORLD[] || _SLOW_WORLD[] == w
         b = get(_SLOW[], key, nothing)
         b === nothing || return b === NOTRAIT ? NOTRAIT : (b::Builder)(u)
         CLOSED_WORLD[] && Base.inferencebarrier(_closed_miss)(X, u)
     end
-    b = _latest_under_policy(_builder_for, Any[X], U)
+    b = _in_world_under_policy(w, _builder_for, Any[X], U)
     b === NOTRAIT || _vc_note_builder(b, U)
     @lock _LOCK begin
-        d = _SLOW_GEN[] == GENERATION[] ? copy(_SLOW[]) : IdDict{Any,Any}()
+        d = _SLOW_WORLD[] == w ? copy(_SLOW[]) : IdDict{Any,Any}()
         d[key] = b
         _SLOW[] = d                                     # readers see the old table or the new one
-        _SLOW_GEN[] = GENERATION[]
+        _SLOW_WORLD[] = w
     end
     return b === NOTRAIT ? NOTRAIT : (b::Builder)(u)
 end
