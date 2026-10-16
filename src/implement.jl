@@ -160,7 +160,7 @@ function conformance_problems(@nospecialize(X), @nospecialize(R), ops)
                 end
                 continue
             end
-            if !hasmethod(f, sig)
+            if !hasmethod(f, sig; world = Base.get_world_counter())       # the latest world: a check may run in an older one
                 push!(problems, "`$op` has no method for $sig")
                 continue
             end
@@ -217,7 +217,7 @@ function _has_op_method(@nospecialize(X), op::Symbol, @nospecialize(R))
         A = _declared_args(X, op, R, N)
         sig = Tuple{typeof(f),R,A.parameters...}
         if _allconcrete(A.parameters)
-            hasmethod(f, Tuple{R,A.parameters...}) || return false
+            hasmethod(f, Tuple{R,A.parameters...}; world = Base.get_world_counter()) || return false
         else
             ms = Base._methods_by_ftype(sig, -1, Base.get_world_counter())
             (ms isa Vector && !isempty(ms)) || return false

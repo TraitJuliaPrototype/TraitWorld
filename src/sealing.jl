@@ -241,7 +241,9 @@ function _pirate_report(found::Vector{Pirate}, mode::Symbol)
         length(ps) > 8 && print(io, "\n    … ", length(ps) - 8, " more")
         print(io, "\n")
     end
-    print(io, mode === :refuse ? "The methods were deleted (refuse mode); a deleted method comes back only with a restart." :
+    print(io, mode === :refuse_def ? "The definition was refused (refuse mode): the method never became visible." :
+              mode === :refuse_load ? "The methods were left inactive when the package was loaded (refuse mode): they never became visible." :
+              mode === :refuse ? "The methods were deleted (refuse mode); a deleted method comes back only with a restart." :
               mode === :warn ? "Kept (warn mode): trait-bound code that reaches one runs plain Julia's answer, with the audit's warning." :
               "Found by check_no_piracy.")
     print(io, " Tolerate a package in the project file, [traits] tolerate = [\"", first(keys(bypkg)), "\"], to accept its piracy.")

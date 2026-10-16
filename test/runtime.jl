@@ -156,10 +156,36 @@ end
         @implement RT.Sampled LateS
     end)
     @test isempty(TraitWorld.check_overrides())
-    toplevel(:(RT.mean_data(s::LateS) = 0.0))                # plain Julia would now call this
-    ps = TraitWorld.check_overrides()
-    @test length(ps) == 1 && occursin("mean_data", ps[1]) && occursin("LateS", ps[1])
-    @test_throws ImplementError TraitWorld._refuse_overrides()
-    Base.delete_method(only(methods(RT.mean_data, Tuple{Main.LateS})))
-    @test isempty(TraitWorld.check_overrides())
+    if TraitWorld._HAS_DEF_HOOK[]
+        # the patched runtime's definition hook: refused at the definition, never visible
+        e = try toplevel(:(RT.mean_data(s::LateS) = 0.0)); nothing catch err; err end
+        while e isa LoadError; e = e.error; end
+        @test e isa ImplementError && occursin("mean_data", sprint(showerror, e))
+        @test isempty(methods(RT.mean_data, Tuple{Main.LateS})) || all(m -> m.sig.parameters[2] !== Main.LateS, methods(RT.mean_data, Tuple{Main.LateS}))
+        @test isempty(TraitWorld.check_overrides())
+    else
+        toplevel(:(RT.mean_data(s::LateS) = 0.0))                # plain Julia would now call this
+        ps = TraitWorld.check_overrides()
+        @test length(ps) == 1 && occursin("mean_data", ps[1]) && occursin("LateS", ps[1])
+        @test_throws ImplementError TraitWorld._refuse_overrides()
+        Base.delete_method(only(methods(RT.mean_data, Tuple{Main.LateS})))
+        @test isempty(TraitWorld.check_overrides())
+    end
+end
+
+@testset "the definition hook: a pirate of a sealed package refused at its definition" begin
+    if TraitWorld._HAS_DEF_HOOK[]
+        old = TraitWorld.SEAL_MODE[]
+        TraitWorld.piracy_mode!(:refuse)
+        try
+            e = try toplevel(:(Base.length(x::Tuple{Int8,Int8,Int8}) = 99)); nothing catch err; err end
+            while e isa LoadError; e = e.error; end
+            @test e isa PiracyError && occursin("refused", sprint(showerror, e))
+            @test length((Int8(1), Int8(2), Int8(3))) == 3          # plain Julia's answer: never replaced
+        finally
+            TraitWorld.piracy_mode!(old)
+        end
+    else
+        @test !TraitWorld._HAS_DEF_HOOK[]
+    end
 end

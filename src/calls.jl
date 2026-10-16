@@ -121,6 +121,7 @@ function _on_package_load(id::Base.PkgId)
     is_wrapper_root(m) && _register_wrapper!(m, getglobal(m, :__tw_wrapper__)...)
     Base.inferencebarrier(_filter_scan!)(m)
     (isdefined(m, :__trait_module__) || _has_trait_module(m)) && seal!(m)   # a trait package seals itself (no rescan needed)
+    _report_refused_at_load()                                                # what the image hook left inactive (patched Julia)
     Base.toplevel_load[] && _check_loads!()                                  # once per `using`, nested loads included
     Base.toplevel_load[] && Base.inferencebarrier(_vc_load!)()               # the view caches of what is loaded now
     return nothing

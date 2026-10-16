@@ -805,9 +805,15 @@ end
     # refuse mode deletes a pirate that loads afterwards, and reports it
     TraitWorld.find_pirates!()                                              # the cursor past everything so far
     TraitWorld.piracy_mode!(:refuse)
-    toplevel(:(module BasePirate2; Base.sum(x::Vector{Int32}) = Int32(0); end))
-    @test which(sum, (Vector{Int32},)).module === Main.BasePirate2
-    @test_logs (:error, r"BasePirate2 defines") match_mode=:any TraitWorld._check_loads!()
+    if TraitWorld._HAS_DEF_HOOK[]
+        # the patched runtime's definition hook: refused at its definition, never visible
+        e = thrown(:(module BasePirate2; Base.sum(x::Vector{Int32}) = Int32(0); end))
+        @test e isa PiracyError && occursin("BasePirate2", sprint(showerror, e))
+    else
+        toplevel(:(module BasePirate2; Base.sum(x::Vector{Int32}) = Int32(0); end))
+        @test which(sum, (Vector{Int32},)).module === Main.BasePirate2
+        @test_logs (:error, r"BasePirate2 defines") match_mode=:any TraitWorld._check_loads!()
+    end
     @test which(sum, (Vector{Int32},)).module === Base
     # a tolerated package is never touched
     push!(TraitWorld.TOLERATED, "Tolerated1")

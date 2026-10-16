@@ -44,6 +44,7 @@ function __init__()
     empty!(WRAPPERS); empty!(DELEGATES)
     _filter_init!()
     _vc_init!()
+    _hooks_init!()
     push!(Base.package_callbacks, _on_package_load)
 end
 
@@ -63,6 +64,7 @@ include("verify.jl")
 include("concrete.jl")
 include("viewcache.jl")
 include("defcheck.jl")
+include("hooks.jl")
 
 # ---------------------------------------------------------------------------
 # Precompile the machinery itself: macro expansion, registration, checks,
