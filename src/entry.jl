@@ -30,11 +30,32 @@ struct Builder{G<:Tuple}
 end
 @inline (b::Builder)(t) = TObj(_build(t, b.groups...))
 @inline _build(t) = ()
-@inline _build(t, g::Group, rest...) = (_gviews(g, t)..., _build(t, rest...)...)
 @inline function _gviews(g::Group{P,R}, t) where {P,R}
     r = g.p(t)::R
     return _subviews(r, g.ws...)
 end
+
+"""
+The projection of a field of a mutable user type, which can be rebound: the
+views remember the user's object and the field, so a kept value follows the
+field (`FieldView`), or read through it at every use when a trait writes the
+projection field (`LiveView`, `L = true`).
+"""
+struct FieldGroup{R,L,WS<:Tuple}
+    i::Int
+    ws::WS
+end
+FieldGroup{R,L}(i::Int, ws::WS) where {R,L,WS} = FieldGroup{R,L,WS}(i, ws)
+@inline function _gviews(g::FieldGroup{R,L}, t) where {R,L}
+    i = getfield(g, :i)
+    return L ? _liveviews(t, i, R, getfield(g, :ws)...) : _fieldviews(t, i, getfield(t, i)::R, getfield(g, :ws)...)
+end
+@inline _fieldviews(t, i, r) = ()
+@inline _fieldviews(t, i, r, s::Wit{X}, rest...) where {X} = (FieldView{X}(s.w, r, t, i), _fieldviews(t, i, r, rest...)...)
+@inline _liveviews(t, i, ::Type{R}) where {R} = ()
+@inline _liveviews(t, i, ::Type{R}, s::Wit{X}, rest...) where {R,X} =
+    (LiveView{X,typeof(s.w),R}(s.w, t, i), _liveviews(t, i, R, rest...)...)
+@inline _build(t, g::Union{Group,FieldGroup}, rest...) = (_gviews(g, t)..., _build(t, rest...)...)
 
 """
 TraitWorld's generation: bumped by everything that can change what an entry
@@ -240,7 +261,13 @@ function _builder_for(needed::Vector{Any}, @nospecialize(U))
             push!(ws, Wit{Y}(w))
         end
         wst = Tuple(ws)
-        push!(built, Group{p.R}(p.project, wst))
+        if p.field != 0 && ismutabletype(U) && !isconst(U, fieldname(U, p.field)) && fieldtype(U, p.field) === p.R
+            # a field that can be rebound: a lens when one of the traits writes its projection field
+            live = any(X -> any(((f, w),) -> w && field_isrep(X, Val(f)), trait_fields(X)), traits)
+            push!(built, FieldGroup{p.R,live}(p.field, wst))
+        else
+            push!(built, Group{p.R}(p.project, wst))
+        end
     end
     return Builder(Tuple(built))
 end

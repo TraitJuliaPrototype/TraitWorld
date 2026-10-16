@@ -105,7 +105,7 @@ end
     msg(f) = try f(m); "" catch e; sprint(showerror, e) end
     @test occursin("rule 2", msg(Main.Bad.bad_rule3)) && occursin("runtests.jl", msg(Main.Bad.bad_rule3))
     @test occursin("`sum`, an ordinary function", msg(Main.Bad.bad_ordinary))
-    @test occursin("t.field", msg(Main.Bad.bad_field))
+    @test occursin("`t.views`", msg(Main.Bad.bad_field))
     @test occursin("typeof(t)", msg(Main.Bad.bad_typeof))
     @test occursin("`sum`", msg(Main.Bad.helper))        # found through the worker it calls
     toplevel(quote
@@ -965,3 +965,4 @@ end
     @test Main.BadDef.def_clean(Ramp([1.0, 2.0], 2), 2) == 6.0
 end
 include("dynamic.jl")
+include("fields.jl")

@@ -60,7 +60,7 @@ Problems in the worker selected by the concrete call signature `sig`, and in
 the workers it calls.
 """
 _escapes(@nospecialize(T)) = T isa Union ? any(_escapes, Base.uniontypes(T)) :
-    (T isa DataType && (T <: TObj || T <: View || T <: CObj || T <: CMulti ||
+    (T isa DataType && (T <: TObj || T <: AbstractView || T <: CObj || T <: CMulti ||
                         (T <: Tuple && any(_escapes, T.parameters))))
 
 function worker_problems(@nospecialize(sig), seen = Base.IdSet{Any}(), out = String[]; root::Bool = true)
@@ -141,6 +141,15 @@ function _worker_problems(@nospecialize(sig), seen, out, root::Bool)
                 continue
             end
             line = _line_of(src, mi, i)
+            # a field its traits declare: `t.f`, and `t.f = x` unless the field is `const`
+            if (f === Base.getproperty || f === Base.setproperty!) && length(ats) >= 3 && _istobj(ats[2])
+                nm = _CC.argextype(ex.args[3], src, sptypes)
+                fname = nm isa _CC.Const ? nm.val : nothing
+                fname isa Symbol && _declares_field(ats[2], fname, f === Base.setproperty!) && continue
+                push!(out, "$line: `t.$(something(fname, "field"))`" * (f === Base.setproperty! ? " = …" : "") *
+                           ": the user's data is reached only through the operations and the writable fields its traits declare")
+                continue
+            end
             # keeping a trait object where a Dynamic is declared (note "Dynamic values")
             _keeps_dynamic(f, ats, ex, src, sptypes) && continue
             if f === nothing
@@ -199,6 +208,20 @@ function _worker_problems(@nospecialize(sig), seen, out, root::Bool)
         end
     end
     return out
+end
+
+"Whether a trait the trait object type `T` carries declares field `f`, writable if `write`."
+function _declares_field(@nospecialize(T), f::Symbol, write::Bool)
+    T = Base.unwrap_unionall(T)
+    T isa DataType && T <: TObj || return false
+    Xs = T.parameters[1]
+    for X in (Xs isa TypeVar ? Base.uniontypes(Xs.lb) : Base.uniontypes(Xs))
+        is_trait(X) || continue
+        for (g, w) in trait_fields(X)
+            g === f && (!write || w) && return true
+        end
+    end
+    return false
 end
 
 """
@@ -329,7 +352,7 @@ _worker_ftype(@nospecialize(sig)) = sig.parameters[1] === typeof(Core.kwcall) ? 
 
 # a trait object never reaches ordinary code: one dispatch at the boundary, folded per signature
 @inline _noescape(x) = x
-_noescape(::Union{TObj,View,CObj,CMulti}) = throw(TraitUseError(["a trait object was returned to ordinary code: a trait object is a handle, not a value"]))
+_noescape(::Union{TObj,AbstractView,CObj,CMulti}) = throw(TraitUseError(["a trait object was returned to ordinary code: a trait object is a handle, not a value"]))
 
 @noinline function _check_once(flag::Base.RefValue{Bool}, @nospecialize(sig))
     CLOSED_WORLD[] && (flag[] = true; return nothing)      # checked by verify_main at build time

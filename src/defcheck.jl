@@ -19,6 +19,8 @@ struct ArchWit end
 
 # never run, only inferred: `opcall` asserts the declared result type of whatever comes back
 @inline _dispatch(::Type{X}, ::Val{op}, f::F, w::ArchWit, r, t, args...) where {X,op,F} = Base.inferencebarrier(nothing)
+# a field at an archetype: a value of its declared type, nothing more
+@inline _fget(::Type{X}, ::Val{f}, w::ArchWit, v, ::Type{R}) where {X,f,R} = Base.inferencebarrier(nothing)::field_type(X, Val(f), R)
 
 "The traits a view of `X` brings: `X` and its supertraits, or the traits a bundle names."
 function _arch_traits(@nospecialize(X), out = Any[])

@@ -42,12 +42,51 @@ compiled_call(f::F) where {F} = CallAs{CompiledCall,Nothing,Nothing,F}(f)
 dynamic_call(f::F) where {F} = CallAs{DynamicCall,Nothing,Nothing,F}(f)
 (::Type{Callable{A,S,M}})(f::F) where {A,S,M<:CallMode,F} = CallAs{M,A,S,F}(f)
 
-"One trait's view of a value: the witness `w` that says where its operations come from, and the representation `r`."
-struct View{X,W,R}
+"One trait's view of a value: the witness that says where its operations come from, and the representation."
+abstract type AbstractView{X,W,R} end
+
+"A view holding its representation: what an entry builds, and what a worker sees within a call."
+struct View{X,W,R} <: AbstractView{X,W,R}
     w::W
     r::R
 end
 View{X}(w::W, r::R) where {X,W,R} = View{X,W,R}(w, r)
+
+"""
+A view of a field projection of a mutable user type: the representation held,
+as in `View`, and the user's object and the field's index, so that a value kept
+beyond the call can follow the field (note "Dynamic values": kept values follow
+the user's fields).
+"""
+struct FieldView{X,W,R} <: AbstractView{X,W,R}
+    w::W
+    r::R
+    o::Any
+    i::Int
+end
+FieldView{X}(w::W, r::R, o, i::Int) where {X,W,R} = FieldView{X,W,R}(w, r, o, i)
+
+"""
+A live view, a lens: the representation read from the user's field at every
+use, and written there. Made for a trait that declares its projection field
+writable, and for a kept field projection.
+"""
+struct LiveView{X,W,R} <: AbstractView{X,W,R}
+    w::W
+    o::Any
+    i::Int
+end
+
+"The representation a view stands for: held, or read through the lens."
+@inline _rep(v::View) = getfield(v, :r)
+@inline _rep(v::FieldView) = getfield(v, :r)
+@inline _rep(v::LiveView{X,W,R}) where {X,W,R} = getfield(getfield(v, :o), getfield(v, :i))::R
+_reptype(::Type{<:AbstractView{X,W,R}}) where {X,W,R} = R
+"Write the representation through a lens: the user's field is rebound, as `t.data = v` in plain Julia."
+@inline _setrep!(v::LiveView{X,W,R}, x) where {X,W,R} = (setfield!(getfield(v, :o), getfield(v, :i), x::R); nothing)
+_setrep!(v::AbstractView, x) = Base.inferencebarrier(_notlens)(typeof(v))
+@noinline _notlens(@nospecialize(V)) =
+    throw(ArgumentError("this trait object holds its representation, so its projection field cannot be rebound ($V)"))
 
 """
     TObj{T, V}
@@ -65,9 +104,9 @@ end
 end
 @inline TObj(views::Tuple) = TObj{_traitset(typeof(views)),typeof(views)}(views)
 
-@inline viewof(t::TObj, ::Type{X}) where {X} = _viewof(X, t.views...)
-@inline _viewof(::Type{X}, v::View{X}, rest::View...) where {X} = v
-@inline _viewof(::Type{X}, v::View, rest::View...) where {X} = _viewof(X, rest...)
+@inline viewof(t::TObj, ::Type{X}) where {X} = _viewof(X, getfield(t, :views)...)
+@inline _viewof(::Type{X}, v::AbstractView{X}, rest::AbstractView...) where {X} = v
+@inline _viewof(::Type{X}, v::AbstractView, rest::AbstractView...) where {X} = _viewof(X, rest...)
 
 # --- dynamic values ----------------------------------------------------------
 
@@ -86,7 +125,7 @@ struct Dynamic{X}
     t::Any
     function Dynamic{X}(t::TObj{T}) where {X,T}
         X <: T || Base.inferencebarrier(_dyn_refuse)(X, T)
-        return new{X}(t)
+        return new{X}(_kept(t))
     end
 end
 Dynamic{X}(d::Dynamic{X}) where {X} = d
@@ -101,6 +140,45 @@ Base.hash(d::Dynamic, h::UInt) = hash(getfield(d, :t), hash(:TraitWorldDynamic, 
 Base.show(io::IO, d::Dynamic{X}) where {X} = print(io, "Dynamic{", X, "} at ", _represented(typeof(getfield(d, :t))))
 _represented(@nospecialize(T)) = T <: TObj ? join(unique([string(v.parameters[3]) for v in T.parameters[2].parameters]), ", ") : string(T)
 @inline _dyn_assert(x, ::Type{S}) where {S} = x::S
+# keeping a trait object: a field projection of a mutable user type is kept as a lens
+@inline _kept(t::TObj) = TObj(map(_keepview, getfield(t, :views)))
+@inline _keepview(v::FieldView{X,W,R}) where {X,W,R} = LiveView{X,W,R}(getfield(v, :w), getfield(v, :o), getfield(v, :i))
+@inline _keepview(v::AbstractView) = v
+
+# --- fields: properties a trait declares --------------------------------------
+
+"`trait_fields(X)`: the fields trait `X` declares, as `(name, writable)` pairs."
+trait_fields(@nospecialize(X)) = ()
+"`field_type(X, Val(f), R)`: the declared type of field `f` at representation `R`."
+function field_type end
+"`field_isrep(X, Val(f))`: whether field `f` has the type `R`: it names the projection."
+field_isrep(@nospecialize(X), @nospecialize(f)) = false
+
+# `t.f` on a trait object: a field one of its traits declares (methods added by @trait), else an error
+@inline Base.getproperty(t::TObj, s::Symbol) = _tgetprop(t, Val(s))
+@inline Base.setproperty!(t::TObj, s::Symbol, x) = _tsetprop!(t, Val(s), x)
+@noinline _tgetprop(t::TObj, ::Val{s}) where {s} = Base.inferencebarrier(_nofield)(typeof(t), s)
+@noinline _tsetprop!(t::TObj, ::Val{s}, x) where {s} = Base.inferencebarrier(_nofield)(typeof(t), s)
+@noinline _nofield(@nospecialize(T), s::Symbol) =
+    throw(ArgumentError("`t.$s`: no trait this trait object carries declares a field `$s`"))
+@noinline _readonly(@nospecialize(X), s::Symbol) = throw(ArgumentError("field `$s` of $X is `const`: read-only"))
+Base.getproperty(d::Dynamic, s::Symbol) = getproperty(getfield(d, :t), s)
+Base.setproperty!(d::Dynamic, s::Symbol, x) = setproperty!(getfield(d, :t), s, x)
+
+"A field `f` of trait `X` read on a trait object: the representation itself for the projection field, else its property."
+@inline function fieldget(::Type{X}, ::Val{f}, t::TObj) where {X,f}
+    v = viewof(t, X)
+    return _fget(X, Val(f), getfield(v, :w), v, _reptype(typeof(v)))
+end
+@inline _fget(::Type{X}, ::Val{f}, w, v, ::Type{R}) where {X,f,R} =
+    (field_isrep(X, Val(f)) ? _rep(v) : getproperty(_rep(v), f))::field_type(X, Val(f), R)
+"A field `f` of trait `X` written on a trait object: the projection field through the lens, else the representation's property."
+@inline function fieldset!(::Type{X}, ::Val{f}, t::TObj, x) where {X,f}
+    v = viewof(t, X)
+    y = x::field_type(X, Val(f), _reptype(typeof(v)))
+    field_isrep(X, Val(f)) ? _setrep!(v, y) : setproperty!(_rep(v), f, y)
+    return y
+end
 
 # --- witnesses -------------------------------------------------------------
 
@@ -170,9 +248,9 @@ the declared type. Everything folds for a known view type.
 """
 @inline function opcall(::Type{X}, ::Val{op}, f::F, t::TObj, args::Vararg{Any,N}) where {X,op,F,N}
     v = viewof(t, X)
-    R = typeof(v.r)
+    R = _reptype(typeof(v))
     args isa op_args(X, Val(op), R, Val(N)) || throw(TraitArgumentError(X, op, R, args))
-    x = _dispatch(X, Val(op), f, v.w, v.r, t, args...)
+    x = _dispatch(X, Val(op), f, getfield(v, :w), _rep(v), t, args...)
     return x::op_ret(X, Val(op), R, Val(N))
 end
 

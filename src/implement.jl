@@ -34,7 +34,9 @@ struct ProjRec
     R::Any
     copies::Bool
     dyn::Any
+    field::Int        # the user type's field the projection reads as is, or 0: a field projection can be a lens
 end
+ProjRec(project, R, copies::Bool, dyn) = ProjRec(project, R, copies, dyn, 0)
 "`projection(X, T)`: a `ProjRec`, or `nothing`. A representation is its own projection."
 projection(@nospecialize(X), @nospecialize(T)) = nothing
 
@@ -222,6 +224,8 @@ _existing_defaults(@nospecialize(X), @nospecialize(R)) =
 end
 
 function _witness(@nospecialize(X), @nospecialize(R))
+    # a trait without operations (only fields) is implemented by every representation; its fields are checked at the conformance
+    isempty(_ops(X)) && isempty(_generic_keys(X)) && return Impl{()}()
     rec = _impl(X, R)
     if rec isa ImplRec
         rec.kind === :methods && return Impl{rec.defaults}()
@@ -386,6 +390,7 @@ function _check_implementation(mod::Module, @nospecialize(X), @nospecialize(R), 
     isconcretetype(R) || return nothing          # families and generic implementations are checked per representation
     deep_concrete(R) || throw(ImplementError("$R is not deeply concrete, so it cannot be a representation"))
     ps = conformance_problems(X, R, given)
+    append!(ps, _field_problems(X, R))
     isempty(ps) || throw(ImplementError("the implementation of $X for $R does not conform:\n  " * join(ps, "\n  ")))
     for S in trait_closure(X)[2:end]
         witness(S, R) === nothing &&
@@ -412,9 +417,50 @@ function _check_projection(mod::Module, @nospecialize(X), @nospecialize(T))
                     "$Y has the mutating operation `$op`, so it accepts only projections that share the user's data; " *
                     "the projection of $T copies (rule 2)"))
             end
+            for (f, w) in trait_fields(Y)
+                w && throw(ImplementError("$Y declares the writable field `$f`, so it accepts only projections that share " *
+                                          "the user's data; the projection of $T copies (rule 2)"))
+            end
+        end
+        ps = _field_problems(Y, R)
+        isempty(ps) || throw(ImplementError("the projection of $T for $X returns $R, which lacks fields $Y declares:\n  " * join(ps, "\n  ")))
+        for (f, w) in trait_fields(Y)
+            field_isrep(Y, Val(f)) || continue
+            hasfield(T, f) && fieldtype(T, f) === R ||
+                throw(ImplementError("$Y declares `$f::R` as its projection field: $T needs a field `$f` of exactly the representation's type $R"))
+            if w && !(p.field != 0 && ismutabletype(T) && !isconst(T, f))
+                throw(ImplementError("$Y declares its projection field `$f` writable, so $T must be a mutable type with a field `$f` that is not `const`, " *
+                                     "projected as the field itself (a lens)"))
+            end
         end
     end
     return nothing
+end
+
+"Problems of representation `R` with the fields trait `X` declares (not its projection field): a stored field of the declared type, exactly that type and writable where the trait writes it, or a computed property."
+function _field_problems(@nospecialize(X), @nospecialize(R))
+    ps = String[]
+    for (f, w) in trait_fields(X)
+        field_isrep(X, Val(f)) && continue
+        FT = field_type(X, Val(f), R)
+        if R isa DataType && hasfield(R, f)
+            ST = fieldtype(R, f)
+            if w
+                (ismutabletype(R) && !isconst(R, f)) ||
+                    push!(ps, "field `$f` is writable in $X, but $R's field `$f` cannot be written (an immutable type or a `const` field)")
+                ST === FT || push!(ps, "field `$f` is writable in $X with type `$FT`, so $R's field must have exactly that type, not `$ST`")
+            else
+                ST <: FT || push!(ps, "field `$f` of $R has type `$ST`, but $X declares `$FT`")
+            end
+        elseif R isa Type && which(getproperty, Tuple{R,Symbol}).sig.parameters[2] !== Any
+            # a computed property: its result is asserted at every read
+            w && which(setproperty!, Tuple{R,Symbol,FT}).sig.parameters[2] === Any &&
+                push!(ps, "field `$f` is writable in $X, but $R defines no `setproperty!`")
+        else
+            push!(ps, "$R has no field `$f`, which $X declares")
+        end
+    end
+    return ps
 end
 
 "The representation a projection returns: declared, or inferred (must be concrete)."
@@ -629,6 +675,15 @@ function _implement_oneline(mod::Module, traits::Vector{Any}, Tex, Rdecl)
         error("@implement: the one-line form needs a concrete type, got `$Tex` (the prototype does not declare parametric families this way)")
     Xs = Any[Core.eval(mod, x) for x in traits]
     all(is_trait, Xs) || error("@implement: `$(traits[findfirst(!is_trait, Xs)])` is not a trait")
+    # a trait that declares its projection field (`data::R`) names the field
+    pfs = unique(Symbol[f for X in Xs for (f, _) in trait_fields(X) if field_isrep(X, Val(f))])
+    if !isempty(pfs)
+        length(pfs) == 1 || throw(ImplementError("$(join(string.(Xs), ", ")) declare different projection fields: $(join(string.(pfs), ", "))"))
+        f = pfs[1]
+        hasfield(T, f) || throw(ImplementError("$Tex has no field `$f`, which $(join(string.(Xs), ", ")) declares as its projection"))
+        headex = length(traits) == 1 ? traits[1] : Expr(:tuple, traits...)
+        return _implement_projection(mod, headex, Any[Tex, :(project(t) = getfield(t, $(QuoteNode(f))))]; field = Base.fieldindex(T, f))
+    end
     if all(X -> _methods_cover(X, T), Xs)
         # the type is its own representation: its existing methods, checked as an implementation
         out = Any[]
@@ -691,10 +746,10 @@ function _implement_oneline(mod::Module, traits::Vector{Any}, Tex, Rdecl)
         throw(ImplementError("the fields of $Tex conform to $(join(string.(Xs), ", ")) through different projections; write one `project(t) = …`"))
     end
     headex = length(traits) == 1 ? traits[1] : Expr(:tuple, traits...)
-    return _implement_projection(mod, headex, Any[Tex, :(project(t) = $pex)])
+    return _implement_projection(mod, headex, Any[Tex, :(project(t) = $pex)]; field = all(p -> p === nothing, ps) ? fld : 0)
 end
 
-function _implement_projection(mod::Module, head, rest)
+function _implement_projection(mod::Module, head, rest; field::Int = 0)
     TW = TraitWorld
     traits = Any[]
     Rdecl = nothing
@@ -762,7 +817,7 @@ function _implement_projection(mod::Module, head, rest)
     elseif dynamic
         error("@implement: `dynamic` needs operations in the block")
     end
-    push!(out, :(const $rec = $TW.ProjRec($pfn, $Rconst, $copies, $dynex)))
+    push!(out, :(const $rec = $TW.ProjRec($pfn, $Rconst, $copies, $dynex, $field)))
     for X in traits
         push!(out, :($TW.projection(::Type{$X}, ::Type{$Tex}) = $rec))
     end

@@ -94,10 +94,20 @@ macro trait(header, block = nothing)
     end
     block isa Expr && block.head === :block || error("@trait: expected a begin … end block")
     decls = _OpDecl[]
+    fdecls = Any[]                     # (name, type expression, writable)
     for ex in block.args
         ex isa LineNumberNode && continue
-        push!(decls, _parse_opdecl(ex, Rsym))
+        if ex isa Expr && ex.head === :(::) && length(ex.args) == 2 && ex.args[1] isa Symbol
+            push!(fdecls, (ex.args[1], ex.args[2], true))          # a field, writable as in a mutable struct
+        elseif ex isa Expr && ex.head === :macrocall && ex.args[1] === Symbol("@const") &&
+               ex.args[end] isa Expr && ex.args[end].head === :(::) && ex.args[end].args[1] isa Symbol
+            # `@const name::T`: a read-only field (`const name::T` parses only inside a struct)
+            push!(fdecls, (ex.args[end].args[1], ex.args[end].args[2], false))
+        else
+            push!(decls, _parse_opdecl(ex, Rsym))
+        end
     end
+    length(unique(first.(fdecls))) == length(fdecls) || error("@trait: a field is declared twice in `$name`")
     sigs = [(d.name, length(d.args)) for d in decls]
     length(unique(sigs)) == length(sigs) || error("@trait: an operation is declared twice with the same arity in `$name`")
     names = unique([d.name for d in decls])
@@ -136,6 +146,19 @@ macro trait(header, block = nothing)
         retx = _mentions(d.ret, Rsym) ? :Any : d.ret
         push!(out, :(@inline $(d.fexpr)(dyn::$TW.Dynamic{$name}, $(syms...)) =
                          $TW._dyn_assert($(d.fexpr)($TW.opened(dyn), $(syms...)), $retx)))
+    end
+    # fields: properties of the representation, or (type R) the projection, read through a lens when written
+    if !isempty(fdecls)
+        push!(out, :($TW.trait_fields(::Type{$name}) = $(Tuple((f, w) for (f, _, w) in fdecls))))
+        for (f, Tex, w) in fdecls
+            key = QuoteNode(f)
+            T = gensym(:T)
+            push!(out, :($TW.field_type(::Type{$name}, ::Val{$key}, ::Type{$Rsym}) where {$Rsym} = $Tex))
+            Tex === Rsym && push!(out, :($TW.field_isrep(::Type{$name}, ::Val{$key}) = true))
+            push!(out, :(@inline $TW._tgetprop(t::$TW.TObj{$T}, ::Val{$key}) where {$T >: $name} = $TW.fieldget($name, Val($key), t)))
+            push!(out, w ? :(@inline $TW._tsetprop!(t::$TW.TObj{$T}, ::Val{$key}, x) where {$T >: $name} = $TW.fieldset!($name, Val($key), t, x)) :
+                           :($TW._tsetprop!(t::$TW.TObj{$T}, ::Val{$key}, x) where {$T >: $name} = $TW._readonly($name, $key)))
+        end
     end
     push!(out, :($TW._bump!()))
     push!(out, :($name))
