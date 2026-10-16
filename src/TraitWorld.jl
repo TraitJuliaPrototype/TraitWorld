@@ -8,11 +8,14 @@ defined.
 """
 module TraitWorld
 
-# TraitWorld's own code is not protected by the patched Julia's invalidation filter: the
-# machinery looks things up in method tables on users' types and traits as values (`trait_params(X)`,
-# `projection(X, T)`), so a definition by a type's owner must invalidate it as in plain Julia. Only
-# trait modules are protected (their code sees trait-world values only). A real runtime would not be
-# Julia code subject to invalidation at all.
+"""
+Marks TraitWorld's code for the patched Julia's invalidation filter: the machinery is trait-world
+code, protected like a trait module. That is sound because the machinery's registries
+(`trait_fields(X)`, `projection(X, T)`, …) are declared with `@max_methods 1` and sentinel
+methods: its code compiled at abstract types holds no edge to them, so no later declaration
+could have changed what it inferred.
+"""
+const __trait_world_machinery__ = true
 
 using PrecompileTools: PrecompileTools
 using Serialization: Serialization

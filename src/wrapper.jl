@@ -125,7 +125,7 @@ function _filter_init!()
     ok || return nothing
     empty!(_FILTER_NAMES); append!(_FILTER_NAMES, collect(_stdlib_names()))
     empty!(_PROTECT); append!(_PROTECT, filter(!isempty, split(get(ENV, "JULIA_TW_PROTECT", ""), ',')))
-    empty!(_FILTER_MODS)                     # trait modules only: TraitWorld's machinery is invalidated as plain Julia
+    empty!(_FILTER_MODS); push!(_FILTER_MODS, TraitWorld)      # the machinery is protected (see __trait_world_machinery__)
     _FILTER_ON[] = true
     _filter_push!()
     # the load-time half (base/staticdata.jl of the same build): edges of trait-world
