@@ -125,15 +125,16 @@ function _filter_init!()
     ok || return nothing
     empty!(_FILTER_NAMES); append!(_FILTER_NAMES, collect(_stdlib_names()))
     empty!(_PROTECT); append!(_PROTECT, filter(!isempty, split(get(ENV, "JULIA_TW_PROTECT", ""), ',')))
-    empty!(_FILTER_MODS); push!(_FILTER_MODS, TraitWorld)
+    empty!(_FILTER_MODS)                     # trait modules only: TraitWorld's machinery is invalidated as plain Julia
     _FILTER_ON[] = true
     _filter_push!()
     # the load-time half (base/staticdata.jl of the same build): edges of trait-world
     # code in a package image are not failed by outside, owned methods
-    if isdefined(Base.StaticData, :_tw_load_filter)
-        Base.StaticData._tw_modules[] = _FILTER_MODS
-        Base.StaticData._tw_julia_names[] = _FILTER_NAMES
-        Base.StaticData._tw_load_filter[] = Int8(1)
+    L = _load_filter_module()
+    if isdefined(L, :_tw_load_filter)
+        L._tw_modules[] = _FILTER_MODS
+        append!(L._tw_julia_names[], Any[n for n in _FILTER_NAMES if !(n in L._tw_julia_names[])])
+        L._tw_load_filter[] = Int8(1)
     end
     return nothing
 end
@@ -162,4 +163,6 @@ end
 "Invalidations the patched Julia's filter skipped so far (0 on stock Julia)."
 filter_skipped() = _FILTER_ON[] ? unsafe_load(cglobal(:jl_tw_skipped, Csize_t)) : 0
 "Edges of trait-world code in package images that the patched Julia's load-time filter kept (0 on stock Julia)."
-load_filter_skipped() = _FILTER_ON[] && isdefined(Base.StaticData, :_tw_skipped) ? Base.StaticData._tw_skipped[] : 0
+load_filter_skipped() = _FILTER_ON[] && isdefined(_load_filter_module(), :_tw_skipped) ? _load_filter_module()._tw_skipped[] : 0
+"The module that validates package images, where the patched Julia's load-time filter lives: `Base.StaticData` on 1.12, the compiler's `ReinferUtils` on 1.13."
+_load_filter_module() = isdefined(Base, :StaticData) ? Base.StaticData : Base.Compiler.ReinferUtils

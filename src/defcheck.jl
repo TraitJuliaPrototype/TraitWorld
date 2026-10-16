@@ -70,11 +70,10 @@ function archetype_tobj(@nospecialize(lb))
                 Any[p isa TypeVar ? ParamOpen : p for p in u.parameters[1:end-1]] : Any[]
         A = Archetype{X,Tuple{fixed...}}
         for Y in _arch_traits(X)
-            push!(views, View{_instance(Y, A),ArchWit,A,length(trait_fields(Y))})
+            push!(views, View{_instance(Y, A),ArchWit,A,length(trait_fields(Y)),Nothing})
         end
     end
-    T = Union{Any[v.parameters[1] for v in views]...}
-    return TObj{T,Tuple{views...}}
+    return TObj{_encode_traits(Any[v.parameters[1] for v in views]),Tuple{views...}}
 end
 
 "The archetype signature of a worker method, or `nothing` if it has no bounded position or is not checked this way."

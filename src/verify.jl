@@ -339,7 +339,7 @@ mutable struct _Walk
     world::UInt
     scans::IdDict{Core.MethodInstance,_Scan}
     active::Base.IdSet{Core.MethodInstance}
-    plans::Vector{Any}                          # (cache, U, builder): entry caches to fill for a closed world
+    plans::Vector{Any}                          # ((X, U), builder): slow-path conformances to cache for a closed world
     views::Base.IdSet{Core.MethodInstance}      # entries analyzed at a call site's types (never compiled as such)
     native_only::Base.IdSet{Core.MethodInstance}   # the entries' real instances: checked for native code only
 end
@@ -403,8 +403,8 @@ end
 # the machinery's slow paths: reflection, checks, the audit. Not followed: in a
 # closed world they are switched off and verify_main runs them at build time.
 _machinery_method(m::Method) = m.module === TraitWorld && m.name in
-    (:_check_once, :_enter_slow, :_guard_slow, :_builder, :worker_problems, :audit, :_rule3_error,
-     :_closed_miss, :_witness, :witness, :proj_lookup)
+    (:_check_once, :_conformance_slow, :_needed_slow, :_guard_slow, :_builder_for, :worker_problems, :audit, :_rule3_error,
+     :_closed_miss, :_witness, :witness, :proj_lookup, :_no_worker_error, :_refuse_overrides, :_merge_dyn)
 
 const _ENTER = Ref{Any}(nothing)
 const _ENTER_CALLABLE = Ref{Any}(nothing)
@@ -442,6 +442,39 @@ function _projected_types(@nospecialize(T))
         any(x -> x === U, out) || push!(out, U)
     end
     return out
+end
+
+"""
+The targets of an entry step for the traits `L` at an argument of type `T`: the entry's own
+specialization per user type, the conformance methods it calls (by dispatch, when `T` is not
+concrete), and the builders of slow-path conformances, which a closed world caches.
+Returns the targets, the result types, and whether some type has none of the traits.
+"""
+function _entry_targets(cx, @nospecialize(L), @nospecialize(T), world::UInt, outtype, selfsig)
+    ts = Core.MethodInstance[]
+    outs = Any[]
+    notrait = false
+    for U in _projected_types(T)
+        o = outtype(U)
+        if o === NoTrait
+            notrait = true
+            continue
+        end
+        push!(outs, o)
+        sg = selfsig(U)
+        if sg !== nothing
+            t = _target_mi(sg, world)
+            t === nothing || push!(ts, t)
+        end
+        for X in L.parameters
+            t = _target_mi(Tuple{typeof(conformance),As{X},U}, world)
+            t === nothing || push!(ts, t)
+            _has_conformance_method(X, U) && continue
+            b = Base.invokelatest(_builder_for, Any[X], U)
+            b === NOTRAIT || push!(cx.plans, ((X, U), b))
+        end
+    end
+    return ts, outs, notrait
 end
 
 "Whether an entry's result comes from a worker of a function declared `::Like{t}`."
@@ -515,29 +548,19 @@ function _scan(mi::Core.MethodInstance, cx::_Walk)
             cmi isa Core.MethodInstance || continue
             cm = cmi.def
             if cm === _enter_method()
-                # enter(cache, f, pos, nargs, t): the builder per user type
+                # enter(EntryPos{F, pos, nargs}(), t): the conformances per user type
                 a = st.args[3:end]
-                cv = _constval(src, sptypes, a[1]); fv = _constval(src, sptypes, a[2])
-                pv = _constval(src, sptypes, a[3]); nv = _constval(src, sptypes, a[4])
-                T = _argT(src, sptypes, a[5])
-                if cv === nothing || fv === nothing || pv === nothing || nv === nothing
+                Pv = _constval(src, sptypes, a[1])
+                T = _argT(src, sptypes, a[2])
+                if Pv === nothing
                     hole(:trait_arg, i, :enter, Any[T])
                     continue
                 end
-                cache, f, pos, nargs = something(cv), something(fv), something(pv), something(nv)
-                ts = Core.MethodInstance[]
-                outs = Any[]
-                for U in _projected_types(T)
-                    b = Base.invokelatest(_builder, f, pos, nargs, U)
-                    if b === NOTRAIT
-                        notrait = true
-                        continue
-                    end
-                    t = _target_mi(Tuple{typeof(b),U}, world)
-                    t === nothing || push!(ts, t)
-                    push!(outs, Base.infer_return_type(b, Tuple{U}))
-                    push!(cx.plans, (cache, U, b))
-                end
+                P = something(Pv)
+                ts, outs, nt = _entry_targets(cx, typeof(Base.invokelatest(needed, P)).parameters[1], T, world,
+                                              U -> Base.infer_return_type(enter, Tuple{typeof(P),U}),
+                                              U -> Tuple{typeof(enter),typeof(P),U})
+                nt && (notrait = true)
                 alts[i] = outs
                 site(:trait, i, :enter, Any[T], ts)
                 continue
@@ -568,30 +591,24 @@ function _scan(mi::Core.MethodInstance, cx::_Walk)
                 site(:trait, i, :callable, Any[Ft], ts)
                 continue
             elseif cm === _enter_kw_method()
-                # enter_kw(cache, traits, f, k, nt): the builder per user type of a bounded keyword
+                # enter_kw(L, f, k, nt): the conformances per user type of a bounded keyword
                 a = st.args[3:end]
-                cv = _constval(src, sptypes, a[1]); tv = _constval(src, sptypes, a[2]); kv = _constval(src, sptypes, a[4])
-                NT = _argT(src, sptypes, a[5])
-                if cv === nothing || tv === nothing || kv === nothing || !(NT isa DataType && NT <: NamedTuple)
+                lv = _constval(src, sptypes, a[1]); kv = _constval(src, sptypes, a[3])
+                NT = _argT(src, sptypes, a[4])
+                if lv === nothing || kv === nothing || !(NT isa DataType && NT <: NamedTuple)
                     hole(:trait_arg, i, :enter_kw, Any[NT])
                     continue
                 end
-                cache, traits, k = something(cv), something(tv), something(kv)
+                l, k = something(lv), something(kv)
                 if !(k in NT.parameters[1])
                     alts[i] = Any[NT]                      # not supplied: the named tuple passes through
                     site(:trait, i, :enter_kw, Any[NT])
                     continue
                 end
-                ts = Core.MethodInstance[]
-                outs = Any[]
-                for U in _projected_types(fieldtype(NT, k))
-                    b = Base.invokelatest(_builder_for, collect(Any, traits), U)
-                    b === NOTRAIT && continue              # refused at the entry: an error path
-                    t = _target_mi(Tuple{typeof(b),U}, world)
-                    t === nothing || push!(ts, t)
-                    push!(outs, _nt_with(NT, k, Base.infer_return_type(b, Tuple{U})))
-                    push!(cx.plans, (cache, U, b))
-                end
+                L = typeof(l).parameters[1]
+                ts, outs, _ = _entry_targets(cx, L, fieldtype(NT, k), world,
+                                             U -> _nt_with(NT, k, Base.infer_return_type(_assemble, Tuple{typeof(l),U})),
+                                             U -> nothing)
                 alts[i] = outs
                 site(:trait, i, :enter_kw, Any[NT], ts)
                 continue
@@ -895,10 +912,12 @@ the program can need, and switch off what needs the compiler or reflection
 (the checks ran at build time; no method can be added to a binary).
 """
 function close_world!(plans)
-    for (cache, U, b) in plans
-        cache.builders[U] = b
-        cache.gen = GENERATION[]
+    d = copy(_SLOW[])
+    for (key, b) in plans
+        d[key] = b
     end
+    _SLOW[] = d
+    _SLOW_GEN[] = GENERATION[]
     CLOSED_WORLD[] = true
     MODE[] = :recompile
     return nothing

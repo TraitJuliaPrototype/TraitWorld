@@ -298,8 +298,8 @@ end
 "The type of the trait object a generic implementation's body receives at `R`."
 function _subobj_type(sub::Tuple, @nospecialize(R))
     Xs = Any[typeof(s).parameters[1] for s in sub]
-    vs = Any[View{typeof(s).parameters[1],typeof(s.w),R,0} for s in sub]
-    return TObj{Union{Xs...},Tuple{vs...}}
+    vs = Any[View{typeof(s).parameters[1],typeof(s.w),R,0,Tuple{R}} for s in sub]
+    return TObj{_encode_traits(Xs),Tuple{vs...}}
 end
 
 _hasfirst(v::Vector{Any}, @nospecialize(y)) = (for s in v; (s::Tuple)[1] === y && return true; end; false)
@@ -454,6 +454,14 @@ function _field_problems(@nospecialize(X), @nospecialize(T), fmap, @nospecialize
     isempty(trait_fields(X)) && return ps
     T isa DataType || return ["$T is not a concrete type with fields"]
     own_gp = which(getproperty, Tuple{T,Symbol}).sig.parameters[2] !== Any
+    # the key with every declared field: a field's declared type may use a parameter another field defines
+    fnames = Symbol[]; ftypes = Any[]
+    for (f, _) in trait_fields(X)
+        g = fmap === nothing ? f : get(fmap, f, f)
+        hasfield(T, g) || continue
+        push!(fnames, f); push!(ftypes, fieldtype(T, g))
+    end
+    Kfull = Key{isempty(_ops(X)) ? Nothing : R,NamedTuple{Tuple(fnames),Tuple{ftypes...}}}
     for (f, w) in trait_fields(X)
         g = fmap === nothing ? f : get(fmap, f, f)
         if own_gp && (fmap === nothing || !haskey(fmap, f))
@@ -466,7 +474,14 @@ function _field_problems(@nospecialize(X), @nospecialize(T), fmap, @nospecialize
             continue
         end
         ST = fieldtype(T, g)
-        FT = field_type(X, Val(f), Key{isempty(_ops(X)) ? Nothing : R,NamedTuple{(f,),Tuple{ST}}})
+        FT = try
+            Base.invokelatest(field_type, X, Val(f), Kfull)
+        catch e
+            e isa MethodError || rethrow()
+            # a parameter defined by matching a field's type, and the field's type does not match
+            push!(ps, "field `$g` of $T has type `$ST`, which does not match the type $X declares for `$f`")
+            continue
+        end
         if w
             (ismutabletype(T) && !isconst(T, g)) ||
                 push!(ps, "field `$f` is writable in $X, but $T's field `$g` cannot be written (an immutable type or a `const` field)")
@@ -488,6 +503,89 @@ function _rep_of(@nospecialize(f), @nospecialize(T), @nospecialize(Rdecl))
     isconcretetype(Rinf) || throw(ImplementError(
         "cannot infer a concrete representation for the projection of $T (got $Rinf): declare it, as in `@implement Trait{R} $T …`"))
     return Rinf
+end
+
+
+# --- conformances as methods (keys-plan §6) -----------------------------------------
+
+"""
+`_declared_defaults(X, T)`: the operations a declared conformance of `T` to `X` serves by
+defaults, as `(trait, implementing type, operations)` records, one method per conformance,
+defined with it so that it is saved with the declaring package (note "Declaring a trait":
+an override belongs to the conformance).
+"""
+function _declared_defaults end
+
+"""
+What a conformance declaration fixes, after its checks: the builder of its views
+(`nothing` when it must be built per session) and the operations its defaults serve,
+without those the implementing type already had a method for.
+"""
+function _declare_conformance(@nospecialize(X), @nospecialize(T))
+    recs = Any[]
+    (T isa DataType && isconcretetype(T)) || return (b = nothing, recs = ())
+    p = proj_lookup(X, T)
+    p === nothing && return (b = nothing, recs = ())
+    for Y in trait_closure(X)
+        w = Y === X ? proj_witness(X, T, p) : witness(Y, p.R)
+        (w isa Impl && p.R !== Nothing) || continue
+        D = Tuple(op for op in typeof(w).parameters[1] if !_has_op_method(Y, op, p.R))
+        isempty(D) || push!(recs, (Y, p.R, D))
+    end
+    _refuse_overrides()
+    return (b = _conformance_builder(X, T), recs = Tuple(recs))
+end
+
+"Whether `conformance(X, ::T)` has a method of its own (a declaration made it), not the fallback."
+function _has_conformance_method(@nospecialize(X), @nospecialize(T))
+    T isa Type || return false
+    m = Base._which(Tuple{typeof(conformance),As{X},T}; raise = false)
+    m === nothing && return false
+    return Base.unwrap_unionall(m.method.sig).parameters[3] !== Any
+end
+
+"The statements that make a conformance a method: `conformance(X, u::T)` from a builder fixed now."
+function _conformance_methods(Xex, Tex)
+    TW = TraitWorld
+    c = gensym(:conformance)
+    return Any[:(const $c = $TW._declare_conformance($Xex, $Tex)),
+               :($TW.conformance(::$TW.As{$Xex}, u::$Tex) = $TW._conf_call($c.b, $Xex, u)),
+               :($TW._declared_defaults(::Type{$Xex}, ::Type{$Tex}) = $c.recs)]
+end
+
+"""
+    check_overrides() -> Vector{String}
+
+Methods of a trait's operation defined after a conformance whose default serves that
+operation for the type (note "Declaring a trait": an override belongs to the conformance;
+plain Julia would call the later method, so accepting it would break "identical or error").
+Checked at every declaration, at the end of a trait module, after package loads and at a
+worker signature's first call; refusing at the definition needs the runtime.
+"""
+function check_overrides()
+    out = String[]
+    for m in methods(_declared_defaults)
+        sig = Base.unwrap_unionall(m.sig)
+        ps = sig.parameters
+        length(ps) == 3 || continue
+        (ps[2] isa DataType && ps[3] isa DataType) || continue
+        X, T = ps[2].parameters[1], ps[3].parameters[1]
+        recs = Base.invokelatest(_declared_defaults, X, T)
+        for (Y, R, D) in recs
+            for op in D
+                _has_op_method(Y, op, R) || continue
+                push!(out, "`$op` of $Y now has a method for $R, but the conformance of $T to $X serves it by the trait's default. " *
+                           "An override belongs to the conformance: define it before `@implement`, or in its block")
+            end
+        end
+    end
+    return out
+end
+"Refuse overrides made after a conformance (see `check_overrides`)."
+function _refuse_overrides()
+    ps = check_overrides()
+    isempty(ps) || throw(ImplementError(join(unique(ps), "\n  ")))
+    return nothing
 end
 
 # --- the macro --------------------------------------------------------------------
@@ -666,6 +764,7 @@ macro implement(args...)
             $TW.implementation(::Type{$X}, ::Type{$Rex}) = $rec
             $TW._check_implementation(@__MODULE__, $X, $Rex,
                 Tuple(op for op in $TW._ops($X) if !(op in $TW._existing_defaults($X, $Rex))))
+            $(_has_conformance_method(X, _tryeval(mod, Rex)) ? nothing : Expr(:block, _conformance_methods(X, Rex)...))
             $TW._bump!()
             nothing
         end)
@@ -679,6 +778,7 @@ macro implement(args...)
     push!(out, :(const $rec = $TW.ImplRec(:methods, $defaults)))
     push!(out, :($TW.implementation(::Type{$X}, ::Type{$Rex}) = $rec))
     push!(out, :($TW._check_implementation(@__MODULE__, $X, $Rex, $given)))
+    _has_conformance_method(X, _tryeval(mod, Rex)) || append!(out, _conformance_methods(X, Rex))
     push!(out, :($TW._bump!()))
     push!(out, :nothing)
     return esc(Expr(:block, out...))
@@ -862,6 +962,7 @@ function _implement_oneline(mod::Module, traits::Vector{Any}, Tex, Rdecl; pexs =
                            Tuple(op for op in $TW._ops($xex) if !(op in $TW._existing_defaults($xex, $Tex))))))
             # the one-line form declares that the type conforms: it must have the declared fields
             fmap === nothing && push!(out, :($TW._check_own_fields($xex, $Tex)))
+            _has_conformance_method(X, T) || append!(out, _conformance_methods(xex, Tex))
         end
         push!(out, :($TW._bump!()))
         push!(out, :nothing)
@@ -949,8 +1050,20 @@ function _implement_projection(mod::Module, head, rest; field::Int = 0, fmap = n
     Tex = popfirst!(rest)
     if Tex isa Expr && Tex.head === :where && isempty(rest)
         # the joint family form: `@implement ArrayLike{T, 1} Series{T} where {T}`, the type its own representation
-        pexs === nothing && error("@implement: a family `$Tex` needs the trait's parameters")
         X = Core.eval(mod, traits[1])
+        if pexs === nothing
+            # a family conforming by its fields: the trait's parameters are defined by the fields' types
+            all(q -> q in Base.invokelatest(trait_field_params, X), trait_params(X)) ||
+                error("@implement: a family `$Tex` needs the trait's parameters")
+            Tb, wh = Tex.args[1], Tex.args[2:end]
+            Iex = isempty(_ops(X)) ? :Nothing : Tb
+            fex = fmap === nothing ? :nothing : QuoteNode(fmap)
+            return esc(Expr(:block,
+                Expr(:(=), Expr(:where, :($TW.implementation(::Type{$(traits[1])}, ::Type{$Tb})), wh...), :($TW.ImplRec(:family, ()))),
+                Expr(:(=), Expr(:where, :($TW.projection(::Type{$(traits[1])}, ::Type{$Tb})), wh...),
+                     :($TW.ProjRec(identity, $Iex, false, nothing, 0, nothing, $fex))),
+                :($TW._bump!()), :nothing))
+        end
         return _implement_family(mod, X, Expr(:curly, traits[1], pexs..., Tex.args[1]), Any[Tex.args[2:end]...], nothing)
     end
     flags = Symbol[]
@@ -1036,6 +1149,9 @@ function _implement_projection(mod::Module, head, rest; field::Int = 0, fmap = n
     end
     for X in traits
         push!(out, :($TW._check_projection(@__MODULE__, $X, $Tex)))
+    end
+    for X in traits
+        _has_conformance_method(_tryeval(mod, X), _tryeval(mod, Tex)) || append!(out, _conformance_methods(X, Tex))
     end
     push!(out, :($TW._bump!()))
     push!(out, :nothing)

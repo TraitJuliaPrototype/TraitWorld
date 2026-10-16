@@ -60,7 +60,9 @@ end)
 
 toplevel(quote
     struct LMeas; cols::Vector{Vector{Float64}}; label::String; end
+    mutable struct LMeasM; cols::Vector{Vector{Float64}}; label::String; end
     @implement LikeLib.ColTable LMeas by cols                   # forwarding: rebuilt with the field replaced
+    @implement LikeLib.ColTable LMeasM by cols                   # forwarding: rebuilt with the field replaced
 
     struct LOwn; cs::Vector{Vector{Float64}}; end               # implements the operations itself
     @implement LikeLib.ColTable LOwn begin
@@ -96,7 +98,10 @@ end)
     end); nothing catch err; err end
     while e isa LoadError; e = e.error; end
     @test e isa ImplementError && occursin("computes a value", sprint(showerror, e))
-    d = L.keeptable(m)
+    # a Dynamic of an immutable type keeps the parts the trait sees (held), not the whole object:
+    # a result like it cannot be rebuilt (the prototype's limit, open-issues §3)
+    @test_throws TraitBoundError L.colmap(x -> -x, L.keeptable(m))
+    d = L.keeptable(Main.LMeasM([[1.0, 2.0], [3.0]], "run 1"))
     dr = L.colmap(x -> -x, d)                                  # a Dynamic in, a Dynamic out
     @test dr isa Dynamic{L.ColTable} && L.col(dr, 1) == [-1.0, -2.0]
     dw = L.withcols(d, [[9.0]])                                # a constructor operation on a Dynamic

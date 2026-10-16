@@ -77,7 +77,8 @@ end)
     @test TraitWorld.param(K.KVec, Val(:T), Vector{Int}) === Int
     st = Main.KState([1.0], (2.0, 3.0), 0.0)
     @test K.kadvance(st, 0.5) == 0.5 && st.t == 0.5
-    key = first(TraitWorld._key_and_slots(K.KInteg, TraitWorld.proj_lookup(K.KInteg, Main.KState), Main.KState))
+    key = first(TraitWorld._key_and_slots(K.KInteg, TraitWorld.proj_lookup(K.KInteg, Main.KState), Main.KState,
+                                              TraitWorld.proj_witness(K.KInteg, Main.KState, TraitWorld.proj_lookup(K.KInteg, Main.KState))))
     @test key === TraitWorld.Key{Nothing,@NamedTuple{u::Vector{Float64}, p::Tuple{Float64,Float64}, t::Float64}}
     @test TraitWorld.param(K.KInteg, Val(:U), key) === Vector{Float64}
     @test TraitWorld.param(K.KInteg, Val(:P), key) === Tuple{Float64,Float64}

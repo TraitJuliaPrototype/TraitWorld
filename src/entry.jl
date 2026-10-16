@@ -1,8 +1,24 @@
 # ---------------------------------------------------------------------------
-# Entries: where ordinary code calls into a trait module (rule 2). An entry
-# finds, per trait position, the traits the function's workers need there,
-# projects the value once per trait (once for a joint projection), and calls
-# the worker. A builder is compiled per user type: the projection per type.
+# Entries: where ordinary code calls into a trait module (rule 2). The runtime
+# is ordinary methods, so Julia's own dispatch does the lookups
+# (explorations/keys-plan.md §6):
+#
+#   - a conformance is a method, `conformance(X, u::U)`, defined by
+#     `@implement`: it builds the trait object's views of `X` (and its
+#     supertraits) for a `U`, from constants;
+#   - an entry is an ordinary `@inline` method, `@nospecialize` on its trait
+#     arguments: `enter(EntryPos{F, pos, nargs}, t)` makes the trait object
+#     from the traits the function's workers need there (`needed`), and
+#     `checked_call` calls the worker for its keys. A typed caller inlines the
+#     entry and runs at plain-Julia speed; an untyped caller pays a dispatch;
+#   - generic implementations and families have no method per type: their
+#     conformance is found by the fallback, `_conformance_slow`, and cached.
+#
+# `conformance` is declared with `@max_methods 1` and has a fallback, so code
+# compiled at `conformance(X, ::Any)` infers nothing from its methods, holds
+# no edge to them, and a new conformance invalidates nothing (a new type's
+# method would otherwise change what such code inferred, and the trait-world
+# filter, which keeps code from methods outside its view, would keep it stale).
 # ---------------------------------------------------------------------------
 
 struct NoTrait end
@@ -18,112 +34,205 @@ end
 Base.showerror(io::IO, e::TraitBoundError) = print(io, "TraitBoundError: ", e.msg)
 
 """
-How the builder makes one trait's view for a user type: the witness, the slot of the
+How a builder makes one trait's view for a user type: the witness, the slot of the
 implementing value (the object itself, or its forwarding field), and the slots of the
-declared fields. The view's type is `View{X, W, K, N}`, the same for every user type of key `K`.
+declared fields. The view's type is `View{X, W, K, N, P}`, the same for every user type of key `K`.
 """
-struct VSpec{X,W,K,N}
+struct VSpec{X,W,K,N,P}
     w::W
     r::Slot
     fs::NTuple{N,Slot}
 end
 
-"Builds the trait object for one argument of a user type: the user's object with its views."
+"Builds the trait object of one argument of a user type: the user's object, or its parts held, with a view per trait."
 struct Builder{S<:Tuple}
     specs::S
 end
 @inline (b::Builder)(t) = TObj(_build(t, getfield(b, :specs)...))
 @inline _build(t) = ()
-@inline _build(t, s::VSpec{X,W,K,N}, rest...) where {X,W,K,N} =
-    (View{X,W,K,N}(getfield(s, :w), t, getfield(s, :r), getfield(s, :fs)), _build(t, rest...)...)
+@inline _build(t, s::VSpec{X,W,K,N,P}, rest...) where {X,W,K,N,P} =
+    (View{X,W,K,N,P}(getfield(s, :w), ismutable(t) ? t : nothing, getfield(s, :r), getfield(s, :fs),
+                     _parts(P, t, getfield(s, :r), getfield(s, :fs))), _build(t, rest...)...)
 
 """
-TraitWorld's generation: bumped by everything that can change what an entry
+The parts a view holds, typed by the key: the implementing value (`nothing` when there
+is none) and the declared fields' values, read from the user's object. For a mutable
+object they are what the object holds now; reads go through the object.
+"""
+@generated function _parts(::Type{P}, t, r::Slot, fs::NTuple{N,Slot}) where {P,N}
+    ts = P.parameters
+    first = ts[1] === Nothing ? :nothing :
+            :((getfield(r, :off) < 0 ? t : getfield(t, getfield(r, :idx)))::$(ts[1]))
+    rest = [:(getfield(t, getfield(fs[$i], :idx))::$(ts[i + 1])) for i in 1:N]
+    return :(($first, $(rest...)))
+end
+"The type of a view's parts at key `K`."
+_partstype(@nospecialize(K)) = K <: Key ? Tuple{_impl(K), K.parameters[2].parameters[2].parameters...} : Tuple{K}
+
+"""
+TraitWorld's generation: bumped by everything that can change what the slow path
 builds (`@trait`, `@implement`, a trait-bounded definition, a package load,
-`refresh!()`), but not by unrelated method definitions, so code that defines
-methods in a loop does not rebuild every entry. Plain methods that a generic
-implementation's predicate reads (`eltype` of a user type) must exist before
-the first call, or be followed by `TraitWorld.refresh!()`.
+`refresh!()`), but not by unrelated method definitions. Plain methods that a generic
+implementation's predicate reads (`eltype` of a user type) must exist before the first
+call, or be followed by `TraitWorld.refresh!()`.
 """
 const GENERATION = Ref{UInt}(1)
 _bump!() = (GENERATION[] += 1; nothing)
-"Forget every cached entry builder: after defining methods a generic implementation's predicate reads."
+"Forget every cached conformance of the slow path: after defining methods a generic implementation's predicate reads."
 refresh!() = _bump!()
 
 "One lock for the machinery's slow paths: concurrent first calls must not race on its caches."
 const _LOCK = ReentrantLock()
 
-"""
-The builders of one entry position, by user type. Stamped with the
-generation it was filled in; a cache loaded from a package image is stale
-(generation 0 there, and its builders may hold erased pointers of another session).
-"""
-mutable struct EntryCache
-    gen::UInt
-    builders::IdDict{Any,Any}
-end
-EntryCache() = EntryCache(UInt(0), IdDict{Any,Any}())
-
-"Set by `verify_main(…; entrypoints = true)` in a trimmed build: entry caches are complete and nothing may be loaded."
+"Set by `verify_main(…; entrypoints = true)` in a trimmed build: the slow path's cache is complete and nothing may be loaded."
 const CLOSED_WORLD = Ref(false)
 
-"""
-    enter(cache, f, pos, nargs, t)
+# --- conformances as methods -----------------------------------------------------
 
-The trait object for argument `pos` of a call to `f` from ordinary code, or
-`NOTRAIT` if `t` has none of the traits `f` needs there.
+"A trait as a value to dispatch on: `As{ColTable}()`. Dispatch on a singleton is cached by its type; on a type value (`::Type{ColTable}`) it is several times slower."
+struct As{X} end
+
+Base.Experimental.@max_methods 1 function conformance end
 """
-# Not inlined: verify_main recognizes the call, and the entry stays one small
-# piece of code. Its error paths and slow paths are behind inference barriers:
-# a static call to a function that formats a message or reflects would give
-# every entry an inference edge into Base's string and method-table code,
-# which an unrelated package load can invalidate (session 19: loading
-# DataFrames invalidated every entry through `_rule3_error`'s message).
-@noinline function enter(c::EntryCache, f::F, pos::Int, nargs::Int, @nospecialize(t)) where {F}
-    t isa Dynamic && return opened(t)                     # a dynamic value is opened: its worker is selected by dispatch
-    t isa TObj && Base.inferencebarrier(_rule3_error)(f, pos, t)
-    if CLOSED_WORLD[]
-        b = get(c.builders, typeof(t), nothing)
-        b === nothing && Base.inferencebarrier(_closed_miss)(f, t)
-        return b === NOTRAIT ? NOTRAIT : b(t)
-    end
-    if c.gen == GENERATION[]
-        b = get(c.builders, typeof(t), nothing)          # copy-on-write: read without the lock
-        b === nothing || return b === NOTRAIT ? NOTRAIT : b(t)
-    end
-    return Base.inferencebarrier(_enter_slow)(c, f, pos, nargs, t)
+    conformance(As{X}(), u)
+
+The trait object of `u` carrying trait `X` (with its supertraits), or `NOTRAIT`. `@implement`
+defines a method per conforming type; the fallback finds generic implementations and
+families, and caches what it finds.
+"""
+conformance(::As{X}, @nospecialize(u)) where {X} = Base.inferencebarrier(_conformance_slow)(X, u)
+
+"""
+The conformance a declaration makes, as a method body: the views from a builder fixed when
+the conformance was declared, or the slow path for a conformance whose witness holds
+pointers of a session (a type's own operations called dynamically).
+"""
+@inline _conf_call(b::Builder, ::Type{X}, u) where {X} = b(u)
+@inline _conf_call(::Nothing, ::Type{X}, u) where {X} = Base.inferencebarrier(_conformance_slow)(X, u)
+
+"The builder a conformance of `T` to `X` is fixed to when declared, or `nothing` when it must be built in each session."
+function _conformance_builder(@nospecialize(X), @nospecialize(T))
+    p = proj_lookup(X, T)
+    p === nothing && return nothing
+    p.dyn === nothing || return nothing             # erased pointers belong to a session
+    b = _builder_for(Any[X], T)
+    return b isa Builder ? b : nothing
 end
 
-@noinline function _enter_slow(c::EntryCache, @nospecialize(f), pos::Int, nargs::Int, @nospecialize(t))
-    b = Base.invokelatest(_builder, f, pos, nargs, typeof(t))
-    b === NOTRAIT || _vc_note_builder(b, typeof(t))
-    @lock _LOCK begin
-        d = c.gen == GENERATION[] ? copy(c.builders) : IdDict{Any,Any}()
-        d[typeof(t)] = b
-        c.builders = d                                  # readers see the old table or the new one
-        c.gen = GENERATION[]
+const _SLOW = Ref(IdDict{Any,Any}())                  # (X, U) => Builder or NOTRAIT; copy-on-write
+const _SLOW_GEN = Ref{UInt}(0)
+"The conformance of a type with no method of its own: a generic implementation, a family, a dynamic one."
+@noinline function _conformance_slow(@nospecialize(X), @nospecialize(u))
+    U = typeof(u)
+    key = (X, U)
+    if CLOSED_WORLD[] || _SLOW_GEN[] == GENERATION[]
+        b = get(_SLOW[], key, nothing)
+        b === nothing || return b === NOTRAIT ? NOTRAIT : (b::Builder)(u)
+        CLOSED_WORLD[] && Base.inferencebarrier(_closed_miss)(X, u)
     end
-    return b === NOTRAIT ? NOTRAIT : b(t)
+    b = Base.invokelatest(_builder_for, Any[X], U)
+    b === NOTRAIT || _vc_note_builder(b, U)
+    @lock _LOCK begin
+        d = _SLOW_GEN[] == GENERATION[] ? copy(_SLOW[]) : IdDict{Any,Any}()
+        d[key] = b
+        _SLOW[] = d                                     # readers see the old table or the new one
+        _SLOW_GEN[] = GENERATION[]
+    end
+    return b === NOTRAIT ? NOTRAIT : (b::Builder)(u)
 end
 
 @noinline _closed_miss(@nospecialize(f), @nospecialize(t)) =
     error("closed world: `$f` was not verified for an argument of type $(typeof(t))")
 
-@noinline function _rule3_error(@nospecialize(f), pos::Int, @nospecialize(t))
+# --- what an entry position needs --------------------------------------------------
+
+"An entry position: argument `pos` of function type `F` called with `nargs` arguments (`-1`: a vararg position)."
+struct EntryPos{F,pos,nargs} end
+"The traits a bound or a position needs, as a type: `TraitList{Tuple{ColTable, RowTable}}`."
+struct TraitList{L<:Tuple} end
+
+"""
+    needed(EntryPos{F, pos, nargs}())
+
+The traits the workers of `F` need at a position, as a `TraitList`. A trait module defines a
+method per entry position when it is complete (`_finish_module`), and again when a later
+definition adds a bound; until then this fallback computes it.
+"""
+needed(::EntryPos{F,pos,nargs}) where {F,pos,nargs} = Base.inferencebarrier(_needed_slow)(F, pos, nargs)
+_needed_slow(@nospecialize(F), pos::Int, nargs::Int) = TraitList{Tuple{traits_at(F.instance, pos, nargs)...}}()
+
+"""
+    enter(EntryPos{F, pos, nargs}(), t)
+
+The trait object for argument `pos` of a call from ordinary code, or `NOTRAIT` if `t` has
+none of the traits the position needs. Not inlined, so that `verify_main` sees it, but
+specialized: for a known type it folds to the views' construction.
+"""
+@inline function enter(p::EntryPos, t)
+    t isa Dynamic && return opened(t)                  # a dynamic value is opened: its worker is selected by dispatch
+    t isa TObj && return Base.inferencebarrier(_rule3_error)(typeof(p), t)
+    return _assemble(needed(p), t)
+end
+
+"The trait object carrying every trait of `L` that `t` conforms to, or `NOTRAIT`."
+@generated function _assemble(::TraitList{L}, t) where {L}
+    Xs = L.parameters
+    isempty(Xs) && return :NOTRAIT
+    length(Xs) == 1 && return :(conformance($(As{Xs[1]}()), t))     # one trait: its conformance is the trait object
+    calls = [:(conformance($(As{X}()), t)) for X in Xs]
+    return :(_merge($(calls...)))
+end
+"The views of several conformances in one trait object, each trait once; `NOTRAIT` if there are none."
+@generated function _merge(cs...)
+    seen = Any[]
+    parts = Any[]
+    for (i, C) in enumerate(cs)
+        C <: TObj || continue                                # NOTRAIT, or not known here
+        for (j, V) in enumerate(C.parameters[2].parameters)
+            F = _family(V.parameters[1])
+            any(x -> x === F, seen) && continue
+            push!(seen, F)
+            push!(parts, :(getfield(cs[$i], :views)[$j]))
+        end
+    end
+    if all(C -> (C isa DataType && C <: TObj) || C === NoTrait, cs)
+        isempty(parts) && return :NOTRAIT
+        return :(TObj(($(parts...),)))
+    end
+    return :(_merge_dyn(cs))                                 # a slow-path result: its type is known only now
+end
+@noinline function _merge_dyn(cs::Tuple)
+    vs = Any[]
+    seen = Any[]
+    for c in cs
+        c isa TObj || continue
+        for v in getfield(c, :views)
+            F = _family(typeof(v).parameters[1])
+            _hasid(seen, F) && continue
+            push!(seen, F)
+            push!(vs, v)
+        end
+    end
+    isempty(vs) && return NOTRAIT
+    return TObj(Tuple(vs))
+end
+
+@noinline function _rule3_error(@nospecialize(P), @nospecialize(t))
+    f, pos = P.parameters[1].instance, P.parameters[2]
     throw(TraitBoundError("a trait object carrying $(_traitlist(typeof(t))) reached the entry of `$f` at argument $pos, " *
                           "whose methods need other traits there. Inside the trait world a value is passed on only where " *
                           "its own trait is expected (rule 2): declare every bound the callee needs, so the caller projects each."))
 end
 
-_traitlist(::Type{TObj{T,V}}) where {T,V} = join(unique(string.(_family.(Base.uniontypes(T)))), ", ")
+_traitlist(::Type{TObj{T,V}}) where {T,V} = join(unique(string.(_family.(Base.uniontypes(_decode_traits(T))))), ", ")
 
 "The lower bound of a worker's trait position, `TObj{T} where T >: Union{…}`, or `nothing`."
 function _tobj_lb(@nospecialize(p))
     q = Base.unwrap_unionall(p)
     q isa DataType && q.name === Base.typename(TObj) || return nothing
     T = q.parameters[1]
-    T isa TypeVar && return T.lb
-    return T
+    T isa TypeVar && return _decode_traits(T.lb)          # as trait patterns (`ColTable{R} where R`)
+    return _decode_traits(T)
 end
 
 """
@@ -159,58 +268,35 @@ end
 _hasid(v::Vector{Any}, @nospecialize(x)) = (for y in v; y === x && return true; end; false)
 
 "The trait objects of a vararg position, one per element, or `NOTRAIT` if an element has none of its traits."
-@noinline function enter_each(c::EntryCache, f::F, pos::Int, ts::Tuple) where {F}
-    vs = map(t -> enter(c, f, pos, -1, t), ts)
+@noinline function enter_each(p::EntryPos, ts::Tuple)
+    vs = map(t -> enter(p, t), ts)
     any(v -> v === NOTRAIT, vs) && return NOTRAIT
     return vs
 end
 
 """
-    enter_kw(cache, traits, f, k, nt)
+    enter_kw(L, f, k, nt)
 
-A bounded keyword: if `k` was supplied, its value is projected for `traits`
-(a tuple, known from the bound) and replaced in the named tuple of supplied
-keywords; a value that conforms to none of them is refused at the entry.
+A bounded keyword: if `k` was supplied, its value is translated for the traits `L` (a
+`TraitList`, from the bound) and replaced in the named tuple of supplied keywords; a value
+that conforms to none of them is refused at the entry.
 """
-@noinline function enter_kw(c::EntryCache, traits::Tuple, f::F, k::Symbol, nt::NamedTuple) where {F}
+@noinline function enter_kw(l::TraitList, f::F, k::Symbol, nt::NamedTuple) where {F}
     haskey(nt, k) || return nt
     t = getfield(nt, k)
     t isa TObj && return nt
-    if CLOSED_WORLD[] || c.gen == GENERATION[]
-        b = get(c.builders, typeof(t), nothing)
-        if b !== nothing
-            b === NOTRAIT && Base.inferencebarrier(_kw_refused)(f, k, t, traits)
-            return merge(nt, NamedTuple{(k,)}((b(t),)))
-        end
-        CLOSED_WORLD[] && Base.inferencebarrier(_closed_miss)(f, t)
-    end
-    b = Base.inferencebarrier(_enter_kw_slow)(c, traits, typeof(t))
-    b === NOTRAIT && Base.inferencebarrier(_kw_refused)(f, k, t, traits)
-    return merge(nt, NamedTuple{(k,)}((b(t),)))
+    v = t isa Dynamic ? opened(t) : _assemble(l, t)
+    v === NOTRAIT && Base.inferencebarrier(_kw_refused)(f, k, t, l)
+    return merge(nt, NamedTuple{(k,)}((v,)))
 end
-@noinline function _enter_kw_slow(c::EntryCache, traits::Tuple, @nospecialize(U))
-    b = Base.invokelatest(_builder_for, collect(Any, traits), U)
-    @lock _LOCK begin
-        d = c.gen == GENERATION[] ? copy(c.builders) : IdDict{Any,Any}()
-        d[U] = b
-        c.builders = d
-        c.gen = GENERATION[]
-    end
-    return b
-end
-@noinline _kw_refused(@nospecialize(f), k::Symbol, @nospecialize(t), traits::Tuple) =
-    throw(TraitBoundError("keyword `$k` of `$f`: a value of type $(typeof(t)) conforms to none of $(join(string.(traits), ", "))"))
+@noinline _kw_refused(@nospecialize(f), k::Symbol, @nospecialize(t), @nospecialize(l)) =
+    throw(TraitBoundError("keyword `$k` of `$f`: a value of type $(typeof(t)) conforms to none of " *
+                          "$(join(string.(typeof(l).parameters[1].parameters), ", "))"))
 
 "A `Callable` keyword: wrapped like a positional one if supplied."
 @noinline function enter_kw_callable(::Type{A}, ::Type{S}, @nospecialize(M), k::Symbol, nt::NamedTuple) where {A,S}
     haskey(nt, k) || return nt
     return merge(nt, NamedTuple{(k,)}((enter_callable(A, S, M, getfield(nt, k)),)))
-end
-
-function _builder(@nospecialize(f), pos::Int, nargs::Int, @nospecialize(U))
-    b = _builder_for(traits_at(f, pos, nargs), U)
-    b isa Builder && _check_bound_params(f, pos, nargs, U, b)
-    return b
 end
 
 "The trait patterns each worker of `f` needs at position `pos` (`StateVector{Float64, R}`), one list per method."
@@ -248,26 +334,29 @@ function _pmatch(@nospecialize(Xi), @nospecialize(Yp))
     return true
 end
 
-"A value whose conformance is at parameters no method's bounds accept is refused at the entry, naming them."
-function _check_bound_params(@nospecialize(f), pos::Int, nargs::Int, @nospecialize(U), b::Builder)
-    insts = Any[]
-    for sp in b.specs
-        push!(insts, typeof(sp).parameters[1])
+"""
+A worker signature no method of `f` accepts: a value conforms, but at parameters no bound
+accepts. Raised at the signature's first call (`_check_once`), naming the bounds.
+"""
+function _no_worker_error(@nospecialize(sig))
+    ps = sig.parameters
+    f = ps[1].instance
+    nargs = length(ps) - 1
+    for pos in 1:nargs
+        T = ps[pos + 1]
+        T isa DataType && T <: TObj || continue
+        insts = Any[V.parameters[1] for V in T.parameters[2].parameters]
+        pats = bound_patterns(f, pos, nargs)
+        isempty(pats) && continue
+        any(p -> all(Yp -> any(Xi -> _pmatch(Xi, Yp), insts), p), pats) && continue
+        need = join(unique([join(string.(Base.rewrap_unionall.(p, Ref(Any))), " and ") for p in pats]), "; or ")
+        throw(TraitBoundError("a value conforming as $(join(string.(insts), ", ")) was passed to `$f` at argument $pos, " *
+                              "whose bounds need a value conforming at the parameters they fix: $need"))
     end
-    pats = bound_patterns(f, pos, nargs)
-    isempty(pats) && return nothing
-    for ps in pats
-        all(Yp -> any(Xi -> _pmatch(Xi, Yp), insts), ps) && return nothing
-    end
-    Base.inferencebarrier(_bound_params_error)(f, pos, U, insts, pats)
-end
-@noinline function _bound_params_error(@nospecialize(f), pos::Int, @nospecialize(U), insts, pats)
-    need = join(unique([join(string.(Base.rewrap_unionall.(ps, Ref(Any))), " and ") for ps in pats]), "; or ")
-    throw(TraitBoundError("$U conforms as $(join(string.(insts), ", ")), but `$f` needs at argument $pos " *
-                          "a value conforming at the parameters its bounds fix: $need"))
+    throw(TraitBoundError("no trait-bounded method of `$f` accepts trait objects of $(join(string.(ps[2:end]), ", "))"))
 end
 
-"The builder of a trait object carrying the traits `needed` for a value of type `U`, or `NOTRAIT`."
+"The views of a value of type `U` for the traits `needed`: a `Builder`, or `NOTRAIT`."
 function _builder_for(needed::Vector{Any}, @nospecialize(U))
     found = Any[]                    # (X, ProjRec)
     for X in needed
@@ -282,9 +371,9 @@ function _builder_for(needed::Vector{Any}, @nospecialize(U))
         push!(seen, Y)
         w = Y === X ? proj_witness(X, U, p) : witness(Y, p.R)
         w === nothing && throw(TraitBoundError("$(U) forwards $X to $(p.R), which does not implement $Y"))
-        K, fs = _key_and_slots(Y, p, U)
+        K, fs = _key_and_slots(Y, p, U, w)
         r = p.field == 0 ? SELF : _slot(U, p.field)
-        push!(specs, VSpec{_instance(Y, K),typeof(w),K,length(fs)}(w, r, fs))
+        push!(specs, VSpec{_instance(Y, K),typeof(w),K,length(fs),_partstype(K)}(w, r, fs))
     end
     return Builder(Tuple(specs))
 end
@@ -294,19 +383,35 @@ _slot(@nospecialize(U), i::Int) = Slot(Int(fieldoffset(U, i)), i)
 "The stored field of `U` that declared field `f` maps to: written in the conformance, else the same name."
 _mapped(p::ProjRec, f::Symbol) = (m = p.fmap; m === nothing ? f : get(m, f, f))
 """
-The key of trait `Y` for user type `U` conforming through `p`, and the slots of `Y`'s
-declared fields: the implementing type alone for a trait without fields; else a `Key`
-with the declared fields' types in `U` (the implementing type `Nothing` for a trait with
-fields only).
+The key of trait `Y` for user type `U` conforming through `p` with witness `w`, and the
+slots of `Y`'s declared fields: the implementing type alone for a trait without fields;
+else a `Key` with the declared fields' types in `U`. The implementing type is `Nothing`
+when there is none (note "Terms"): every operation served by a default, as in a trait with
+fields only.
 """
-function _key_and_slots(@nospecialize(Y), p::ProjRec, @nospecialize(U))
+function _key_and_slots(@nospecialize(Y), p::ProjRec, @nospecialize(U), @nospecialize(w))
     fl = trait_fields(Y)
     isempty(fl) && return p.R, ()
     names = Symbol[f for (f, _) in fl]
     idx = Int[Base.fieldindex(U, _mapped(p, f)) for f in names]
-    I = isempty(_ops(Y)) ? Nothing : p.R
+    I = _no_implementing_type(Y, w) ? Nothing : p.R
     F = NamedTuple{Tuple(names),Tuple{Any[fieldtype(U, i) for i in idx]...}}
     return Key{I,F}, Tuple(_slot(U, i) for i in idx)
+end
+"""
+Whether a conformance of trait `Y` with witness `w` has no implementing type: every
+operation is served by a default (or there are none), the trait's declarations do not name
+`Self`, and every parameter is defined by a field, so nothing depends on the type.
+"""
+function _no_implementing_type(@nospecialize(Y), @nospecialize(w))
+    ops = _ops(Y)
+    isempty(ops) && return true
+    w isa Impl || return false
+    D = typeof(w).parameters[1]
+    all(op -> op in D, ops) || return false
+    Base.invokelatest(trait_uses_self, Y)::Bool && return false
+    fps = Base.invokelatest(trait_field_params, Y)::Tuple
+    return all(q -> q in fps, trait_params(Y))
 end
 
 "Whether `f` has the tagged untyped fallback for these arguments (a vararg entry accepts the tag too, so `hasmethod` is not enough)."
@@ -446,6 +551,37 @@ function enter_callables(sigs::Tuple, @nospecialize(f))
     return CMulti(map(s -> enter_callable(s[1], s[2], s[3], f), sigs))
 end
 
+"""
+    DynamicFn{A, S}
+
+A function in `DynamicCall` mode as a value of fixed type: a pointer to its code compiled for
+`A`, its result asserted to `S`. What a library stores in a field for a function from above
+(`Callable` in `DynamicCall` mode is already the dynamic value of a function, note "Dynamic
+values"): its type does not depend on the function.
+"""
+const DynamicFn{A,S} = CObj{A,S,Erased{A,S}}
+"""
+    dynamic_fn(A, S, f) -> DynamicFn{A, S}
+
+`f` as a dynamic call at the signature `A -> S`, made in ordinary code: the boundary's
+translation of a `Callable` bound in `DynamicCall` mode, for a library that stores the
+function (a model's right-hand side, a callback).
+"""
+dynamic_fn(::Type{A}, ::Type{S}, f) where {A,S} = f isa DynamicFn{A,S} ? f : CObj{A,S}(Erased{A,S}(f isa CallAs ? f.f : f))
+
+"""
+    Dynamic{X}(x)
+
+A dynamic value of a trait-world value `x` that conforms to `X` but is no trait object: a
+library's own type (an integrator handed to callbacks as `Dynamic{IntegratorView}`).
+"""
+function Dynamic{X}(x) where {X}
+    x isa TObj && return Dynamic{X}(x::TObj)
+    v = _assemble(TraitList{Tuple{_family(X)}}(), x)
+    v === NOTRAIT && throw(TraitBoundError("a $(typeof(x)) does not conform to $X"))
+    return Dynamic{X}(v)
+end
+
 # --- results like the input (note "Results like the input") -----------------------
 
 "Functions with a method declared `::Like{t}`: their workers return a pending result, which their entry makes into the caller's type."
@@ -492,7 +628,11 @@ function _like_out(res::LikeResult, us::Tuple, vs::Tuple)
         X = _family(typeof(v).parameters[1])
         if u isa Dynamic
             # a dynamic value in, a dynamic value of the same trait out
-            nu = _invert(X, v, getfield(v, :o), res)
+            o = getfield(v, :o)
+            o === nothing && getfield(getfield(v, :r), :off) >= 0 && throw(TraitBoundError(
+                "a dynamic value of an immutable type keeps the parts $X can see, not the whole object, " *
+                "so a result like it cannot be rebuilt; pass the value itself"))
+            nu = _invert(X, v, o === nothing ? getfield(getfield(v, :parts), 1) : o, res)
             b = _builder_for(Any[X], typeof(nu))
             b === NOTRAIT && throw(TraitBoundError("$(typeof(nu)) does not conform to $X"))
             return typeof(u)(b(nu))

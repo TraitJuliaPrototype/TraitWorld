@@ -103,21 +103,21 @@ is the earlier spelling and passes unchanged. Returns the header, the block, and
 function _keys_form(header, block)
     h = header isa Expr && header.head === :(<:) ? header.args[1] : header
     name = h isa Symbol ? h : (h isa Expr && h.head === :curly ? h.args[1] : nothing)
-    name isa Symbol || return header, block, Tuple{Symbol,Symbol}[]
+    name isa Symbol || return header, block, Tuple{Symbol,Symbol,Any}[]
     hps = h isa Symbol ? Any[] : h.args[2:end]
     pnames = Symbol[p isa Symbol ? p : p.args[1] for p in hps]
     ops = block === nothing ? Any[] : Any[_opcall(ex) for ex in block.args if _opcall(ex) !== nothing]
     firsttypes = Any[length(c.args) >= 2 && c.args[2] isa Expr && c.args[2].head === :(::) ? c.args[2].args[end] : nothing for c in ops]
     # the earlier spelling: the operations' first argument typed by the header's last parameter
-    !isempty(pnames) && any(t -> t === pnames[end], firsttypes) && return header, block, Tuple{Symbol,Symbol}[]
+    !isempty(pnames) && any(t -> t === pnames[end], firsttypes) && return header, block, Tuple{Symbol,Symbol,Any}[]
     if block === nothing && h isa Symbol
         # a bundle, `@trait Table <: (ColTable, RowTable)`
-        return (header isa Expr ? Expr(:(<:), Expr(:curly, name, :Self), header.args[2]) : Expr(:curly, name, :Self)), block, Tuple{Symbol,Symbol}[]
+        return (header isa Expr ? Expr(:(<:), Expr(:curly, name, :Self), header.args[2]) : Expr(:curly, name, :Self)), block, Tuple{Symbol,Symbol,Any}[]
     end
     newh = Expr(:curly, name, hps..., :Self)
     newheader = header isa Expr && header.head === :(<:) ? Expr(:(<:), newh, header.args[2]) : newh
-    block === nothing && return newheader, block, Tuple{Symbol,Symbol}[]
-    fieldparams = Tuple{Symbol,Symbol}[]
+    block === nothing && return newheader, block, Tuple{Symbol,Symbol,Any}[]
+    fieldparams = Tuple{Symbol,Symbol,Any}[]
     newblock = Expr(:block)
     for ex in block.args
         c = _opcall(ex)
@@ -126,8 +126,12 @@ function _keys_form(header, block)
             continue
         end
         fd = ex isa Expr && ex.head === :macrocall && ex.args[1] === Symbol("@const") ? ex.args[end] : ex
-        if fd isa Expr && fd.head === :(::) && length(fd.args) == 2 && fd.args[1] isa Symbol && fd.args[2] isa Symbol && fd.args[2] in pnames
-            push!(fieldparams, (fd.args[2], fd.args[1]))
+        if fd isa Expr && fd.head === :(::) && length(fd.args) == 2 && fd.args[1] isa Symbol
+            # a field defines the parameters its declared type mentions, by matching (`u::U`, `data::Vector{T}`);
+            # the first field that mentions a parameter defines it
+            for q in pnames
+                _mentions(fd.args[2], q) && !any(x -> x[1] === q, fieldparams) && push!(fieldparams, (q, fd.args[1], fd.args[2]))
+            end
         end
         push!(newblock.args, ex)
     end
@@ -165,8 +169,7 @@ end
 
 "The `where` clause of a method on trait objects carrying trait `name`: a type variable per parameter and the representation."
 function _tobj_where(name, np::Int, T::Symbol)
-    vs = [gensym(:P) for _ in 1:np+1]
-    return Any[vs..., Expr(:(>:), T, Expr(:curly, name, vs...))]
+    return Any[Expr(:(>:), T, name)]                 # the family: no free type variable (see `PTag`)
 end
 
 macro trait(header, block = nothing)
@@ -213,11 +216,33 @@ macro trait(header, block = nothing)
     end
     length(unique(first.(fdecls))) == length(fdecls) || error("@trait: a field is declared twice in `$name`")
     # a parameter that types a field is that field's type (note "Declaring a trait": a field defines its type's parameter)
-    for (p, f) in fieldparams
+    matched = Symbol[]
+    for (p, f, Tex) in fieldparams
         any(ex -> ex isa Expr && ex.head === :(=) && ex.args[1] === p, block.args) &&
             error("@trait: parameter `$p` of `$name` is defined by the field `$f` and by an equation; define it once")
-        push!(out, :($TW.param(::Type{$name}, ::Val{$(QuoteNode(p))}, ::Type{K__}) where {K__ <: $TW.Key} = $TW._keyfield(K__, $(QuoteNode(f)))))
+        # at a conforming type itself (an implementation's check, before a key exists): its field of that name
+        push!(out, :($TW.param(::Type{$name}, ::Val{$(QuoteNode(p))}, ::Type{K__}) where {K__} =
+                         $TW.param($name, Val($(QuoteNode(p))), $TW.Key{K__,NamedTuple{($(QuoteNode(f)),),Tuple{fieldtype(K__, $(QuoteNode(f)))}}})))
+        if Tex === p
+            push!(out, :($TW.param(::Type{$name}, ::Val{$(QuoteNode(p))}, ::Type{K__}) where {K__ <: $TW.Key} = $TW._keyfield(K__, $(QuoteNode(f)))))
+        else
+            # matched as Julia matches a `where` clause: `data::Vector{T}` against a `Vector{Float64}` field gives `T = Float64`
+            if !(f in matched)
+                push!(matched, f)
+                qs = [q for q in pnames if _mentions(Tex, q)]
+                push!(out, :($TW._fieldmatch(::Type{$name}, ::Val{$(QuoteNode(f))}, ::Type{$Tex}) where {$(qs...)} =
+                                 (; $([Expr(:kw, q, q) for q in qs]...))))
+            end
+            push!(out, :($TW.param(::Type{$name}, ::Val{$(QuoteNode(p))}, ::Type{K__}) where {K__ <: $TW.Key} =
+                             getfield($TW._fieldmatch($name, Val($(QuoteNode(f))), $TW._keyfield(K__, $(QuoteNode(f)))), $(QuoteNode(p)))))
+        end
     end
+    isempty(fieldparams) || push!(out, :($TW.trait_field_params(::Type{$name}) = $(Tuple(p for (p, _, _) in fieldparams))))
+    # whether the declarations name the implementing type: then a conformance always has one (note "Terms")
+    uses_self = any(d -> any(a -> _mentions(a[2], Rsym), d.args) || _mentions(d.ret, Rsym), decls) ||
+                any(ex -> ex isa Expr && ex.head === :(=) && ex.args[1] isa Symbol && ex.args[1] in pnames, block.args) ||
+                any(x -> _mentions(x[2], Rsym), fdecls)
+    uses_self && push!(out, :($TW.trait_uses_self(::Type{$name}) = true))
     sigs = [(d.name, length(d.args)) for d in decls]
     length(unique(sigs)) == length(sigs) || error("@trait: an operation is declared twice with the same arity in `$name`")
     names = unique([d.name for d in decls])

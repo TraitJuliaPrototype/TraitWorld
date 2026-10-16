@@ -71,22 +71,30 @@ _impl(::Type{Key{I,F}}) where {I,F} = I
 _keyfield(::Type{Key{I,F}}, f::Symbol) where {I,F} = fieldtype(F, f)
 
 """
-A view: the user's object `o` itself, the witness, and the slots of the implementing
-value and of the declared fields (note "Declaring a trait": every access reads the
-user's object). Its type depends on the trait and the key, never on the user's type,
-so a worker compiled per key serves every conforming type.
+A view: the witness, the user's object `o` when its type is mutable (`nothing` otherwise),
+the slots of the implementing value and of the declared fields, and `parts`, those values
+held, typed by the key (note "Declaring a trait": a mutable object is read through, an
+immutable one held, which is equivalent because none of its fields can be rebound). Its
+type depends on the trait and the key, never on the user's type, so one worker compiled
+per key serves every conforming type, mutable or immutable, and an immutable user type is
+never boxed.
 """
-struct View{X,W,K,N} <: AbstractView{X,W,K}
+struct View{X,W,K,N,P} <: AbstractView{X,W,K}
     w::W
     o::Any
     r::Slot
     fs::NTuple{N,Slot}
+    parts::P
 end
 "A view of a value that is its own implementing value, with no declared fields: generic implementations' constraints, `Like` results."
-View{X}(w::W, r) where {X,W} = View{X,W,typeof(r),0}(w, r, SELF, ())
+View{X}(w::W, r) where {X,W} = View{X,W,typeof(r),0,Tuple{typeof(r)}}(w, ismutable(r) ? r : nothing, SELF, (), (r,))
 
-"The implementing value a view stands for: the user's object, or its forwarding field, read now."
-@inline _rep(v::View{X,W,K}) where {X,W,K} = _loadpart(_impl(K), getfield(v, :o), getfield(v, :r))
+"The implementing value a view stands for: the user's object, or its forwarding field, read now (held for an immutable type)."
+@inline function _rep(v::View{X,W,K}) where {X,W,K}
+    o = getfield(v, :o)
+    o === nothing && return getfield(getfield(v, :parts), 1)
+    return _loadpart(_impl(K), o, getfield(v, :r))
+end
 "The key of a view type."
 _reptype(::Type{<:AbstractView{X,W,K}}) where {X,W,K} = K
 
@@ -132,6 +140,8 @@ end
     getfield(s, :off) < 0 && return o::T
     return _loadfield(T, o, s)
 end
+"No implementing type (every operation served by a default): there is no implementing value."
+@inline _loadpart(::Type{Nothing}, o, s::Slot) = nothing
 @generated function _loadfield(::Type{T}, o, s::Slot) where {T}
     k = _storage(T)
     k === :singleton && return :($(T.instance))
@@ -162,8 +172,82 @@ struct TObj{T,V<:Tuple}
     views::V
     TObj{T,V}(views::V) where {T,V<:Tuple} = new{T,V}(views)
 end
+"The trait family of a trait instance (`ArrayLike{Float64, 1, Vector{Float64}}` gives `ArrayLike`), or `X` itself."
+_family(@nospecialize(X)) = (u = Base.unwrap_unionall(X); u isa DataType && u <: Trait ? u.name.wrapper : X)
+"""
+    PTag{F, i, v}
+
+In a trait object's trait set: parameter `i` of trait family `F` has the value `v`. The set is a
+union of trait families and these tags, never of trait instances with type variables, so a
+worker's signature, `TObj{T} where T >: Union{StateVector, PTag{StateVector, 1, Float64}}`,
+has no static parameter that its argument does not determine. (With one, `T >: StateVector{Float64, R}`,
+Julia cannot specialize the call and passes the trait object boxed.)
+"""
+struct PTag{F,i,v} end
+_isptag(@nospecialize(X)) = X isa DataType && X <: PTag
+
+"The trait set of trait instances: their families, and a tag per parameter they fix (the implementing type excluded)."
+function _encode_traits(insts)
+    ms = Any[]
+    for X in insts
+        F = _family(X)
+        any(m -> m === F, ms) || push!(ms, F)
+        u = Base.unwrap_unionall(X)
+        u isa DataType || continue
+        ps = u.parameters
+        for i in 1:length(ps)-1
+            p = ps[i]
+            p isa TypeVar && continue
+            t = PTag{F,i,p}
+            any(m -> m === t, ms) || push!(ms, t)
+        end
+    end
+    return Union{ms...}
+end
+
+"""
+A trait set or a worker's lower bound decoded into trait patterns: each family applied to the
+parameters its tags fix and a type variable for each other one, the implementing type last
+(`StateVector{Float64, R} where R`). What the machinery reasons about.
+"""
+function _decode_traits(@nospecialize(lb))
+    ms = Base.uniontypes(lb)
+    pats = Any[]
+    for F in ms
+        (_isptag(F) || !is_trait(F)) && continue
+        u = Base.unwrap_unionall(F)
+        np = length(u.parameters)
+        args = Any[]
+        vars = TypeVar[]
+        for i in 1:np
+            v = nothing
+            if i < np
+                for m in ms
+                    if _isptag(m) && m.parameters[1] === F && m.parameters[2] == i && !(m.parameters[3] isa TypeVar)
+                        v = m.parameters[3]
+                        break
+                    end
+                end
+            end
+            if v === nothing
+                tv = TypeVar(i == np ? :Self : Symbol(:P, i))
+                push!(vars, tv)
+                push!(args, tv)
+            else
+                push!(args, v)
+            end
+        end
+        body = Core.apply_type(F, args...)
+        for tv in reverse(vars)
+            body = UnionAll(tv, body)
+        end
+        push!(pats, body)
+    end
+    return Union{pats...}
+end
+
 @generated function _traitset(::Type{V}) where {V<:Tuple}
-    return Union{Any[p.parameters[1] for p in V.parameters]...}
+    return _encode_traits(Any[p.parameters[1] for p in V.parameters])
 end
 @inline TObj(views::Tuple) = TObj{_traitset(typeof(views)),typeof(views)}(views)
 
@@ -173,8 +257,6 @@ end
 
 # --- trait parameters: associated types (note "Declaring a trait": Parameters) ------------
 
-"The trait family of a trait instance (`ArrayLike{Float64, 1, Vector{Float64}}` gives `ArrayLike`), or `X` itself."
-_family(@nospecialize(X)) = (u = Base.unwrap_unionall(X); u isa DataType && u <: Trait ? u.name.wrapper : X)
 "`trait_params(X)`: the names of trait `X`'s parameters besides the representation, in order."
 trait_params(@nospecialize(X)) = ()
 """
@@ -191,8 +273,8 @@ function _instance(@nospecialize(X), @nospecialize(R))
     isempty(ps) && return X{R}
     return Core.apply_type(X, Any[param(X, Val(p), R) for p in ps]..., R)
 end
-"Whether a trait object carrying the traits `T` (a union of instances) carries `X`, a family or a partly applied instance."
-_carries(@nospecialize(T), @nospecialize(X)) = any(Y -> Y <: X, Base.uniontypes(T))
+"Whether a trait object carrying the trait set `T` carries `X`, a family or a partly applied instance."
+_carries(@nospecialize(T), @nospecialize(X)) = any(Y -> Y <: X, Base.uniontypes(_decode_traits(T)))
 
 # --- dynamic values ----------------------------------------------------------
 
@@ -217,7 +299,7 @@ end
 Dynamic{X}(d::Dynamic{X}) where {X} = d
 Base.convert(::Type{Dynamic{X}}, t::TObj) where {X} = Dynamic{X}(t)
 @noinline _dyn_refuse(@nospecialize(X), @nospecialize(T)) =
-    throw(ArgumentError("a trait object carrying $(join(string.(Base.uniontypes(T)), ", ")) cannot be kept as a Dynamic{$X}"))
+    throw(ArgumentError("a trait object carrying $(join(string.(Base.uniontypes(_decode_traits(T))), ", ")) cannot be kept as a Dynamic{$X}"))
 "The trait object a dynamic value keeps: what a bound opens."
 @inline opened(d::Dynamic) = getfield(d, :t)
 # equal when they keep the same trait object: same representation type, same implementation, egal data
@@ -295,6 +377,12 @@ end
 trait_fields(@nospecialize(X)) = ()
 "`field_type(X, Val(f), R)`: the declared type of field `f` at representation `R`."
 function field_type end
+"`trait_uses_self(X)`: whether trait `X`'s declarations name the implementing type (`Self` in an operation's types, or a defining equation)."
+trait_uses_self(@nospecialize(X)) = false
+"`_fieldmatch(X, Val(f), FT)`: the parameters field `f` of trait `X` defines, matched against its type `FT` in a conforming type (methods added by @trait)."
+function _fieldmatch end
+"`trait_field_params(X)`: the parameters of `X` that its declared fields define (`u::U`, `data::Vector{T}`)."
+trait_field_params(@nospecialize(X)) = ()
 "`field_isrep(X, Val(f))`: whether field `f` is declared with the implementing type: it names the forwarding field of a one-line conformance."
 field_isrep(@nospecialize(X), @nospecialize(f)) = false
 
@@ -319,15 +407,20 @@ _fieldkeytype(::Type{X}, ::Val{f}, ::Type{K}) where {X,f,K} = K <: Key ? _keyfie
     v = viewof(t, X)
     return _fget(X, Val(f), getfield(v, :w), v, _reptype(typeof(v)))
 end
-@inline _fget(::Type{X}, ::Val{f}, w, v, ::Type{K}) where {X,f,K} =
-    _loadpart(_fieldkeytype(X, Val(f), K), getfield(v, :o), getfield(v, :fs)[_fieldpos(X, Val(f))])
+@inline function _fget(::Type{X}, ::Val{f}, w, v, ::Type{K}) where {X,f,K}
+    o = getfield(v, :o)
+    o === nothing && return getfield(getfield(v, :parts), 1 + _fieldpos(X, Val(f)))
+    return _loadpart(_fieldkeytype(X, Val(f), K), o, getfield(v, :fs)[_fieldpos(X, Val(f))])
+end
 "A field `f` of trait `X` written on a trait object: a store into the user's object, as `u.f = x` in plain Julia."
 @inline function fieldset!(::Type{X}, ::Val{f}, t::TObj, x) where {X,f}
     v = viewof(t, X)
     K = _reptype(typeof(v))
     T = _fieldkeytype(X, Val(f), K)
     y = x::T
-    _storefield(T, getfield(v, :o), getfield(v, :fs)[_fieldpos(X, Val(f))], y)
+    o = getfield(v, :o)
+    o === nothing && Base.inferencebarrier(_readonly)(X, f)     # the conformance check refuses writable fields on immutable types
+    _storefield(T, o, getfield(v, :fs)[_fieldpos(X, Val(f))], y)
     return y
 end
 

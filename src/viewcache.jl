@@ -10,7 +10,7 @@
 #
 # Recording: `_check_once` notes each worker signature it checks (a signature
 # a loaded image holds was checked when that image was built, and is not
-# noted); `_enter_slow` notes each builder. Flushing (at exit, or
+# noted); `_conformance_slow` notes each builder. Flushing (at exit, or
 # `viewcache_flush`) groups the signatures by view, writes one package per
 # view (`TWView_<hash>`, under `viewcache_dir()`) and precompiles it in a
 # separate, niced process; its precompilation checks each signature and

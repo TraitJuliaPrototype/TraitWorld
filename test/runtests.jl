@@ -468,8 +468,8 @@ end
     VMain.main(String[]); VMain.main(["m"])
     r = verify_main(VMain.main, (Vector{String},))
     @test isclosed(r)
-    @test count(p -> p.first === :enter, r.targets) == 2         # a builder for each user type the program can pass
-    @test count(p -> p.first === :worker, r.targets) == 4        # colmean and total at two representations
+    # entries are ordinary inlined methods (keys-plan §6): for types the program knows, every trait call is static
+    @test count(p -> p.first in (:enter, :worker), r.targets) == 0
     @test isempty(r.problems) && isempty(r.findings)
 end
 
@@ -786,7 +786,7 @@ end
     r = verify_main(VKW.main, (Vector{String},))
     @test isclosed(r)
     @test count(p -> p.first === :declared, r.targets) == 4           # figure, addpoints!, npoints, title
-    @test count(p -> p.first === :worker, r.targets) >= 2             # colz's keyword worker, plot_it's worker
+    @test count(p -> p.first === :worker, r.targets) == 0             # every trait call static: entries are ordinary methods
     @test any(p -> p.first === :declared && p.second <: Tuple{typeof(FakeOutside.newfig)}, r.targets)
 end
 
@@ -971,3 +971,4 @@ include("params.jl")
 include("like.jl")
 include("printing.jl")
 include("keys_syntax.jl")
+include("runtime.jl")

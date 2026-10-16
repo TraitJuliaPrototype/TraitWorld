@@ -67,7 +67,12 @@ _prologue() = Any[:(const __trait_module__ = true),
                   :(const __tw_entries__ = Dict{Any,Vector{Any}}()),
                   :(const __tw_plain__ = Dict{Any,Vector{Any}}()),
                   :(const __tw_extended__ = Set{Any}()),          # other modules' functions given workers here
-                  :(const __tw_methods_seen__ = Base.IdSet{Method}())]
+                  :(const __tw_methods_seen__ = Base.IdSet{Method}()),
+                  :(const __tw_positions__ = Any[]),          # (function, position, nargs) of the entries' trait positions
+                  :(const __tw_finished__ = Ref(false)),
+                  # registered with the patched Julia's filter from its start: the methods it defines
+                  # while it loads are trait-world definitions, which invalidate as in plain Julia
+                  :($TraitWorld._filter_add!(@__MODULE__))]
 _epilogue() = :($TraitWorld._finish_module(@__MODULE__))
 
 function _transform_all(stmts)
@@ -438,7 +443,8 @@ function _rewrite_fdef(mod::Module, ex)
             for Y in trait_closure(F)
                 any(z -> z === Y, fams) && continue
                 push!(fams, Y)
-                push!(closure, _pattern_expr!(Y === F ? X : Y, wl))
+                # the family and a tag per parameter the bound fixes: no free type variable (see `PTag`)
+                append!(closure, Any[_bound_members(Y === F ? X : Y)...])
             end
         end
         push!(wl, Expr(:(>:), T, Expr(:curly, :Union, closure...)))
@@ -525,17 +531,13 @@ function _rewrite_fdef(mod::Module, ex)
         for (i, x) in enumerate(args)
             if x.kind === :trait
                 v = gensym(Symbol(x.name, :_view))
-                cache = gensym(Symbol(x.name, :_cache))
-                push!(rest, :(const $cache = $TraitWorld.EntryCache()))
-                push!(stmts, :($v = $TraitWorld.enter($cache, $fname, $i, $nargs, $(x.name))))
+                push!(stmts, :($v = $TraitWorld.enter($TraitWorld.EntryPos{typeof($fname),$i,$nargs}(), $(x.name))))
                 fb = haskw ? :($TraitWorld.kwfallback($ntname, $fname, $(callnames...))) : :($TraitWorld.fallback($fname, $(callnames...)))
                 push!(stmts, :($v === $TraitWorld.NOTRAIT && return $fb))
                 push!(newnames, v)
             elseif x.kind === :vararg_trait
                 v = gensym(Symbol(x.name, :_views))
-                cache = gensym(Symbol(x.name, :_cache))
-                push!(rest, :(const $cache = $TraitWorld.EntryCache()))
-                push!(stmts, :($v = $TraitWorld.enter_each($cache, $fname, $i, $(x.name))))
+                push!(stmts, :($v = $TraitWorld.enter_each($TraitWorld.EntryPos{typeof($fname),$i,-1}(), $(x.name))))
                 fb = haskw ? :($TraitWorld.kwfallback($ntname, $fname, $(callnames...))) : :($TraitWorld.fallback($fname, $(callnames...)))
                 push!(stmts, :($v === $TraitWorld.NOTRAIT && return $fb))
                 push!(newnames, Expr(:..., v))
@@ -558,10 +560,8 @@ function _rewrite_fdef(mod::Module, ex)
             x.kind in (:trait, :callable) || continue
             k = QuoteNode(x.name)
             if x.kind === :trait
-                cache = gensym(Symbol(x.name, :_kwcache))
-                push!(rest, :(const $cache = $TraitWorld.EntryCache()))
-                tr = Expr(:tuple, x.traits...)
-                push!(stmts, :($ntname = $TraitWorld.enter_kw($cache, $tr, $fname, $k, $ntname)))
+                tl = :($TraitWorld.TraitList{Tuple{$(x.traits...)}}())
+                push!(stmts, :($ntname = $TraitWorld.enter_kw($tl, $fname, $k, $ntname)))
             else
                 push!(stmts, :($ntname = $TraitWorld.enter_kw_callable($(x.A), $(x.S), $(x.M === nothing ? :nothing : x.M), $k, $ntname)))
             end
@@ -578,12 +578,20 @@ function _rewrite_fdef(mod::Module, ex)
         kept = Any[w for w in wheres if any(x -> x.kind in (:plain, :vararg) && x.ann !== nothing && _uses(x.ann, _wherevar(w)), args)]
         esig = haskw ? Expr(:call, fname, Expr(:parameters, Expr(:..., kwname)), eargs...) : Expr(:call, fname, eargs...)
         isempty(kept) || (esig = Expr(:where, esig, kept...))
-        push!(rest, Expr(:function, esig, Expr(:block, stmts...)))
+        # an ordinary method, inlined into a typed caller (keys-plan §6): there it runs at plain speed
+        push!(rest, Expr(:macrocall, GlobalRef(Base, Symbol("@inline")), LineNumberNode(0, :none),
+                         Expr(:function, esig, Expr(:block, stmts...))))
         if entries !== nothing
             push!(get!(entries, key, Any[]), pattern)
         end
     end
     push!(rest, :($TraitWorld._check_methods(@__MODULE__, $(QuoteNode(fname)))))
+    # the traits each trait position needs: fixed when the module is complete, updated by later definitions
+    nargs_w = nva == 0 ? length(args) : -1
+    for (i, x) in enumerate(args)
+        x.kind in (:trait, :vararg_trait) || continue
+        push!(rest, :($TraitWorld._note_position(@__MODULE__, $fname, $i, $(x.kind === :vararg_trait ? -1 : nargs_w))))
+    end
     key[1] !== mod && isdefined(mod, :__tw_extended__) && push!(mod.__tw_extended__, key)
     push!(rest, :($TraitWorld._bump!()))
     return worker, rest
@@ -698,10 +706,47 @@ function _check_entries_intact(mod::Module, fname)
 end
 
 """
-At the end of a trait module: every pair of workers whose bounds at a
-position are unrelated needs a worker with both bounds (resolving method).
+A trait position of an entry, noted where its worker is defined. Once the module is
+complete, `needed` is fixed for it; a definition after that (at the prompt) updates it.
+"""
+function _note_position(mod::Module, @nospecialize(f), pos::Int, nargs::Int)
+    isdefined(mod, :__tw_positions__) || return nothing
+    k = (f, pos, nargs)
+    any(x -> x[1] === f && x[2] == pos && x[3] == nargs, mod.__tw_positions__) || push!(mod.__tw_positions__, k)
+    mod.__tw_finished__[] && _fix_needed!(mod, f, pos, nargs)
+    return nothing
+end
+
+"""
+Define `needed(EntryPos{typeof(f), pos, nargs})` in `mod`: the traits the workers of `f` need
+there, as a constant, so that an entry folds for a known type. Redefined only when they change.
+"""
+function _fix_needed!(mod::Module, @nospecialize(f), pos::Int, nargs::Int)
+    P = EntryPos{typeof(f),pos,nargs}
+    L = Tuple{traits_at(f, pos, nargs)...}
+    m = Base._which(Tuple{typeof(needed),P}; raise = false)
+    if m !== nothing && Base.unwrap_unionall(m.method.sig).parameters[2] === P
+        typeof(Base.invokelatest(needed, P())).parameters[1] == L && return nothing
+        m.method.module === mod || ccall(:jl_generating_output, Cint, ()) == 0 || throw(TraitBoundError(
+            "$mod adds bounds to `$f`, whose entry belongs to $(m.method.module): while a package is built, " *
+            "only the entry's own module may change what its positions need"))
+    end
+    Core.eval(mod, :($TraitWorld.needed(::$P) = $TraitWorld.TraitList{$L}()))
+    return nothing
+end
+
+"""
+At the end of a trait module: the entry positions' needs are fixed, and every pair of
+workers whose bounds at a position are unrelated needs a worker with both bounds.
 """
 function _finish_module(mod::Module)
+    if isdefined(mod, :__tw_positions__)
+        for (f, pos, nargs) in mod.__tw_positions__
+            _fix_needed!(mod, f, pos, nargs)
+        end
+        mod.__tw_finished__[] = true
+    end
+    _refuse_overrides()
     # imports made outside the checked statements (before the block) count too
     for u in ccall(:jl_module_usings, Any, (Any,), mod)::Vector{Any}
         u isa Module || continue
@@ -744,6 +789,18 @@ function check_entry_ambiguities(@nospecialize(f))
     isempty(problems) || throw(TraitBoundError("ambiguous methods of `$f`:\n  " * join(problems, "\n  ") *
                                                "\nAdd a method for their intersection."))
     return nothing
+end
+
+"A trait bound as members of a worker's lower bound: its family, and `PTag{F, i, v}` for each parameter it fixes."
+function _bound_members(@nospecialize(X))
+    u = Base.unwrap_unionall(X)
+    fam = u.name.wrapper
+    out = Any[fam]
+    ps = u.parameters
+    for i in 1:length(ps)-1
+        ps[i] isa TypeVar || push!(out, PTag{fam,i,ps[i]})
+    end
+    return out
 end
 
 """

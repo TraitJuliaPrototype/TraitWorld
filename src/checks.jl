@@ -52,7 +52,7 @@ end
 "`Type{<:TObj}` or `Type{<:CObj}`: a declaration of the machinery's own types, not a look at the user's."
 _handle_type(@nospecialize(T)) = T isa DataType && T <: Type && (T.parameters[1] <: TObj || T.parameters[1] <: CObj)
 
-_traitnames(@nospecialize(T)) = _istobj(T) ? join(unique(string.(_family.(Base.uniontypes(T.parameters[1])))), ", ") : string(T)
+_traitnames(@nospecialize(T)) = _istobj(T) ? join(unique(string.(_family.(Base.uniontypes(_decode_traits(T.parameters[1]))))), ", ") : string(T)
 
 """
     worker_problems(sig) -> Vector{String}
@@ -323,16 +323,24 @@ its own flag, embedded in its compiled code, so the check runs once per
 signature, and the flag is saved with whichever package image compiled that
 signature (rule 4 places it). The call to the worker is static.
 """
-@generated function checked_call(f, args...)
+function _checked_call_body(@nospecialize(f), argtypes, argsyms)
     flag = Ref(false)
     guard = GuardState()
-    sig = Tuple{f,args...}
+    sig = Tuple{f,argtypes...}
     return quote
+        Base.@_inline_meta
         # a dynamic call: the check's reflection stays out of compiled code (and out of trimmed binaries)
         $(flag)[] || CLOSED_WORLD[] || Base.inferencebarrier(_check_once)($flag, $sig)
         _guard($guard, $sig)
-        return _checked_out(f(args...))      # a result like the input goes on to the entry, which inverts it
+        return _checked_out(f($(argsyms...)))      # a result like the input goes on to the entry, which inverts it
     end
+end
+@generated checked_call(f, args...) = _checked_call_body(f, args, [:(args[$i]) for i in 1:length(args)])
+# fixed arities: a call from an untyped entry dispatches on these through Julia's fast cache
+# (a varargs method makes every dynamic call build its argument tuple type)
+for n in 1:8
+    as = [Symbol(:a, i) for i in 1:n]
+    @eval @generated checked_call(f, $(as...)) = _checked_call_body(f, Any[$(as...)], $(as))
 end
 
 """
@@ -353,6 +361,8 @@ fills the defaults inside the trait world.
     end
 end
 
+"The worker's own signature: a keyword worker's without `Core.kwcall` and the keywords."
+_worker_sig(@nospecialize(sig)) = sig.parameters[1] === typeof(Core.kwcall) ? Tuple{sig.parameters[3:end]...} : sig
 "The function a worker signature belongs to: through `Core.kwcall` for a keyword worker."
 _worker_ftype(@nospecialize(sig)) = sig.parameters[1] === typeof(Core.kwcall) ? sig.parameters[3] : sig.parameters[1]
 
@@ -365,6 +375,10 @@ _noescape(::Union{TObj,AbstractView,CObj,CMulti,LikeResult}) = throw(TraitUseErr
 @noinline function _check_once(flag::Base.RefValue{Bool}, @nospecialize(sig))
     CLOSED_WORLD[] && (flag[] = true; return nothing)      # checked by verify_main at build time
     sig in _VC_CHECKED && (flag[] = true; return nothing)   # checked when its view cache was built
+    # a value conforming at parameters no bound accepts: no worker for the signature
+    ms = Base._methods_by_ftype(_worker_sig(sig), -1, Base.get_world_counter())::Vector
+    any(m -> !_is_entry(m.method), ms) || _no_worker_error(_worker_sig(sig))
+    _refuse_overrides()
     if !_def_checked(sig)                                  # checked once at its definition, at archetypes
         ps = Base.invokelatest(worker_problems, sig)::Vector{String}
         isempty(ps) || throw(TraitUseError(unique(ps)))

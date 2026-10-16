@@ -8,13 +8,16 @@ defined.
 """
 module TraitWorld
 
-"Marks TraitWorld's code for the patched Julia's load-time filter (attic/binary): the machinery is trait-world code."
-const __trait_world_machinery__ = true
+# TraitWorld's own code is not protected by the patched Julia's invalidation filter: the
+# machinery looks things up in method tables on users' types and traits as values (`trait_params(X)`,
+# `projection(X, T)`), so a definition by a type's owner must invalidate it as in plain Julia. Only
+# trait modules are protected (their code sees trait-world values only). A real runtime would not be
+# Julia code subject to invalidation at all.
 
 using PrecompileTools: PrecompileTools
 using Serialization: Serialization
 
-export Trait, Callable, CallMode, DynamicCall, CompiledCall, compiled_call, dynamic_call, TObj, Dynamic,
+export Trait, Callable, CallMode, DynamicCall, CompiledCall, compiled_call, dynamic_call, TObj, Dynamic, DynamicFn, dynamic_fn,
        @trait, @implement, @trait_module, @workload, @trait_wrapper, @handle, @call, Handle,
        TraitBoundError, TraitUseError, ImplementError, LayeringError, OwnershipError, PiracyError, mode!, verify_main, isclosed,
        piracy_mode!, check_no_piracy, viewcache_flush,
@@ -142,7 +145,17 @@ A precompile workload for a trait module (`PrecompileTools.@compile_workload`,
 reached through TraitWorld so that the trait module imports only the trait world).
 """
 macro workload(ex)
-    return esc(Expr(:macrocall, GlobalRef(PrecompileTools, Symbol("@compile_workload")), __source__, ex))
+    # the module's entry positions are fixed first, so the workload compiles the entries as they stay
+    fin = isdefined(__module__, :__tw_positions__) ? :($TraitWorld._finish_needed(@__MODULE__)) : nothing
+    return esc(Expr(:block, fin, Expr(:macrocall, GlobalRef(PrecompileTools, Symbol("@compile_workload")), __source__, ex)))
+end
+"Fix `needed` for a trait module's entry positions now (before a workload), as `_finish_module` will."
+function _finish_needed(mod::Module)
+    for (f, pos, nargs) in mod.__tw_positions__
+        _fix_needed!(mod, f, pos, nargs)
+    end
+    mod.__tw_finished__[] = true
+    return nothing
 end
 
 end
