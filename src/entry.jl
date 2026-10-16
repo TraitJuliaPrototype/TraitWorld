@@ -170,11 +170,36 @@ The trait object for argument `pos` of a call from ordinary code, or `NOTRAIT` i
 none of the traits the position needs. Not inlined, so that `verify_main` sees it, but
 specialized: for a known type it folds to the views' construction.
 """
-@inline function enter(p::EntryPos, t)
+@inline function enter(p::EntryPos{F}, t) where {F}
     t isa Dynamic && return opened(t)                  # a dynamic value is opened: its worker is selected by dispatch
     t isa TObj && return Base.inferencebarrier(_rule3_error)(typeof(p), t)
-    return _assemble(needed(p), t)
+    v = _assemble(needed(p), t)
+    # a function that may keep its trait objects gets the whole user's object, also of an immutable
+    # type (boxed); every other function holds its parts (`keeps` folds to a constant)
+    keeps(KeepOf{F}()) && !ismutable(t) && v isa TObj && return _with_object(v, t)
+    return v
 end
+
+"A function type as a value to dispatch on, for `keeps`."
+struct KeepOf{F} end
+Base.Experimental.@max_methods 1 function keeps end
+"""
+    keeps(KeepOf{F}()) -> Bool
+
+Whether a worker of function type `F` may keep a trait object beyond the call: make it a
+`Dynamic`, store it where a `Dynamic` is declared, or return a closure that captured it (note
+"Keeping a value is a crossing"). Then its entry passes the whole user's object, also of an
+immutable type, so the kept value keeps it (equality, results like the input, serialization). A
+trait module defines a method per function when it is complete; until then, and for functions not
+analysed, this fallback says yes.
+"""
+keeps(::KeepOf) = true
+
+"The trait object `v` of the immutable value `t`, its views reading the whole object (boxed) instead of holding its parts."
+@inline _with_object(v::TObj, t) = TObj(map(x -> _view_with(x, t), getfield(v, :views)))
+@inline _view_with(v::View{X,W,K,N,P}, t) where {X,W,K,N,P} =
+    View{X,W,K,N,P}(getfield(v, :w), t, getfield(v, :r), getfield(v, :fs), getfield(v, :parts))
+@inline _view_with(v, t) = v
 
 "The trait object carrying every trait of `L` that `t` conforms to, or `NOTRAIT`."
 @generated function _assemble(::TraitList{L}, t) where {L}
@@ -289,6 +314,7 @@ that conforms to none of them is refused at the entry.
     t isa TObj && return nt
     v = t isa Dynamic ? opened(t) : _assemble(l, t)
     v === NOTRAIT && Base.inferencebarrier(_kw_refused)(f, k, t, l)
+    keeps(KeepOf{F}()) && !(t isa Dynamic) && !ismutable(t) && v isa TObj && (v = _with_object(v, t))
     return merge(nt, NamedTuple{(k,)}((v,)))
 end
 @noinline _kw_refused(@nospecialize(f), k::Symbol, @nospecialize(t), @nospecialize(l)) =
@@ -581,6 +607,7 @@ function Dynamic{X}(x) where {X}
     x isa TObj && return Dynamic{X}(x::TObj)
     v = _assemble(TraitList{Tuple{_family(X)}}(), x)
     v === NOTRAIT && throw(TraitBoundError("a $(typeof(x)) does not conform to $X"))
+    ismutable(x) || (v = _with_object(v, x))           # kept: the whole value, also of an immutable type
     return Dynamic{X}(v)
 end
 

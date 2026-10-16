@@ -98,11 +98,9 @@ end)
     end); nothing catch err; err end
     while e isa LoadError; e = e.error; end
     @test e isa ImplementError && occursin("computes a value", sprint(showerror, e))
-    # a Dynamic of an immutable type keeps the parts the trait sees (held), not the whole object:
-    # a result like it cannot be rebuilt (the prototype's limit, open-issues §3)
-    @test_throws TraitBoundError L.colmap(x -> -x, L.keeptable(m))
-    d = L.keeptable(Main.LMeasM([[1.0, 2.0], [3.0]], "run 1"))
+    d = L.keeptable(m)                                         # an immutable type, kept whole
     dr = L.colmap(x -> -x, d)                                  # a Dynamic in, a Dynamic out
+    @test L.colmap(x -> -x, L.keeptable(Main.LMeasM([[1.0, 2.0], [3.0]], "run 1"))) isa Dynamic{L.ColTable}   # and a mutable one
     @test dr isa Dynamic{L.ColTable} && L.col(dr, 1) == [-1.0, -2.0]
     dw = L.withcols(d, [[9.0]])                                # a constructor operation on a Dynamic
     @test dw isa Dynamic{L.ColTable} && L.ncols(dw) == 1 && L.col(dw, 1) == [9.0]

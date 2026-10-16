@@ -179,3 +179,122 @@ function _def_checked(@nospecialize(sig))
     end
     return m in _DEF_CHECKED
 end
+
+# --- keeping: which functions may keep a trait object (note "Keeping a value is a crossing") ---------
+#
+# A trait object holds an immutable user type's parts; a kept value must keep the whole object. The
+# entry passes the whole object (boxed) only to functions whose workers may keep a trait object:
+# `keeps(KeepOf{F}())`, decided here once per function, at archetypes, when its trait module is
+# complete. The walk follows internal functions and workers called with the trait object.
+
+"A worker's signature at archetypes for the keep analysis: bounded positions at their archetypes, the rest as declared."
+function _keep_sig(m::Method)
+    sig = Base.unwrap_unionall(m.sig)
+    sig isa DataType || return nothing
+    ps = sig.parameters
+    (isempty(ps) || ps[1] === typeof(Core.kwcall)) && return nothing     # the positional method reaches the body
+    out = Any[ps[1]]
+    bounded = false
+    for k in 2:length(ps)
+        p = ps[k]
+        if Base.isvarargtype(p)
+            q = Base.unwrapva(p)
+            lb = _tobj_lb(q isa TypeVar ? q.ub : q)
+            lb === nothing || lb === Union{} ? push!(out, Any) : (push!(out, archetype_tobj(lb)); bounded = true)
+            continue
+        end
+        lb = _tobj_lb(p)
+        if lb === nothing || lb === Union{}
+            q = p isa TypeVar ? p.ub : p
+            push!(out, q)
+        else
+            push!(out, archetype_tobj(lb))
+            bounded = true
+        end
+    end
+    return bounded ? Tuple{out...} : nothing
+end
+
+"Whether code compiled for `sig` may keep a trait object; `true` when it cannot be decided."
+function _keeps_sig(@nospecialize(sig), seen::Base.IdSet{Any})
+    sig in seen && return false
+    push!(seen, sig)
+    world = Base.get_world_counter()
+    res = try
+        Base.code_typed_by_type(sig; optimize = false, world)
+    catch
+        return true
+    end
+    isempty(res) && return false
+    for (src, _) in res
+        mi = src.parent
+        sptypes = mi isa Core.MethodInstance ? _CC.sptypes_from_meth_instance(mi) : _CC.EMPTY_SPTYPES
+        returned = Base.IdSet{Int}()
+        for st in src.code
+            st isa Core.ReturnNode && isdefined(st, :val) && st.val isa Core.SSAValue && push!(returned, st.val.id)
+        end
+        for (i, st) in enumerate(src.code)
+            ex = st isa Expr && st.head === :(=) ? st.args[2] : st
+            ex isa Expr || continue
+            if ex.head === :new
+                # a closure that captured a trait object and is returned keeps it
+                CT = _CC.argextype(ex.args[1], src, sptypes)
+                CT = CT isa _CC.Const ? CT.val : _CC.widenconst(CT)
+                CT isa DataType && CT <: Type && (CT = CT.parameters[1])
+                if CT isa DataType && CT <: Function && any(k -> _hastobj(fieldtype(CT, k)), 1:fieldcount(CT))
+                    i in returned && return true
+                end
+                continue
+            end
+            ex.head === :call || continue
+            ats = Any[_CC.widenconst(_CC.argextype(a, src, sptypes)) for a in ex.args]
+            any(k -> _hastobj(ats[k]), 2:length(ats)) || continue
+            fT = _CC.argextype(ex.args[1], src, sptypes)
+            f = fT isa _CC.Const ? fT.val : (Base.issingletontype(_CC.widenconst(fT)) ? _CC.widenconst(fT).instance : nothing)
+            f === nothing && return true                                     # not known here: assume it keeps
+            (f isa Core.Builtin || f isa Core.IntrinsicFunction) && continue
+            _keeps_dynamic(f, ats, ex, src, sptypes) && return true
+            ms = Base._methods_by_ftype(Tuple{ats...}, -1, world)
+            ms isa Vector || return true
+            for mm in ms
+                m = mm.method
+                Base.moduleroot(m.module) === TraitWorld && continue        # the machinery: operations, fields, `like`
+                (_isworker(m) || (_is_trait_module_code(m) && !_is_entry(m))) || continue
+                _keeps_sig(Tuple{ats...}, seen) && return true
+                break                                                        # the call's signature is walked once
+            end
+        end
+    end
+    return false
+end
+
+"Whether any worker of `f` may keep a trait object (see `keeps`)."
+function _analyze_keeps(@nospecialize(f))
+    seen = Base.IdSet{Any}()
+    try
+        for m in methods(f)
+            _isworker(m) || continue
+            sig = _keep_sig(m)
+            sig === nothing && return true
+            _keeps_sig(sig, seen) && return true
+        end
+    catch
+        return true                                  # not decided: the entry keeps the whole object
+    end
+    return false
+end
+
+"Define `keeps(KeepOf{typeof(f)}())` in `mod`, once its methods are known; redefined only when the answer changes."
+function _fix_keeps!(mod::Module, @nospecialize(f))
+    K = Base.invokelatest(_analyze_keeps, f)::Bool
+    P = KeepOf{typeof(f)}
+    m = Base._which(Tuple{typeof(keeps),P}; raise = false)
+    if m !== nothing && Base.unwrap_unionall(m.method.sig).parameters[2] === P
+        Base.invokelatest(keeps, P()) === K && return nothing
+        m.method.module === mod || ccall(:jl_generating_output, Cint, ()) == 0 || return nothing
+    elseif K
+        return nothing                                                       # the fallback says yes already
+    end
+    Core.eval(mod, :($TraitWorld.keeps(::$P) = $K))
+    return nothing
+end
