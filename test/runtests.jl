@@ -935,3 +935,32 @@ end
         delete!(vc._VC_CHECKED, sig2)
     end
 end
+
+@testset "definition checking at archetypes" begin
+    toplevel(quote
+        @trait_module module BadDef
+        using TraitWorld, ..Columns, ..Rows
+        def_ordinary(t::ColTable) = sum(t)
+        def_typeof(t::ColTable) = typeof(t)
+        def_rule3(t::ColTable) = firstrow(t)
+        def_good(t::(ColTable, RowTable)) = (colmean(t, 1), firstrow(t))
+        def_clean(t::ColTable, i::Int) = colmean(t, i) * ncols(t)
+        def_fn(f::Callable{Tuple{Float64},Float64}, t::ColTable) = map(f, col(t, 1))
+        end
+    end)
+    # found before any representation reaches these functions
+    e = try check_definitions(Main.BadDef); nothing catch err; err end
+    @test e isa TraitUseError
+    ps = join(e.problems, "\n")
+    @test occursin("def_ordinary", ps) && occursin("`sum`, an ordinary function", ps)
+    @test occursin("def_typeof", ps) && occursin("typeof(t)", ps)
+    @test occursin("def_rule3", ps) && occursin("rule 2", ps)
+    @test !occursin("def_good", ps) && !occursin("def_clean", ps)
+    checked = Set(m.name for m in TraitWorld._DEF_CHECKED)
+    @test :def_good in checked && :def_clean in checked
+    @test !(:def_fn in checked)                     # a function from above: checked per signature
+    @test isempty(check_definitions(Main.Columns))
+    # workers of methods checked at definition run without their per-signature check, and compute the same
+    @test Main.BadDef.def_clean(Measurements([[1.0, 3.0]]), 1) == 2.0
+    @test Main.BadDef.def_clean(Ramp([1.0, 2.0], 2), 2) == 6.0
+end
