@@ -45,10 +45,13 @@ function __init__()
     _filter_init!()
     _vc_init!()
     _hooks_init!()
+    FACTS[] = get(ENV, "JULIA_TW_FACTS", "1") != "0"
+    LAYERING[] = get(ENV, "JULIA_TW_LAYERING", "0") == "1"
     push!(Base.package_callbacks, _on_package_load)
 end
 
 include("ownership.jl")
+include("facts.jl")
 include("core.jl")
 include("audit.jl")
 include("trait.jl")

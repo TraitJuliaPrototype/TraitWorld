@@ -667,6 +667,10 @@ function _scan(mi::Core.MethodInstance, cx::_Walk)
             elseif cm isa Method && _machinery_method(cm)
                 site(:guard, i, cm.name, Any[])
                 continue
+            elseif cm isa Method && cm.module === TraitWorld && cm.name === :_facts_call
+                # the policy's call of the worker (facts.jl): a session's path to the targets the
+                # entry's plain call enumerates; a closed world takes the plain call
+                continue
             elseif cm isa Method && cm.module === TraitWorld && (cm.name === :fallback || cm.name === :kwfallback)
                 # reached only by a user type with none of the entry's traits
                 notrait ? hole(:fallback, i, cm.name, Any[]) : site(:trait, i, cm.name, Any[])
@@ -701,6 +705,10 @@ function _scan(mi::Core.MethodInstance, cx::_Walk)
                     # the entry's way out: the identity, unless the worker returns a result like
                     # the input, whose inverse runs per user type (not listed for AOT yet)
                     _like_result(src, sptypes, st.args[2]) && hole(:inverse, i, f, ats)
+                elseif f === _facts_call
+                    # the policy's call of the worker (facts.jl): a session's path to the targets the
+                    # entry's plain call enumerates; a closed world takes the plain call
+                    continue
                 elseif f === checked_call || f === checked_kwcall
                     # the entry's call of the worker: one target per combination of what the entry built
                     choices = Vector{Any}[]

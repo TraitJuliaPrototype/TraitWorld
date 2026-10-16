@@ -288,6 +288,9 @@ reported; calls into helpers of trait modules are followed.
 """
 function _layering!(out, seen, @nospecialize(f), ats, src, mi, i, world)
     (f === nothing || f isa Core.Builtin || f isa Core.IntrinsicFunction) && return nothing
+    # wrapping by facts (the adopted design): trait-world code may call any Julia code. The walk
+    # still records outward doors (for `verify_main`), but reports nothing unless `LAYERING[]`.
+    LAYERING[] || (out = String[])
     csig = Tuple{ats...}
     ms = Base._methods_by_ftype(csig, -1, world)
     ms isa Vector || return nothing
@@ -333,6 +336,14 @@ function _layering!(out, seen, @nospecialize(f), ats, src, mi, i, world)
 end
 
 """
+Whether rule 1 is enforced: a trait module importing ordinary modules, and trait-world code calling
+ordinary code or Julia's doors, are refused. Off under wrapping by facts (the adopted design,
+`writeup/explorations/wrapping-by-facts.md`), where calls to any Julia code are allowed;
+`JULIA_TW_LAYERING=1` turns the old rule on.
+"""
+const LAYERING = Ref(false)
+
+"""
     checked_call(f, args...)
 
 How an entry calls a worker. A generated function: each call signature gets
@@ -349,6 +360,9 @@ function _checked_call_body(@nospecialize(f), argtypes, argsyms)
         # a dynamic call: the check's reflection stays out of compiled code (and out of trimmed binaries)
         $(flag)[] || CLOSED_WORLD[] || Base.inferencebarrier(_check_once)($flag, $sig)
         _guard($guard, $sig)
+        # the worker and its static callees compiled under rule R (facts.jl); a closed world (a
+        # trimmed binary) calls the worker as compiled into it
+        FACTS[] && !CLOSED_WORLD[] && return _checked_out(_facts_call(f, $(argsyms...)))
         return _checked_out(f($(argsyms...)))      # a result like the input goes on to the entry, which inverts it
     end
 end

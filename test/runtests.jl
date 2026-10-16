@@ -161,7 +161,8 @@ end
         using TraitWorld, ..Plain
         end
     end)
-    @test e isa LayeringError
+    # wrapping by facts: a trait module may use any Julia code (rule 1 only with JULIA_TW_LAYERING=1)
+    @test TraitWorld.LAYERING[] ? e isa LayeringError : e === nothing
 end
 
 @testset "M1: implementations are checked when defined" begin
@@ -420,7 +421,7 @@ end
 using .Weights
 @testset "M6: rule 1 on typed code; the piracy audit" begin
     e = try Weights.sneak([[1.0]]) catch err; err end
-    @test e isa TraitUseError && occursin("outside the trait world (rule 1)", sprint(showerror, e))
+    @test TraitWorld.LAYERING[] ? (e isa TraitUseError && occursin("outside the trait world (rule 1)", sprint(showerror, e))) : !(e isa Exception)
     m = [1.0 2.0; 3.0 4.0]
     @test weighted(m, 1) == 4.0
     toplevel(:(module Pirate2; using ..Weights; Weights.weight(x::Float64) = 2.0; end))
@@ -465,7 +466,10 @@ function main(args::Vector{String})
 end
 end
 @testset "M7: verify_main" begin
+    # a closed world (the binary verify_main checks for) compiles the workers natively, without the policy
+    facts = TraitWorld.FACTS[]; TraitWorld.FACTS[] = false
     VMain.main(String[]); VMain.main(["m"])
+    TraitWorld.FACTS[] = facts
     r = verify_main(VMain.main, (Vector{String},))
     @test isclosed(r)
     # entries are ordinary inlined methods (keys-plan §6): for types the program knows, every trait call is static
@@ -760,7 +764,7 @@ end
         using TraitWorld, ..FakeOutside
         end
     end)
-    @test e isa LayeringError                                           # the wrapped package itself stays outside
+    @test TraitWorld.LAYERING[] ? e isa LayeringError : e === nothing   # the wrapped package itself stays outside (rule 1 only)
     e = thrown(quote
         @trait_module module BadCall
         using TraitWorld
@@ -782,7 +786,9 @@ function main(args::Vector{String})
 end
 end
 @testset "poc3 M8: verify_main, keyword entries and declared calls" begin
+    facts = TraitWorld.FACTS[]; TraitWorld.FACTS[] = false            # as in M7: a closed world's native workers
     VKW.main(String[])
+    TraitWorld.FACTS[] = facts
     r = verify_main(VKW.main, (Vector{String},))
     @test isclosed(r)
     @test count(p -> p.first === :declared, r.targets) == 4           # figure, addpoints!, npoints, title
@@ -866,9 +872,14 @@ end
 @testset "poc3 M5: the door check" begin
     v = [[1.0, 2.0]]
     msg(f) = try f(v); "" catch e; sprint(showerror, e) end
-    @test occursin("inward door", msg(Doors.bad_eval)) && occursin("eval", msg(Doors.bad_eval))
-    @test occursin("inward door", msg(Doors.bad_tls))
-    @test occursin("inward door", msg(Doors.bad_module)) || occursin("global", msg(Doors.bad_module))
+    if TraitWorld.LAYERING[]
+        @test occursin("inward door", msg(Doors.bad_eval)) && occursin("eval", msg(Doors.bad_eval))
+        @test occursin("inward door", msg(Doors.bad_tls))
+    else                                                         # wrapping by facts: calls to any Julia code
+        @test msg(Doors.bad_eval) == "" && msg(Doors.bad_tls) == ""
+    end
+    @test occursin("inward door", msg(Doors.bad_module)) || occursin("global", msg(Doors.bad_module)) ||
+          (!TraitWorld.LAYERING[] && msg(Doors.bad_module) == "")     # another module's global: a binding edge, allowed
     @test occursin("global", msg(Doors.bad_global)) && occursin("counter", msg(Doors.bad_global))
     @test (@test_logs (:warn, "a table") Doors.warns(v)) == 1                   # an outward door: accepted
     @test Doors.prints(v) == 1
