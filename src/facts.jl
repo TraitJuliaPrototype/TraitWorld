@@ -100,8 +100,14 @@ function _has_runtime_sites(ci::Core.CodeInstance; limit::Int = 500)
         c in seen && continue
         push!(seen, c)
         length(seen) > limit && (found = true; break)
+        c.owner isa FactsOwner || (found = true; break)              # not the policy's code: unknown
         src = c.inferred
-        src === nothing && continue                                  # a constant result: no code
+        if src === nothing
+            # no IR: only a constant result is known to call nothing
+            isdefined(c, :rettype_const) && continue
+            found = true
+            break
+        end
         mi = Core.Compiler.get_ci_mi(c)
         mi.def isa Method || continue
         if !(src isa Core.CodeInfo)
