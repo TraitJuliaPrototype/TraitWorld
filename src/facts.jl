@@ -37,14 +37,31 @@ CC.codegen_cache(i::FactsInterp) = i.codegen
 CC.may_discard_trees(::FactsInterp) = false
 
 """
-Whether `T` (a call's argument types) is concrete enough for a fact: a dispatch tuple, or one whose
-other parts are kinds (`DataType`, `UnionAll`, `Union`: a type passed as a value, as in
-`any(p -> p === Union{}, types)`). A fact at a kind is broken only by a method of the same function
-with a `Type{...}` argument: the function's owner, a pirate, or the owner of a type that may flow
-there, which plain Julia's code at that call depends on just the same.
+Whether `T` (a call's argument types) is concrete enough for a fact: a dispatch tuple, or a call of
+a *closure* whose other arguments are kinds (`DataType`, `UnionAll`, `Union`: a type passed as a
+value, as in Base's `any(p -> p === Union{}, types)` behind every broadcast's element type). A fact
+at a kind is broken by any method of the function with an argument that admits a type value
+(`Type{X}` for any `X`, `::Any`, a free type variable), so for a function others extend
+(`zero`, a package's trait function) it would let unrelated packages invalidate trait code (final
+review of 2026-10-17). Only a closure's owner adds methods to it.
 """
 _fact_sig(@nospecialize(T)) = T isa DataType && (Base.isdispatchtuple(T) ||
-    (T <: Tuple && _kinds_ok(T.parameters)))
+    (T <: Tuple && !isempty(T.parameters) && _is_closure_type(T.parameters[1]) && _kinds_ok(T.parameters)))
+"""
+A closure's type: a function type that is not a named function's (whose module binds its name to
+its instance, as for `typeof(sum)`, also named `#sum`). Only its owner adds methods to it.
+"""
+function _is_closure_type(@nospecialize(F))
+    (F isa DataType && F <: Function) || return false
+    if isdefined(F, :instance)
+        n = String(F.name.name)
+        startswith(n, "#") || return false
+        b = Symbol(n[2:end])
+        m = F.name.module
+        isdefined(m, b) && getglobal(m, b) === F.instance && return false       # a named function
+    end
+    return startswith(String(F.name.name), "#")
+end
 function _kinds_ok(ps::Core.SimpleVector)
     for p in ps
         (p isa Type && (Base.isdispatchelem(p) || p === DataType || p === UnionAll || p === Union)) || return false
@@ -206,8 +223,9 @@ function CC.return_type_tfunc(interp::FactsInterp, argtypes::Vector{Any}, si::CC
     (T isa DataType && T <: Tuple) || return CC.Future(UNKNOWN)
     sig = length(argtypes) == 3 ? Tuple{CC.widenconst(CC.widenslotwrapper(argtypes[2])), T.parameters...} : T
     _fact_sig(sig) || return CC.Future(UNKNOWN)
-    # 1. the policy's own answer, with its facts as edges: when it is a concrete type (or Union{}),
-    #    plain Julia's (at least as precise) is that type or Union{}, a difference A3 allows
+    # 1. the policy's own answer, with its facts as edges, when it is a concrete type or Union{}:
+    #    it differs from plain Julia's only through values inference decides (A3), e.g. Union{}
+    #    where an abstract site's methods all throw, or a nested `return_type` in the callee
     own = @invoke CC.return_type_tfunc(interp::CC.AbstractInterpreter, argtypes::Vector{Any}, si::CC.StmtInfo, sv::CC.AbsIntState)
     return CC.Future{CC.CallMeta}(own, interp, sv) do call, interp, sv
         rt = call.rt
@@ -233,7 +251,9 @@ function _native_return_type(interp::FactsInterp, @nospecialize(sig), sv::CC.Abs
     nci isa Core.CodeInstance || return nothing
     _concrete_deps(nci) || return nothing
     CC.update_valid_age!(sv, CC.WorldRange(max(lo[], nci.min_world), min(hi[], nci.max_world)))
-    return CC.CallMeta(CC.Const(nci.rettype), Union{}, CC.Effects(CC.EFFECTS_TOTAL; nortcall = false),
+    # a constant result folds as plain compiled code folds it (`typeof` of the constant)
+    rt = isdefined(nci, :rettype_const) ? Core.Typeof(nci.rettype_const) : nci.rettype
+    return CC.CallMeta(CC.Const(rt), Union{}, CC.Effects(CC.EFFECTS_TOTAL; nortcall = false),
                        CC.MethodResultPure(_NativeRT(sig, nci)))
 end
 
