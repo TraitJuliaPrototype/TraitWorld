@@ -73,7 +73,7 @@ _prologue() = Any[:(const __trait_module__ = true),
                   # registered with the patched Julia's filter from its start: the methods it defines
                   # while it loads are trait-world definitions, which invalidate as in plain Julia
                   :($TraitWorld._filter_add!(@__MODULE__))]
-_epilogue() = :($TraitWorld._finish_module(@__MODULE__))
+_epilogue() = :($TraitWorld._latest_under_policy($TraitWorld._finish_module, @__MODULE__))
 
 function _transform_all(stmts)
     out = Any[]

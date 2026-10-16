@@ -49,6 +49,7 @@ function __init__()
     LAYERING[] = get(ENV, "JULIA_TW_LAYERING", "0") == "1"
     _FACTS_POLICY[] = get(ENV, "JULIA_TW_FACTS_POLICY", "1") != "0"
     _FACTS_DEBUG[] = get(ENV, "JULIA_TW_FACTS_DEBUG", "0") == "1"
+    _COMPILER_WORLD[] = Base.get_world_counter()
     push!(Base.package_callbacks, _on_package_load)
 end
 
@@ -182,7 +183,8 @@ if ccall(:jl_generating_output, Cint, ()) == 1
     for sig in (Tuple{typeof(_check_once), Base.RefValue{Bool}, DataType},
                 Tuple{typeof(_builder_for), Vector{Any}, DataType},
                 Tuple{typeof(worker_problems), DataType},
-                Tuple{typeof(_check_concrete), DataType})
+                Tuple{typeof(_check_concrete), DataType},
+                Tuple{typeof(_finish_module), Module})
         facts_codeinstance(sig)
     end
 end

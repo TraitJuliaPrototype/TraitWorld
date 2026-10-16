@@ -207,8 +207,8 @@ function _vc_compile(sigs::Vector{Any})
             continue
         end
         ok = try
-            ps = Base.invokelatest(worker_problems, s)::Vector{String}
-            isempty(ps) && (Base.invokelatest(_check_concrete, s); true)
+            ps = _latest_under_policy(worker_problems, s)::Vector{String}
+            isempty(ps) && (_latest_under_policy(_check_concrete, s); true)
         catch
             false                                 # the session's check reports it, at the call
         end

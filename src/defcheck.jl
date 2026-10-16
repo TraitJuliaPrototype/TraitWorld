@@ -133,7 +133,7 @@ function definition_problems(@nospecialize(f))
     for m in methods(f)
         asig = archetype_sig(m)
         asig === nothing && continue
-        ps = Base.invokelatest(worker_problems, asig)::Vector{String}
+        ps = _latest_under_policy(worker_problems, asig)::Vector{String}
         if isempty(ps)
             push!(_DEF_CHECKED, m)
         else
