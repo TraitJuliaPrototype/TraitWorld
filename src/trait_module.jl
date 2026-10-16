@@ -570,11 +570,16 @@ function _rewrite_fdef(mod::Module, ex)
         tr = [i for (i, x) in enumerate(args) if x.kind === :trait]
         us = Expr(:tuple, [args[i].name for i in tr]...)
         vs = Expr(:tuple, [newnames[i] for i in tr]...)
+        # the tuples of the user's values and trait objects are built only for a result like the input:
+        # built for every call, they instantiate a tuple type at run time in an entry compiled at `Any`
+        # (about 140 ns and 80 bytes per untyped call)
+        res = gensym(:res)
         if haskw
-            push!(stmts, :(return $TraitWorld._out($TraitWorld.checked_kwcall($ntname, $fname, $(newnames...)), $us, $vs)))
+            push!(stmts, :($res = $TraitWorld.checked_kwcall($ntname, $fname, $(newnames...))))
         else
-            push!(stmts, :(return $TraitWorld._out($TraitWorld.checked_call($fname, $(newnames...)), $us, $vs)))
+            push!(stmts, :($res = $TraitWorld.checked_call($fname, $(newnames...))))
         end
+        push!(stmts, :(return $res isa $TraitWorld.LikeResult ? Base.inferencebarrier($TraitWorld._like_out)($res, $us, $vs) : $res))
         kept = Any[w for w in wheres if any(x -> x.kind in (:plain, :vararg) && x.ann !== nothing && _uses(x.ann, _wherevar(w)), args)]
         esig = haskw ? Expr(:call, fname, Expr(:parameters, Expr(:..., kwname)), eargs...) : Expr(:call, fname, eargs...)
         isempty(kept) || (esig = Expr(:where, esig, kept...))
