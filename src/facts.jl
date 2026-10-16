@@ -263,6 +263,12 @@ The CodeInstance compiled under the trait world's policy for the call signature 
 function facts_codeinstance(@nospecialize(sig), world::UInt = Base.tls_world_age())
     mi = ccall(:jl_method_lookup_by_tt, Any, (Any, Csize_t, Any), sig, world, nothing)
     mi isa Core.MethodInstance || return nothing
+    # a hit in the policy's cache (from an image, or earlier in the session) runs no compiler code:
+    # the compiler's own native code specialized for `FactsInterp` is in TraitWorld's image, but a
+    # package loaded before TraitWorld can make it fail verification at load (about 1.5 s to
+    # compile it again), and a first call of code the images hold needs no inference at all
+    c = ccall(:jl_rettype_inferred, Any, (Any, Any, UInt, UInt), FactsOwner(), mi, world, world)
+    c isa Core.CodeInstance && return c
     return _in_compiler_world(CC.typeinf_ext_toplevel, FactsInterp(world), mi, CC.SOURCE_MODE_ABI)::Core.CodeInstance
 end
 
