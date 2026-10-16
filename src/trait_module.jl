@@ -713,7 +713,7 @@ function _note_position(mod::Module, @nospecialize(f), pos::Int, nargs::Int)
     isdefined(mod, :__tw_positions__) || return nothing
     k = (f, pos, nargs)
     any(x -> x[1] === f && x[2] == pos && x[3] == nargs, mod.__tw_positions__) || push!(mod.__tw_positions__, k)
-    mod.__tw_finished__[] && _fix_needed!(mod, f, pos, nargs)
+    mod.__tw_finished__[] && (_fix_needed!(mod, f, pos, nargs); _fix_keeps!(mod, f))
     return nothing
 end
 
@@ -743,6 +743,9 @@ function _finish_module(mod::Module)
     if isdefined(mod, :__tw_positions__)
         for (f, pos, nargs) in mod.__tw_positions__
             _fix_needed!(mod, f, pos, nargs)
+        end
+        for f in unique(Any[x[1] for x in mod.__tw_positions__])
+            _fix_keeps!(mod, f)
         end
         mod.__tw_finished__[] = true
     end

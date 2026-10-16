@@ -157,6 +157,9 @@ function _finish_needed(mod::Module)
     for (f, pos, nargs) in mod.__tw_positions__
         _fix_needed!(mod, f, pos, nargs)
     end
+    for f in unique(Any[x[1] for x in mod.__tw_positions__])
+        _fix_keeps!(mod, f)
+    end
     mod.__tw_finished__[] = true
     return nothing
 end

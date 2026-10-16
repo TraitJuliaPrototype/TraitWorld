@@ -296,4 +296,5 @@ end
 for S in (_Sentinel1, _Sentinel2)
     @eval conformance(::As{$S}, @nospecialize(u)) = NOTRAIT
     @eval needed(::EntryPos{$S,0,0}) = TraitList{Tuple{}}()
+    @eval keeps(::KeepOf{$S}) = true
 end

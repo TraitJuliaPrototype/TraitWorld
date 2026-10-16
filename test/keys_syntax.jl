@@ -89,7 +89,8 @@ end)
     while e isa LoadError; e = e.error; end
     @test e isa ImplementError && occursin("cannot be written", sprint(showerror, e))
     wk = only(m for m in methods(K.knorm) if Base.unwrap_unionall(m.sig).parameters[2] !== Any)
-    @test length(collect(Base.specializations(wk))) == 1
+    # (instances at archetypes, from the definition and keep analyses, are not workers for a key)
+    @test count(mi -> !occursin("Archetype", string(mi.specTypes)), Base.specializations(wk)) == 1
     @test isempty(check_definitions(K))
     # a parameter defined by a field and by an equation is refused
     e = try toplevel(quote
