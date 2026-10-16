@@ -56,10 +56,12 @@ end
 `return_type` (and so `promote_op`, broadcasting's and `map`'s element types) asks what *plain
 Julia's* inference gives, so under the policy it is folded from plain Julia's inference, never
 from the policy's own (which types a run-time site `Any`: `map(x -> 1, Integer[])` would be a
-`Vector{Any}`, acceptance G1.8). At a concrete signature the fold records the dispatch fact at
-the signature and an edge to the native CodeInstance it read (`_NativeRT`): the trait code is
-invalidated exactly when plain Julia's answer can change. At an abstract signature the call is
-left to run time, where it is plain Julia's inference in the current world.
+`Vector{Any}`, acceptance G1.8). At a concrete signature whose native answer rests on concrete
+facts only (`_concrete_deps`), the fold records the dispatch fact at the signature and an edge to
+the native CodeInstance it read (`_NativeRT`): the trait code is invalidated exactly when plain
+Julia's answer can change. Otherwise the call is left to run time, where it is plain Julia's
+inference in the current world: folding an answer that rests on abstract dispatch would let any
+load that adds a method there invalidate the trait code (G2).
 """
 struct _NativeRT <: CC.CallInfo
     sig::Any
@@ -67,6 +69,28 @@ struct _NativeRT <: CC.CallInfo
 end
 CC.add_edges_impl(edges::Vector{Any}, info::_NativeRT) = (push!(edges, info.sig); push!(edges, info.ci); nothing)
 CC.nsplit_impl(::_NativeRT) = 0
+
+"""
+Whether native code's answer rests on facts at concrete signatures only: no method-table (abstract
+dispatch) edge in it or in the native code it depends on, through at most `limit` CodeInstances.
+Then folding it into the policy's code keeps G2 (a load invalidates it only through a concrete fact);
+otherwise `return_type` is left to run time, where it is plain Julia's answer in the current world.
+"""
+function _concrete_deps(ci::Core.CodeInstance; limit::Int = 2000)
+    seen = Base.IdSet{Core.CodeInstance}()
+    todo = Core.CodeInstance[ci]
+    while !isempty(todo)
+        c = pop!(todo)
+        c in seen && continue
+        push!(seen, c)
+        length(seen) > limit && return false
+        for e in c.edges
+            (e === Core.MethodTable || e isa Core.MethodTable) && return false
+            e isa Core.CodeInstance && push!(todo, e)
+        end
+    end
+    return true
+end
 
 function CC.return_type_tfunc(interp::FactsInterp, argtypes::Vector{Any}, si::CC.StmtInfo, sv::CC.AbsIntState)
     _FACTS_POLICY[] || return @invoke CC.return_type_tfunc(interp::CC.AbstractInterpreter, argtypes::Vector{Any}, si::CC.StmtInfo, sv::CC.AbsIntState)
@@ -82,6 +106,7 @@ function CC.return_type_tfunc(interp::FactsInterp, argtypes::Vector{Any}, si::CC
     mi isa Core.MethodInstance || return UNKNOWN
     nci = CC.typeinf_ext_toplevel(CC.NativeInterpreter(world), mi, CC.SOURCE_MODE_NOT_REQUIRED)
     nci isa Core.CodeInstance || return UNKNOWN
+    _concrete_deps(nci) || return UNKNOWN
     CC.update_valid_age!(sv, CC.WorldRange(nci.min_world, nci.max_world))
     return CC.Future(CC.CallMeta(CC.Const(nci.rettype), Union{}, CC.Effects(CC.EFFECTS_TOTAL; nortcall = false), _NativeRT(sig, nci)))
 end
@@ -207,3 +232,16 @@ the entry: a frame of its own, which copies a view built on the entry's stack in
 tuple, made typed calls twice as slow (69 against 37 ns).
 """
 _facts_call
+
+"""
+    _latest_under_policy(f, args...)
+
+A slow path of the machinery (finding a conformance's builder, the checks at a signature's first
+call) run in the latest world and compiled under the policy, like a worker: its code depends on
+the method table only through facts at concrete signatures, so loads that invalidate the native
+code of TraitWorld's reflective, abstractly typed implementation do not reach it, and a first call
+after them need not infer it again. Its abstract sites call plain Julia's code at run time.
+"""
+_latest_under_policy(f, args...) =
+    _policy_path() ? Base.invokelatest(_facts_call, f, args...) : Base.invokelatest(f, args...)
+

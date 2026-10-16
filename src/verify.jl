@@ -403,7 +403,7 @@ end
 # the machinery's slow paths: reflection, checks, the audit. Not followed: in a
 # closed world they are switched off and verify_main runs them at build time.
 _machinery_method(m::Method) = m.module === TraitWorld && m.name in
-    (:_check_once, :_conformance_slow, :_needed_slow, :_guard_slow, :_builder_for, :worker_problems, :audit, :_rule3_error,
+    (:_check_once, :_latest_under_policy, :_conformance_slow, :_needed_slow, :_guard_slow, :_builder_for, :worker_problems, :audit, :_rule3_error,
      :_closed_miss, :_witness, :witness, :proj_lookup, :_no_worker_error, :_refuse_overrides, :_merge_dyn)
 
 const _ENTER = Ref{Any}(nothing)

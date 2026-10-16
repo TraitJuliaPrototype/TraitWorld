@@ -130,7 +130,7 @@ const _SLOW_GEN = Ref{UInt}(0)
         b === nothing || return b === NOTRAIT ? NOTRAIT : (b::Builder)(u)
         CLOSED_WORLD[] && Base.inferencebarrier(_closed_miss)(X, u)
     end
-    b = Base.invokelatest(_builder_for, Any[X], U)
+    b = _latest_under_policy(_builder_for, Any[X], U)
     b === NOTRAIT || _vc_note_builder(b, U)
     @lock _LOCK begin
         d = _SLOW_GEN[] == GENERATION[] ? copy(_SLOW[]) : IdDict{Any,Any}()

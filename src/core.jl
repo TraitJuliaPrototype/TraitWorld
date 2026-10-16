@@ -285,6 +285,12 @@ function _instance(@nospecialize(X), @nospecialize(R))
 end
 "Whether a trait object carrying the trait set `T` carries `X`, a family or a partly applied instance."
 _carries(@nospecialize(T), @nospecialize(X)) = any(Y -> Y <: X, Base.uniontypes(_decode_traits(T)))
+"""
+`_carries` at types known to the compiler, as a constant: a pure computation on types (no method
+table read), made by a generator, so compiled code holds its answer and no edge to the reflective
+code that computes it (whose native code a load may invalidate).
+"""
+@generated _carries_static(::Type{T}, ::Type{X}) where {T,X} = _carries(T, X)
 
 # --- dynamic values ----------------------------------------------------------
 
@@ -302,7 +308,7 @@ its representation runs.
 struct Dynamic{X}
     t::Any
     function Dynamic{X}(t::TObj{T}) where {X,T}
-        _carries(T, X) || Base.inferencebarrier(_dyn_refuse)(X, T)
+        _carries_static(T, X) || Base.inferencebarrier(_dyn_refuse)(X, T)
         return new{X}(t)                 # the trait object is the user's object: a kept value follows its fields
     end
 end

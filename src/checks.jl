@@ -358,7 +358,7 @@ function _checked_call_body(@nospecialize(f), argtypes, argsyms)
     return quote
         Base.@_inline_meta
         # a dynamic call: the check's reflection stays out of compiled code (and out of trimmed binaries)
-        $(flag)[] || CLOSED_WORLD[] || Base.inferencebarrier(_check_once)($flag, $sig)
+        $(flag)[] || CLOSED_WORLD[] || Base.inferencebarrier(_latest_under_policy)(_check_once, $flag, $sig)
         # the piracy guard audits native code; under rule R a winning pirate is followed as in
         # plain Julia (wrapping-by-facts.md, G1), so the policy's path has none
         $(_policy_path() ? nothing : :(_guard($guard, $sig)))
@@ -401,7 +401,7 @@ fills the defaults inside the trait world.
     guard = GuardState()
     sig = Tuple{typeof(Core.kwcall),nt,f,args...}
     return quote
-        $(flag)[] || CLOSED_WORLD[] || Base.inferencebarrier(_check_once)($flag, $sig)
+        $(flag)[] || CLOSED_WORLD[] || Base.inferencebarrier(_latest_under_policy)(_check_once, $flag, $sig)
         $(_policy_path() ? nothing : :(_guard($guard, $sig)))
         $(_worker_call(:(Core.kwcall), [:nt, :f, :(args...)]))
     end
@@ -426,10 +426,10 @@ _noescape(::Union{TObj,AbstractView,CObj,CMulti,LikeResult}) = throw(TraitUseErr
     any(m -> !_is_entry(m.method), ms) || _no_worker_error(_worker_sig(sig))
     _refuse_overrides()
     if !_def_checked(sig)                                  # checked once at its definition, at archetypes
-        ps = Base.invokelatest(worker_problems, sig)::Vector{String}
+        ps = _latest_under_policy(worker_problems, sig)::Vector{String}
         isempty(ps) || throw(TraitUseError(unique(ps)))
     end
-    Base.invokelatest(_check_concrete, sig)
+    _latest_under_policy(_check_concrete, sig)
     flag[] = true
     _vc_note_worker(sig)                                   # compiled in this session: for a view cache
     return nothing

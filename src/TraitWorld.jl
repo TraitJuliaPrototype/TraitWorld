@@ -177,6 +177,14 @@ end
 _facts_warm(x::Vector{Float64}) = sum(x) / length(x)
 if ccall(:jl_generating_output, Cint, ()) == 1
     _facts_call(_facts_warm, [1.0, 2.0])
+    # the machinery's slow paths under the policy (`_latest_under_policy`), compiled into this
+    # image: their arguments are `@nospecialize`d, so one CodeInstance serves every signature
+    for sig in (Tuple{typeof(_check_once), Base.RefValue{Bool}, DataType},
+                Tuple{typeof(_builder_for), Vector{Any}, DataType},
+                Tuple{typeof(worker_problems), DataType},
+                Tuple{typeof(_check_concrete), DataType})
+        facts_codeinstance(sig)
+    end
 end
 
 end
