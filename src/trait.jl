@@ -92,6 +92,69 @@ function _parse_trait_header(h)
     return h.args[1]::Symbol, h.args[end]::Symbol, supers, params
 end
 
+"""
+The trait syntax of the design (note "Declaring a trait"): operations declared at the trait,
+`ncols(t::ColTable)::Int`, `Self` for the implementing type, every header parameter an
+associated type. Lowered to the internal form, whose last parameter is the implementing
+type, named `Self`. A trait whose operations take `r::R`, `R` the header's last parameter,
+is the earlier spelling and passes unchanged. Returns the header, the block, and the
+(parameter, field) pairs where a field's type is a parameter.
+"""
+function _keys_form(header, block)
+    h = header isa Expr && header.head === :(<:) ? header.args[1] : header
+    name = h isa Symbol ? h : (h isa Expr && h.head === :curly ? h.args[1] : nothing)
+    name isa Symbol || return header, block, Tuple{Symbol,Symbol}[]
+    hps = h isa Symbol ? Any[] : h.args[2:end]
+    pnames = Symbol[p isa Symbol ? p : p.args[1] for p in hps]
+    ops = block === nothing ? Any[] : Any[_opcall(ex) for ex in block.args if _opcall(ex) !== nothing]
+    firsttypes = Any[length(c.args) >= 2 && c.args[2] isa Expr && c.args[2].head === :(::) ? c.args[2].args[end] : nothing for c in ops]
+    # the earlier spelling: the operations' first argument typed by the header's last parameter
+    !isempty(pnames) && any(t -> t === pnames[end], firsttypes) && return header, block, Tuple{Symbol,Symbol}[]
+    if block === nothing && h isa Symbol
+        # a bundle, `@trait Table <: (ColTable, RowTable)`
+        return (header isa Expr ? Expr(:(<:), Expr(:curly, name, :Self), header.args[2]) : Expr(:curly, name, :Self)), block, Tuple{Symbol,Symbol}[]
+    end
+    newh = Expr(:curly, name, hps..., :Self)
+    newheader = header isa Expr && header.head === :(<:) ? Expr(:(<:), newh, header.args[2]) : newh
+    block === nothing && return newheader, block, Tuple{Symbol,Symbol}[]
+    fieldparams = Tuple{Symbol,Symbol}[]
+    newblock = Expr(:block)
+    for ex in block.args
+        c = _opcall(ex)
+        if c !== nothing
+            push!(newblock.args, _self_first(ex, name))
+            continue
+        end
+        fd = ex isa Expr && ex.head === :macrocall && ex.args[1] === Symbol("@const") ? ex.args[end] : ex
+        if fd isa Expr && fd.head === :(::) && length(fd.args) == 2 && fd.args[1] isa Symbol && fd.args[2] isa Symbol && fd.args[2] in pnames
+            push!(fieldparams, (fd.args[2], fd.args[1]))
+        end
+        push!(newblock.args, ex)
+    end
+    return newheader, newblock, fieldparams
+end
+"The call of an operation declaration (`f(t::X, …)::T`, a default, `@mutating`), or nothing for fields and equations."
+function _opcall(ex)
+    ex isa Expr && ex.head === :macrocall && ex.args[1] === Symbol("@mutating") && (ex = ex.args[end])
+    ex isa Expr && ex.head === :(=) && (ex = ex.args[1])
+    ex isa Expr && ex.head === :(::) && length(ex.args) == 2 && ex.args[1] isa Expr && ex.args[1].head === :call || return nothing
+    return ex.args[1]
+end
+"An operation declared at the trait, `f(t::X, …)` or `f(t::X{T}, …)` or `f(t::Self, …)`: its first argument typed `Self`."
+function _self_first(ex, name::Symbol)
+    ex isa Expr && ex.head === :macrocall && return Expr(:macrocall, ex.args[1:end-1]..., _self_first(ex.args[end], name))
+    ex isa Expr && ex.head in (:(=), :(::)) && return Expr(ex.head, _self_first(ex.args[1], name), ex.args[2:end]...)
+    ex isa Expr && ex.head === :call || return ex
+    first = length(ex.args) >= 2 ? ex.args[2] : nothing
+    if first isa Expr && first.head === :(::)
+        T = first.args[end]
+        if T === name || T === :Self || (T isa Expr && T.head === :curly && T.args[1] === name)
+            return Expr(:call, ex.args[1], Expr(:(::), (length(first.args) == 2 ? first.args[1] : gensym(:t)), :Self), ex.args[3:end]...)
+        end
+    end
+    error("@trait: the first argument of `$(ex.args[1])` must be typed by the trait, `t::$name`")
+end
+
 "Replace the parameter names in a type expression by their values at the representation: `T` becomes `param(X, Val(:T), R)`."
 function _subst_params(ex, pnames::Vector{Symbol}, name, Rsym::Symbol)
     TW = TraitWorld
@@ -107,6 +170,7 @@ function _tobj_where(name, np::Int, T::Symbol)
 end
 
 macro trait(header, block = nothing)
+    header, block, fieldparams = _keys_form(header, block)
     name, Rsym, supers, params = _parse_trait_header(header)
     TW = TraitWorld
     pnames = Symbol[p for (p, _) in params]
@@ -147,6 +211,12 @@ macro trait(header, block = nothing)
         end
     end
     length(unique(first.(fdecls))) == length(fdecls) || error("@trait: a field is declared twice in `$name`")
+    # a parameter that types a field is that field's type (note "Declaring a trait": a field defines its type's parameter)
+    for (p, f) in fieldparams
+        any(ex -> ex isa Expr && ex.head === :(=) && ex.args[1] === p, block.args) &&
+            error("@trait: parameter `$p` of `$name` is defined by the field `$f` and by an equation; define it once")
+        push!(out, :($TW.param(::Type{$name}, ::Val{$(QuoteNode(p))}, ::Type{$Rsym}) where {$Rsym} = fieldtype($Rsym, $(QuoteNode(f)))))
+    end
     sigs = [(d.name, length(d.args)) for d in decls]
     length(unique(sigs)) == length(sigs) || error("@trait: an operation is declared twice with the same arity in `$name`")
     names = unique([d.name for d in decls])

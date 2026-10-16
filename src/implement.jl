@@ -541,11 +541,61 @@ end
 
 _flag(x) = x isa Symbol && x in (:dynamic, :copies)
 
+"""
+The conformance syntax of the design (note "How a type conforms to a trait"), lowered to the
+forms below:
+- `@implement X T begin ops end`: an implementation for `T` and its declaration, `X{P…, T}`;
+- `@implement X A where {A <: …} [begin … end]`: a family or generic implementation;
+- `@implement X T by f`: forwarding to the field `f`;
+- `@implement X T dynamic by f begin ops on the field end`: the type's own operations on its field.
+"""
+function _keys_implement(mod::Module, args)
+    length(args) >= 2 || return args
+    head = args[1]
+    X, pexs = (head isa Symbol || (head isa Expr && head.head === :.)) ? (head, Any[]) :
+              head isa Expr && head.head === :curly ? (head.args[1], Any[head.args[2:end]...]) : (nothing, nothing)
+    X === nothing && return args
+    Xv = try Core.eval(mod, X) catch; return args end
+    Xv isa Type && Xv <: Trait || return args
+    np = length(trait_params(Xv))
+    # parameters left out are defined by the trait (an equation or a field)
+    isempty(pexs) && np > 0 && (pexs = Any[:_ for _ in 1:np])
+    length(pexs) == np || return args            # `X{P…, R}`: the earlier spelling
+    T = args[2]
+    rest = collect(args[3:end])
+    withR(R) = Expr(:curly, X, pexs..., R)
+    # X A where {…}, with or without a block
+    if T isa Expr && T.head === :where && T.args[1] isa Symbol
+        return (Expr(:where, withR(T.args[1]), T.args[2:end]...), rest...)
+    end
+    # X T begin … end without `project`: an implementation for T
+    if length(rest) == 1 && rest[1] isa Expr && rest[1].head === :block &&
+       !any(d -> d isa Expr && d.args[1] isa Expr && d.args[1].args[1] in (:project, :unproject), _defs(rest[1]))
+        return (withR(T), rest[1])
+    end
+    # forwarding: X T [dynamic] by f [block]
+    flags = Any[]
+    while !isempty(rest) && rest[1] isa Symbol && rest[1] !== :by
+        push!(flags, popfirst!(rest))
+    end
+    if length(rest) >= 2 && rest[1] === :by && rest[2] isa Symbol
+        f = rest[2]
+        pdef = :(project(t) = getfield(t, $(QuoteNode(f))))
+        if length(rest) == 3 && rest[3] isa Expr && rest[3].head === :block
+            return (head, T, flags..., Expr(:block, pdef, rest[3].args...))
+        end
+        length(rest) == 2 || error("@implement: expected `@implement $X T by field`, optionally followed by a begin … end block")
+        return isempty(flags) ? (head, T, pdef) : (head, T, flags..., Expr(:block, pdef))
+    end
+    return args
+end
+
 macro implement(args...)
     mod = __module__
     _note_extension!(mod, __source__.file)
     TW = TraitWorld
     isempty(args) && error("@implement: nothing to implement")
+    args = _keys_implement(mod, args)
     head = args[1]
     rest = collect(args[2:end])
     # --- projections: @implement X T …, @implement (X, Y) T …, @implement X{R} T …
@@ -599,6 +649,7 @@ function _param_methods(@nospecialize(X), pexs, Rex, wheres::Vector{Any})
     length(pexs) == length(ps) || error("@implement: $X takes $(length(ps)) parameter(s), got $(length(pexs))")
     out = Any[]
     for (p, pex) in zip(ps, pexs)
+        pex === :_ && continue              # defined by the trait's equation or field
         sig = :($TW.param(::Type{$X}, ::Val{$(QuoteNode(p))}, ::Type{$Rex}))
         push!(out, Expr(:(=), isempty(wheres) ? sig : Expr(:where, sig, wheres...), pex))
     end

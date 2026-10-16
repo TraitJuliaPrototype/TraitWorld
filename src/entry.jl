@@ -540,3 +540,23 @@ function _rebuild(u, i::Int, r)
 end
 "An operation returning the representation, on a dynamic value: a dynamic value of the same conformance."
 @inline _dyn_like(d::Dynamic{X}, r) where {X} = Dynamic{X}(like(opened(d), r))
+
+# --- membership (note "Traits as abstract types") ----------------------------------
+
+"""
+    conforms(T, X)
+
+Whether values of type `T` conform to the bound `X` (`ColTable`, or a trait at fixed
+parameters, `StateVector{Float64}`): what `T <: X` means in the design. The package
+cannot make it subtyping, so it is a function.
+"""
+function conforms(@nospecialize(T::Type), @nospecialize(X::Type))
+    F = _family(X)
+    if T <: Dynamic && T isa DataType
+        Y = _family(T.parameters[1])
+        return any(Z -> Z === F, trait_closure(Y))
+    end
+    p = proj_lookup(F, T)
+    p === nothing && return false
+    return _pmatch(_instance(F, p.R), X)
+end

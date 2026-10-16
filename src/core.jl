@@ -163,6 +163,56 @@ Base.hash(d::Dynamic, h::UInt) = hash(getfield(d, :t), hash(:TraitWorldDynamic, 
 Base.show(io::IO, d::Dynamic{X}) where {X} = print(io, "Dynamic{", X, "} at ", _represented(typeof(getfield(d, :t))))
 _represented(@nospecialize(T)) = T <: TObj ? join(unique([string(v.parameters[3]) for v in T.parameters[2].parameters]), ", ") : string(T)
 @inline _dyn_assert(x, ::Type{S}) where {S} = x::S
+
+# --- printing by bound and representation (note "Identical or error", findings §16, §17) --------
+#
+# A trait object's type is machinery: `TObj{ColTable{Ramp}, Tuple{View{ColTable{Ramp}, Impl{()}, Ramp}}}`.
+# It prints as what a reader needs, the bound and the representation, `ColTable at Ramp`, in
+# stack traces, `MethodError`s and `typeof` alike. The concrete type stays the worker's key.
+
+"Whether `T` is a trait object's concrete type, with views whose parameters are all known."
+_printable_tobj(@nospecialize(T)) = T isa DataType && T <: TObj && T.parameters[2] isa DataType &&
+    all(v -> v isa DataType && v <: AbstractView && length(v.parameters) == 3 && v.parameters[1] isa DataType, T.parameters[2].parameters)
+
+"A trait instance without its representation: `StateVector{Float64}` for `StateVector{Float64, Vector{Float64}}`."
+function _show_bound(io::IO, @nospecialize(X))
+    show(io, Base.typename(X).wrapper)
+    ps = X.parameters[1:end-1]
+    isempty(ps) && return
+    print(io, "{")
+    for (i, p) in enumerate(ps)
+        i > 1 && print(io, ", ")
+        show(io, p)
+    end
+    print(io, "}")
+end
+
+function _show_tobj(io::IO, @nospecialize(T))
+    # views grouped by representation and how it is held: `ColTable & RowTable at Vector{Vector{Float64}}`
+    groups = Any[]
+    for V in T.parameters[2].parameters
+        X, W, R = V.parameters
+        how = V <: LiveView ? " by lens" : W <: Dyn ? " (dynamic)" : ""
+        k = findfirst(g -> g[1] === R && g[2] == how, groups)
+        k === nothing ? push!(groups, (R, how, Any[X])) : push!(groups[k][3], X)
+    end
+    for (i, (R, how, Xs)) in enumerate(groups)
+        i > 1 && print(io, ", ")
+        for (j, X) in enumerate(Xs)
+            j > 1 && print(io, " & ")
+            _show_bound(io, X)
+        end
+        print(io, " at ")
+        show(io, R)
+        print(io, how)
+    end
+end
+
+function Base.show(io::IO, T::Type{<:TObj})
+    _printable_tobj(T) || return invoke(show, Tuple{IO,Type}, io, T)
+    return _show_tobj(io, T)
+end
+Base.show(io::IO, t::TObj) = (print(io, "trait object "); _show_tobj(io, typeof(t)))
 # keeping a trait object: a field projection of a mutable user type is kept as a lens
 @inline _kept(t::TObj) = TObj(map(_keepview, getfield(t, :views)))
 @inline _keepview(v::FieldView{X,W,R}) where {X,W,R} = LiveView{X,W,R}(getfield(v, :w), getfield(v, :o), getfield(v, :i))
@@ -354,6 +404,17 @@ CObj{A,S}(f::F) where {A,S,F} = CObj{A,S,F}(f)
 @inline function (c::CObj{A,S})(args...) where {A,S}
     args isa A || throw(MethodError(c.f, args))
     return c.f(args...)::S
+end
+
+# a function inside library code prints as its bound and how it is called
+function Base.show(io::IO, T::Type{<:CObj})
+    T isa DataType && length(T.parameters) == 3 && T.parameters[3] isa Type ||
+        return invoke(show, Tuple{IO,Type}, io, T)
+    A, S, F = T.parameters
+    print(io, "Callable{")
+    show(io, A); print(io, ", "); show(io, S)
+    print(io, "} at ")
+    F <: Erased ? print(io, "DynamicCall") : show(io, F)
 end
 
 """

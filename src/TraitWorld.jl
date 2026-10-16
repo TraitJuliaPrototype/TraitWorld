@@ -18,7 +18,7 @@ export Trait, Callable, CallMode, DynamicCall, CompiledCall, compiled_call, dyna
        @trait, @implement, @trait_module, @workload, @trait_wrapper, @handle, @call, Handle,
        TraitBoundError, TraitUseError, ImplementError, LayeringError, OwnershipError, PiracyError, mode!, verify_main, isclosed,
        piracy_mode!, check_no_piracy, viewcache_flush,
-       @warn_on_abstract, @error_on_abstract, AbstractTypeError, check_concrete, check_definitions
+       @warn_on_abstract, @error_on_abstract, AbstractTypeError, check_concrete, check_definitions, conforms
 
 function __init__()
     m = get(ENV, "JULIA_TRAITWORLD", "")
