@@ -69,6 +69,39 @@ end
 @inline _viewof(::Type{X}, v::View{X}, rest::View...) where {X} = v
 @inline _viewof(::Type{X}, v::View, rest::View...) where {X} = _viewof(X, rest...)
 
+# --- dynamic values ----------------------------------------------------------
+
+"""
+    Dynamic{X}
+
+A value of any type conforming to trait `X`, kept beyond a call and reached
+through `X`'s operations (note "Dynamic values"). It keeps a trait object of
+`X`: made from one inside a trait module, `Dynamic{X}(t)`, or by storing one
+where a `Dynamic{X}` is declared, so its type decides it. An operation of `X`
+on it dispatches on the trait object inside and asserts the declared result
+type; passed to a function bounded by `X`, it is opened, and the worker for
+its representation runs.
+"""
+struct Dynamic{X}
+    t::Any
+    function Dynamic{X}(t::TObj{T}) where {X,T}
+        X <: T || Base.inferencebarrier(_dyn_refuse)(X, T)
+        return new{X}(t)
+    end
+end
+Dynamic{X}(d::Dynamic{X}) where {X} = d
+Base.convert(::Type{Dynamic{X}}, t::TObj) where {X} = Dynamic{X}(t)
+@noinline _dyn_refuse(@nospecialize(X), @nospecialize(T)) =
+    throw(ArgumentError("a trait object carrying $(join(string.(Base.uniontypes(T)), ", ")) cannot be kept as a Dynamic{$X}"))
+"The trait object a dynamic value keeps: what a bound opens."
+@inline opened(d::Dynamic) = getfield(d, :t)
+# equal when they keep the same trait object: same representation type, same implementation, egal data
+Base.:(==)(a::Dynamic{X}, b::Dynamic{X}) where {X} = getfield(a, :t) === getfield(b, :t)
+Base.hash(d::Dynamic, h::UInt) = hash(getfield(d, :t), hash(:TraitWorldDynamic, h))
+Base.show(io::IO, d::Dynamic{X}) where {X} = print(io, "Dynamic{", X, "} at ", _represented(typeof(getfield(d, :t))))
+_represented(@nospecialize(T)) = T <: TObj ? join(unique([string(v.parameters[3]) for v in T.parameters[2].parameters]), ", ") : string(T)
+@inline _dyn_assert(x, ::Type{S}) where {S} = x::S
+
 # --- witnesses -------------------------------------------------------------
 
 "The representation's own methods implement the trait; `D` lists the operations served by the trait's defaults."

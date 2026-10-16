@@ -111,9 +111,14 @@ function _process(mod::Module, ex)
         fname = _fdef_name(inner)
         r = _process(mod, inner)
         return Expr(:toplevel, r, :($TraitWorld.concrete_level(::typeof($fname)) = $(QuoteNode(level))))
+    elseif h === :struct
+        return _dynamic_fields(mod, ex)
     elseif h === :macrocall
         name = ex.args[1]
         inner = ex.args[end]
+        if name == GlobalRef(Core, Symbol("@doc")) && inner isa Expr && inner.head === :struct
+            return Expr(:macrocall, ex.args[1:end-1]..., _dynamic_fields(mod, inner))
+        end
         if (name in _PASS_MACROS || name == GlobalRef(Core, Symbol("@doc"))) && _is_fdef(inner)
             r = _rewrite_fdef(mod, inner)
             r === nothing && return ex
@@ -129,6 +134,41 @@ function _process(mod::Module, ex)
         return Expr(:toplevel, worker, rest...)
     end
     return ex
+end
+
+"""
+A trait's name in a struct field or a container means its dynamic value, as an
+abstract type's name there means a boxed value (note "Traits as abstract
+types"): `plots::Vector{Plot}` is `Vector{Dynamic{Plot}}`, `bg::ColorSpec` is
+`Dynamic{ColorSpec}`. `Vector{<:ColTable}` keeps its meaning, one representation.
+"""
+function _dynamic_fields(mod::Module, ex::Expr)
+    body = ex.args[3]
+    body isa Expr && body.head === :block || return ex
+    newbody = Any[]
+    for f in body.args
+        if f isa Expr && f.head === :(::) && length(f.args) == 2
+            push!(newbody, Expr(:(::), f.args[1], _dyn_type(mod, f.args[2])))
+        elseif f isa Expr && f.head === :const && f.args[1] isa Expr && f.args[1].head === :(::)
+            g = f.args[1]
+            push!(newbody, Expr(:const, Expr(:(::), g.args[1], _dyn_type(mod, g.args[2]))))
+        else
+            push!(newbody, f)
+        end
+    end
+    return Expr(:struct, ex.args[1], ex.args[2], Expr(:block, newbody...))
+end
+
+function _dyn_type(mod::Module, T)
+    if T isa Symbol || (T isa Expr && T.head === :.)
+        v = _tryeval(mod, T)
+        return (v isa Type && is_trait(v)) ? :($TraitWorld.Dynamic{$T}) : T
+    elseif T isa Expr && T.head === :curly
+        h = _tryeval(mod, T.args[1])
+        h isa Type && is_trait(h) && return :($TraitWorld.Dynamic{$T})
+        return Expr(:curly, T.args[1], Any[(a isa Expr && a.head === :(<:)) ? a : _dyn_type(mod, a) for a in T.args[2:end]]...)
+    end
+    return T
 end
 
 function _is_fdef(ex)

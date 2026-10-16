@@ -79,6 +79,7 @@ The trait object for argument `pos` of a call to `f` from ordinary code, or
 # which an unrelated package load can invalidate (session 19: loading
 # DataFrames invalidated every entry through `_rule3_error`'s message).
 @noinline function enter(c::EntryCache, f::F, pos::Int, nargs::Int, @nospecialize(t)) where {F}
+    t isa Dynamic && return opened(t)                     # a dynamic value is opened: its worker is selected by dispatch
     t isa TObj && Base.inferencebarrier(_rule3_error)(f, pos, t)
     if CLOSED_WORLD[]
         b = get(c.builders, typeof(t), nothing)
@@ -320,6 +321,7 @@ An abstract field could hold anything, so it is not either.
 """
 function _tw_type(@nospecialize(T), seen)
     T isa DataType || return false
+    T <: Dynamic && return true                         # made only from trait objects: its type decides it
     T in seen && return true
     push!(seen, T)
     is_trait_world(T.name.module) || return false

@@ -964,3 +964,4 @@ end
     @test Main.BadDef.def_clean(Measurements([[1.0, 3.0]]), 1) == 2.0
     @test Main.BadDef.def_clean(Ramp([1.0, 2.0], 2), 2) == 6.0
 end
+include("dynamic.jl")

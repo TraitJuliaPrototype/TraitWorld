@@ -141,6 +141,8 @@ function _worker_problems(@nospecialize(sig), seen, out, root::Bool)
                 continue
             end
             line = _line_of(src, mi, i)
+            # keeping a trait object where a Dynamic is declared (note "Dynamic values")
+            _keeps_dynamic(f, ats, ex, src, sptypes) && continue
             if f === nothing
                 push!(out, "$line: a trait object is passed to a function not known at compile time")
                 continue
@@ -197,6 +199,40 @@ function _worker_problems(@nospecialize(sig), seen, out, root::Bool)
         end
     end
     return out
+end
+
+"""
+Whether a call keeps its trait objects as dynamic values: `Dynamic{X}(t)`,
+`convert(Dynamic{X}, t)`, storing into a container of dynamic values, into a
+field declared `Dynamic`, or constructing a struct whose fields at the trait
+objects' positions are declared `Dynamic`. The conversion checks the trait.
+"""
+function _keeps_dynamic(@nospecialize(f), ats::Vector{Any}, ex::Expr, src, sptypes)
+    isdyn(@nospecialize(T)) = T isa Type && T !== Union{} && T <: Dynamic
+    f isa Type && isdyn(f) && return true
+    if f === Base.convert && length(ats) == 3
+        A = ats[2]
+        return A isa DataType && A <: Type && isdyn(A.parameters[1])
+    end
+    if (f === Base.push! || f === Base.pushfirst! || f === Base.setindex! || f === Base.insert!) && length(ats) >= 3
+        C = ats[2]
+        return C isa Type && C <: AbstractArray && isdyn(eltype(C))
+    end
+    if (f === Base.setproperty! || f === Core.setfield!) && length(ats) == 4
+        S = ats[2]
+        nm = _CC.argextype(ex.args[3], src, sptypes)
+        nm isa _CC.Const || return false
+        k = nm.val
+        return S isa DataType && (k isa Symbol || k isa Int) && hasfield(S, k isa Symbol ? k : fieldname(S, k)) &&
+               isdyn(fieldtype(S, k))
+    end
+    if f isa DataType && isstructtype(f) && fieldcount(f) == length(ats) - 1
+        for k in 2:length(ats)
+            _hastobj(ats[k]) && !isdyn(fieldtype(f, k - 1)) && return false
+        end
+        return true
+    end
+    return false
 end
 
 """

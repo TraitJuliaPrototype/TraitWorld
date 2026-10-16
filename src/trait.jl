@@ -13,6 +13,9 @@
 #     @mutating setcol!(r::R, i::Int, v::Vector{Float64})::Nothing   # inside a trait body
 # ---------------------------------------------------------------------------
 
+"Whether expression `ex` mentions the symbol `R`."
+_mentions(ex, R::Symbol) = ex === R || (ex isa Expr && any(a -> _mentions(a, R), ex.args))
+
 struct _OpDecl
     name::Symbol          # the operation's key
     fexpr::Any            # the function, as written (`ncols`, `Base.getindex`)
@@ -125,6 +128,14 @@ macro trait(header, block = nothing)
         T = gensym(:T)
         push!(out, :(@inline $(d.fexpr)(t::$TW.TObj{$T}, args...) where {$T >: $name} =
                          $TW.opcall($name, Val($key), $(d.fexpr), t, args...)))
+    end
+    # the operations on a dynamic value: dispatch on the trait object it keeps, assert the
+    # declared result type where it does not depend on the representation
+    for d in decls
+        syms = [gensym(:a) for _ in d.args]
+        retx = _mentions(d.ret, Rsym) ? :Any : d.ret
+        push!(out, :(@inline $(d.fexpr)(dyn::$TW.Dynamic{$name}, $(syms...)) =
+                         $TW._dyn_assert($(d.fexpr)($TW.opened(dyn), $(syms...)), $retx)))
     end
     push!(out, :($TW._bump!()))
     push!(out, :($name))
