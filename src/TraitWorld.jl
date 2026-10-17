@@ -13,19 +13,17 @@ using Serialization: Serialization
 
 export Trait, Callable, CallMode, DynamicCall, CompiledCall, compiled_call, dynamic_call, TObj, Dynamic, DynamicFn, dynamic_fn,
        @trait, @implement, @trait_module, @workload,
-       TraitBoundError, TraitUseError, ImplementError, LayeringError, OwnershipError, PiracyError, mode!, verify_main, isclosed,
+       TraitBoundError, TraitUseError, ImplementError, OwnershipError, PiracyError, mode!, verify_main, isclosed,
        viewcache_flush,
        @warn_on_abstract, @error_on_abstract, AbstractTypeError, check_concrete, check_definitions, conforms, withfields
 
 function __init__()
     m = get(ENV, "JULIA_TRAITWORLD", "")
     isempty(m) || mode!(Symbol(m))
-    empty!(_DOOR_FACTS)
     empty!(_NOT_EXTENSIONS)
     _vc_init!()
     _hooks_init!()
     FACTS[] = get(ENV, "JULIA_TW_FACTS", "1") != "0"
-    LAYERING[] = get(ENV, "JULIA_TW_LAYERING", "0") == "1"
     _FACTS_POLICY[] = get(ENV, "JULIA_TW_FACTS_POLICY", "1") != "0"
     _FACTS_DEBUG[] = get(ENV, "JULIA_TW_FACTS_DEBUG", "0") == "1"
     _COMPILER_WORLD[] = Base.get_world_counter()
@@ -56,7 +54,6 @@ include("implement.jl")
 include("entry.jl")
 include("trait_module.jl")
 include("checks.jl")
-include("doors.jl")
 include("verify.jl")
 include("concrete.jl")
 include("viewcache.jl")

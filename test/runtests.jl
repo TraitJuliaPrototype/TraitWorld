@@ -116,7 +116,7 @@ end
     @test Main.Bad.good(Main.Both([[1.0, 3.0]], [1.0 2.0; 3.0 4.0])) == (2.0, [1.0, 2.0])
 end
 
-@testset "M1: ownership (rule 3) and layering (rule 1)" begin
+@testset "M1: ownership (rule 3); a trait module may import ordinary code" begin
     # implementing a foreign trait for a foreign representation
     e = thrown(:(@implement ColTable{Vector{Int}} begin ncols(r) = 1; col(r, i) = [1.0] end))
     @test e isa ImplementError       # the session owns neither the trait nor Vector{Int}
@@ -154,15 +154,15 @@ end
         end
     end)
     @test e isa OwnershipError
-    # layering: a trait module imports an ordinary module
+    # wrapping by facts: a trait module may import and use any Julia code
     toplevel(:(module Plain; f() = 1; end))
     e = thrown(quote
-        @trait_module module BadLayer
+        @trait_module module UsesPlain
         using TraitWorld, ..Plain
+        g() = Plain.f() + 1
         end
     end)
-    # wrapping by facts: a trait module may use any Julia code (rule 1 only with JULIA_TW_LAYERING=1)
-    @test TraitWorld.LAYERING[] ? e isa LayeringError : e === nothing
+    @test e === nothing && Main.UsesPlain.g() == 2
 end
 
 @testset "M1: implementations are checked when defined" begin
@@ -408,7 +408,7 @@ end
     @test_throws MethodError Main.TwoSig.other(x -> x, "s")               # a signature nobody declared
 end
 
-# --- M6: layering beyond imports; the piracy audit -------------------------------------------
+# --- M6: calls into ordinary code; a winning pirate -------------------------------------------
 module Plain2; f(x) = x + 1.0; end
 @trait_module module Weights
 using TraitWorld, ..Columns
@@ -420,8 +420,7 @@ guarded(t::ColTable, i::Int) = try weighted(t, i) catch; -1.0 end
 end
 using .Weights
 @testset "M6: rule 1 on typed code; the piracy audit" begin
-    e = try Weights.sneak([[1.0]]) catch err; err end
-    @test TraitWorld.LAYERING[] ? (e isa TraitUseError && occursin("outside the trait world (rule 1)", sprint(showerror, e))) : !(e isa Exception)
+    @test Weights.sneak([[1.0]]) == 2.0                              # an ordinary package's function: called as in plain Julia
     m = [1.0 2.0; 3.0 4.0]
     @test weighted(m, 1) == 4.0
     toplevel(:(module Pirate2; using ..Weights; Weights.weight(x::Float64) = 2.0; end))
@@ -752,49 +751,27 @@ module ImplX; using ..CoreX; Base.length(v::CoreX.V) = length(v.x); end
     @test isempty(TraitWorld._required_roots(Vector{Int}))
 end
 
-# --- poc3 M5: the Base wrapper, the door check -----------------------------------------------------
+# --- wrapping by facts: trait-world code calls any Julia code -------------------------------------
 module PlainGlobals; x = 1; end
-@trait_module module Doors
+@trait_module module AnyCode
 using TraitWorld, ..Columns
-bad_eval(t::ColTable) = (eval(:(1 + 1)); ncols(t))
-bad_tls(t::ColTable) = (task_local_storage(); ncols(t))
-bad_module(t::ColTable) = Main.PlainGlobals.x + ncols(t)
+uses_eval(t::ColTable) = (eval(:(1 + 1)); ncols(t))
+uses_tls(t::ColTable) = (task_local_storage(); ncols(t))
+other_global(t::ColTable) = Main.PlainGlobals.x + ncols(t)
 counter = 0
-bad_global(t::ColTable) = counter + ncols(t)
+own_global(t::ColTable) = counter + ncols(t)
 warns(t::ColTable) = (@warn "a table"; ncols(t))
 prints(t::ColTable) = (println(ncols(t)); ncols(t))
 clean(t::ColTable) = (c = col(t, 1); sum(c) / length(c) + sqrt(abs(minimum(c))) + length(string(ncols(t))))
-deep(t::ColTable) = length(string(col(t, 1)[1])) + ncols(t)
-barrier_eval(t::ColTable) = (f = Base.inferencebarrier(Base.eval); f(Main, :(1 + 1)); ncols(t))
 end
-@testset "poc3 M5: the door check" begin
+@testset "wrapping by facts: trait-world code calls any Julia code" begin
     v = [[1.0, 2.0]]
-    msg(f) = try f(v); "" catch e; sprint(showerror, e) end
-    if TraitWorld.LAYERING[]
-        @test occursin("inward door", msg(Doors.bad_eval)) && occursin("eval", msg(Doors.bad_eval))
-        @test occursin("inward door", msg(Doors.bad_tls))
-    else                                                         # wrapping by facts: calls to any Julia code
-        @test msg(Doors.bad_eval) == "" && msg(Doors.bad_tls) == ""
-    end
-    @test occursin("inward door", msg(Doors.bad_module)) || occursin("global", msg(Doors.bad_module)) ||
-          (!TraitWorld.LAYERING[] && msg(Doors.bad_module) == "")     # another module's global: a binding edge, allowed
-    @test occursin("global", msg(Doors.bad_global)) && occursin("counter", msg(Doors.bad_global))
-    @test (@test_logs (:warn, "a table") Doors.warns(v)) == 1                   # an outward door: accepted
-    @test Doors.prints(v) == 1
-    @test Doors.clean(v) == 1.5 + 1.0 + 1
-    W = TraitWorld.WORKER_DOORS
-    key(f) = first(k for k in keys(W) if k.parameters[1] === typeof(f))
-    @test !isempty(W[key(Doors.warns)].outward) && !isempty(W[key(Doors.prints)].outward)
-    @test isempty(W[key(Doors.clean)].outward)
-    # the walk's budget: its end is reported whatever the concrete level
-    old = TraitWorld.DOOR_BUDGET[]
-    TraitWorld.DOOR_BUDGET[] = 3
-    empty!(TraitWorld._DOOR_FACTS)
-    @test (@test_logs (:warn, r"stopped at its budget") match_mode=:any Doors.deep(v)) == 4
-    @test W[key(Doors.deep)].truncated
-    TraitWorld.DOOR_BUDGET[] = old
-    # a door behind a dynamic call: the design checks the target when it compiles; stock Julia does not
-    @test_broken occursin("inward door", msg(Doors.barrier_eval))
+    # what plain Julia computes: no door check, no global check, no layering rule
+    @test AnyCode.uses_eval(v) == 1 && AnyCode.uses_tls(v) == 1
+    @test AnyCode.other_global(v) == 2 && AnyCode.own_global(v) == 1
+    @test (@test_logs (:warn, "a table") AnyCode.warns(v)) == 1
+    @test AnyCode.prints(v) == 1
+    @test AnyCode.clean(v) == 1.5 + 1.0 + 1
 end
 
 @testset "view caches: keys and recording" begin

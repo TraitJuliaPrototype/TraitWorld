@@ -124,9 +124,8 @@ const DEFCHECK_SKIP = Ref(true)
     definition_problems(f) -> Vector{String}
 
 Check every trait-bounded method of `f` once, at archetypes: what it does
-with its trait objects, the globals and doors it reaches, independent of any
-representation. Methods checked clean are recorded, so their workers' first
-calls skip the check per signature.
+with its trait objects, independent of any representation. Methods checked
+clean are recorded, so their workers' first calls skip the check per signature.
 """
 function definition_problems(@nospecialize(f))
     out = String[]

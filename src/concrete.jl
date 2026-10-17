@@ -506,13 +506,6 @@ function _check_concrete(@nospecialize(sig))
     lv = Base.invokelatest(concrete_level, f)::Symbol
     lv === :off && return nothing
     fs = concrete_findings(sig)
-    d = get(WORKER_DOORS, sig, nothing)
-    if d !== nothing && (!isempty(d.outward) || d.truncated)
-        # outward doors are dynamic calls upward; the budget's end is reported, never admitted by silence
-        msg = "`$(nameof(f))` at $(_sig_reps(sig)): " * (isempty(d.outward) ? "" : "outward doors, dynamic calls upward: " * join(d.outward, "; ")) *
-              (d.truncated ? (isempty(d.outward) ? "" : "; ") * "the walk into Base stopped at its budget ($(DOOR_BUDGET[]) method instances): unchecked beyond it" : "")
-        @warn "@warn_on_abstract: " * msg
-    end
     isempty(fs) && return nothing
     lv === :error && throw(AbstractTypeError(nameof(f), _sig_reps(sig), fs))
     @warn "@warn_on_abstract: " * sprint(_print_findings, nameof(f), _sig_reps(sig), fs)

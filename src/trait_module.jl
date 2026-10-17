@@ -24,11 +24,6 @@
 #     method of the same shape becomes the entry's fallback.
 # ---------------------------------------------------------------------------
 
-struct LayeringError <: Exception
-    msg::String
-end
-Base.showerror(io::IO, e::LayeringError) = print(io, "LayeringError: ", e.msg)
-
 struct OwnershipError <: Exception
     msg::String
 end
@@ -99,7 +94,7 @@ function _process(mod::Module, ex)
     if h === :toplevel || (h === :block && any(a -> !(a isa LineNumberNode), ex.args))
         return Expr(:toplevel, _transform_all(ex.args)...)
     elseif h === :using || h === :import
-        return Expr(:toplevel, ex, :($TraitWorld._check_import(@__MODULE__, $(QuoteNode(ex)))))
+        return ex                                   # a trait module may use any Julia code
     elseif h === :call && ex.args[1] === :include
         return Expr(:call, :include, GlobalRef(TraitWorld, :_transform_file), ex.args[2:end]...)
     elseif h === :module
@@ -618,64 +613,6 @@ end
 
 # --- checks ----------------------------------------------------------------------
 
-function _module_path(mod::Module, path::Expr)
-    syms = Symbol[a for a in path.args]
-    i = 1
-    m = mod
-    if syms[1] === :.
-        while i <= length(syms) && syms[i] === :.
-            i += 1
-        end
-        for _ in 1:(i-2)
-            m = parentmodule(m)
-        end
-    else
-        name = syms[1]
-        if isdefined(mod, name) && getfield(mod, name) isa Module
-            m = getfield(mod, name)
-        else
-            m = _loaded_module(name)
-        end
-        i = 2
-    end
-    while i <= length(syms)
-        isdefined(m, syms[i]) || break
-        x = getfield(m, syms[i])
-        x isa Module || break
-        m = x
-        i += 1
-    end
-    return m
-end
-function _loaded_module(name::Symbol)
-    for (k, v) in Base.loaded_modules
-        k.name == String(name) && return v
-    end
-    error("@trait_module: cannot find the module `$name`")
-end
-
-"Rule 1, at the import: a trait module imports only the trait world."
-function _check_import(mod::Module, ex::Expr)
-    paths = Expr[]
-    for a in ex.args
-        if a isa Expr && a.head === :(:)
-            push!(paths, a.args[1])
-        elseif a isa Expr && a.head === :.
-            push!(paths, a)
-        elseif a isa Expr && a.head === :as
-            push!(paths, a.args[1])
-        end
-    end
-    for p in paths
-        target = _module_path(mod, p)
-        !LAYERING[] || is_trait_world(target) || throw(LayeringError(
-            "trait module $mod imports $target, which is outside the trait world. Layering (rule 1): ordinary code may " *
-            "use the trait world, the trait world uses only itself. Make $target a trait module, or call it from an " *
-            "ordinary module that uses both."))
-    end
-    return nothing
-end
-
 "Rule 3: every method a trait module defines is owned by its package, in every signature it applies to."
 function _check_methods(mod::Module, fname)
     f = Core.eval(mod, fname)
@@ -751,12 +688,6 @@ function _finish_module(mod::Module)
         mod.__tw_finished__[] = true
     end
     _refuse_overrides()
-    # imports made outside the checked statements (before the block) count too
-    for u in ccall(:jl_module_usings, Any, (Any,), mod)::Vector{Any}
-        u isa Module || continue
-        !LAYERING[] || is_trait_world(u) || throw(LayeringError(
-            "trait module $mod uses $u, which is outside the trait world (rule 1)"))
-    end
     isdefined(mod, :__tw_entries__) || return nothing
     # this module's functions, and other modules' functions it gave workers to
     ks = Any[k for k in keys(mod.__tw_entries__) if k[1] === mod]
