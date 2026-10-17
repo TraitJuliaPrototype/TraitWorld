@@ -171,8 +171,8 @@ function viewcache_flush(; wait::Bool = true)
     for (name, (key, pkgs, sigs)) in groups
         _vc_write(d, name, key, pkgs, sigs) && push!(tobuild, name)
     end
-    for name in _VC_STALE
-        name in tobuild || push!(tobuild, name)
+    for name in _VC_STALE                         # found not built at a load, in the directory of that time
+        name in tobuild || !isfile(joinpath(d, name, "Project.toml")) || push!(tobuild, name)
     end
     empty!(_VC_STALE)
     isempty(tobuild) || _vc_build(d, tobuild; wait)

@@ -176,12 +176,19 @@ if ccall(:jl_generating_output, Cint, ()) == 1
                 Tuple{typeof(_finish_module), Module},
                 Tuple{typeof(_on_image_methods), Vector{Any}, String},          # what the runtime calls at loads
                 Tuple{typeof(_on_method_definition), Method, Bool},
-                Tuple{typeof(_on_package_load), Base.PkgId})
+                Tuple{typeof(_on_package_load), Base.PkgId},
+                Tuple{typeof(_implement_expand), Module, Symbol, Vector{Any}},  # `@implement` and its checks
+                Tuple{typeof(_declare_conformance_now), DataType, DataType},
+                Tuple{typeof(_check_projection_now), Module, DataType, DataType},
+                Tuple{typeof(_check_implementation_now), Module, DataType, DataType, Tuple{Symbol}})
         facts_codeinstance(sig)
     end
     precompile(_facts_call, (typeof(_on_image_methods), Vector{Any}, String))
     precompile(_facts_call, (typeof(_on_method_definition), Method, Bool))
     precompile(_facts_call, (typeof(_on_package_load), Base.PkgId))
+    precompile(_facts_call, (typeof(_implement_expand), Module, Symbol, Vector{Any}))
+    precompile(_facts_call, (typeof(_declare_conformance_now), DataType, DataType))
+    precompile(_facts_call, (typeof(_check_projection_now), Module, DataType, DataType))
     precompile(_on_image_methods_hook, (Vector{Any}, String))
     precompile(_on_method_definition_hook, (Method, Bool))
     precompile(_on_package_load_callback, (Base.PkgId,))

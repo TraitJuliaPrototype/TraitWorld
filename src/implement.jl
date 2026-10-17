@@ -393,7 +393,9 @@ function _check_delegate(mod::Module, @nospecialize(types...))
     return nothing
 end
 
-function _check_implementation(mod::Module, @nospecialize(X), @nospecialize(R), given::Tuple)
+_check_implementation(mod::Module, @nospecialize(X), @nospecialize(R), given::Tuple) =
+    _latest_under_policy(_check_implementation_now, mod, X, R, given)
+function _check_implementation_now(mod::Module, @nospecialize(X), @nospecialize(R), given::Tuple)
     _check_delegate(mod, X, R)
     definer = owner(mod)
     tmod = owner(parentmodule(X))
@@ -422,7 +424,8 @@ function _check_implementation(mod::Module, @nospecialize(X), @nospecialize(R), 
     return nothing
 end
 
-function _check_projection(mod::Module, @nospecialize(X), @nospecialize(T))
+_check_projection(mod::Module, @nospecialize(X), @nospecialize(T)) = _latest_under_policy(_check_projection_now, mod, X, T)
+function _check_projection_now(mod::Module, @nospecialize(X), @nospecialize(T))
     _check_delegate(mod, X, T)
     p = _proj(X, T)::ProjRec
     definer = owner(mod)
@@ -528,7 +531,8 @@ What a conformance declaration fixes, after its checks: the builder of its views
 (`nothing` when it must be built per session) and the operations its defaults serve,
 without those the implementing type already had a method for.
 """
-function _declare_conformance(@nospecialize(X), @nospecialize(T))
+_declare_conformance(@nospecialize(X), @nospecialize(T)) = _latest_under_policy(_declare_conformance_now, X, T)
+function _declare_conformance_now(@nospecialize(X), @nospecialize(T))
     recs = Any[]
     (T isa DataType && isconcretetype(T)) || return (b = nothing, recs = ())
     p = proj_lookup(X, T)
@@ -732,11 +736,19 @@ function _keys_implement(mod::Module, args)
 end
 
 macro implement(args...)
-    mod = __module__
-    _note_extension!(mod, __source__.file)
+    return _latest_under_policy(_implement_expand, __module__, __source__.file, Any[args...])
+end
+
+# The expansion of `@implement`, and the checks its expansion runs, are compiled under the facts
+# policy (`_latest_under_policy`) and kept in TraitWorld's image: they reflect over expressions
+# and types at abstract argument types, so their native code was invalidated by large loads and
+# compiled again at the next `@implement` (0.6 s, 1.4-1.7 s after CSV, DataFrames and CairoMakie;
+# session 26). Under the policy those calls dispatch at run time instead.
+function _implement_expand(mod::Module, @nospecialize(file), argv::Vector{Any})
+    _note_extension!(mod, file)
     TW = TraitWorld
-    isempty(args) && error("@implement: nothing to implement")
-    args = _keys_implement(mod, args)
+    isempty(argv) && error("@implement: nothing to implement")
+    args = _keys_implement(mod, (argv...,))
     fmap = nothing
     if !isempty(args) && args[end] isa Expr && args[end].head === :fieldmap
         fmap = Dict{Symbol,Symbol}(p.first.value => p.second.value for p in args[end].args)
