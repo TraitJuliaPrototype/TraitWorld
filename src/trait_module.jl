@@ -724,8 +724,22 @@ function _finish_module(mod::Module)
         check_bounds(f)
         check_entry_ambiguities(f)
     end
+    # definition checking (note "Definition checking"): every bounded method once, at archetypes,
+    # where it is defined; a mistake is reported at its line before any type conforms. At a
+    # package's build it is an error; for trait code defined at the prompt a warning (the call
+    # raises it again), so that interactive work can pass through incomplete code
+    if _DEFCHECK_AT_END[]
+        if ccall(:jl_generating_output, Cint, ()) == 1
+            check_definitions(mod)
+        else
+            ps = try check_definitions(mod) catch e; e isa TraitUseError ? e.problems : rethrow() end
+            isempty(ps) || @warn "trait module $(nameof(mod)): library code breaks a rule of the trait world:\n  " * join(ps, "\n  ")
+        end
+    end
     return nothing
 end
+"Whether a trait module's end checks its definitions (`JULIA_TW_DEFCHECK=0` turns it off, for measurement)."
+const _DEFCHECK_AT_END = Ref(true)
 
 _isworker(m::Method) = any(p -> _tobj_lb(p) !== nothing, Base.unwrap_unionall(m.sig).parameters[2:end])
 

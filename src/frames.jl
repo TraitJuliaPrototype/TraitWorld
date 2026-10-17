@@ -53,3 +53,26 @@ function _install_frame_filter!()
     Base.update_stackframes_callback[] = _hide_machinery_frames!
     return nothing
 end
+
+# ---------------------------------------------------------------------------
+# A value that conforms to none of the traits bound at an argument reaches no method: Julia raises
+# its `MethodError`, as plain Julia would ("identical or error"). The hint names the bound, so the
+# message says what the argument should have been (note "Identical or error": errors name the bound).
+# ---------------------------------------------------------------------------
+
+function _bound_hint(io::IO, e::MethodError, @nospecialize(argtypes), @nospecialize(kwargs))
+    f = e.f
+    args = e.args
+    args isa Tuple || return nothing
+    n = length(args)
+    for pos in 1:n
+        Xs = try traits_at(f, pos, n) catch; Any[] end
+        isempty(Xs) && continue
+        a = args[pos]
+        any(X -> try conforms(typeof(a), X) catch; false end, Xs) && continue
+        print(io, "\nArgument ", pos, " of `", f, "` is bounded by ", join(string.(Xs), " or "),
+              "; a ", typeof(a), " conforms to none of them (declare a conformance with `@implement`, or convert it).")
+    end
+    return nothing
+end
+_install_error_hints!() = (Base.Experimental.register_error_hint(_bound_hint, MethodError); nothing)

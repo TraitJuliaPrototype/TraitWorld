@@ -130,9 +130,15 @@ clean are recorded, so their workers' first calls skip the check per signature.
 function definition_problems(@nospecialize(f))
     out = String[]
     for m in methods(f)
-        asig = archetype_sig(m)
+        # a method the check cannot build archetypes for (keyword workers, families it does not
+        # cover) is left to its worker's first call, as the deferred cases are
+        asig = try archetype_sig(m) catch; nothing end
         asig === nothing && continue
-        ps = _latest_under_policy(worker_problems, asig)::Vector{String}
+        ps = try
+            _latest_under_policy(worker_problems, asig)::Vector{String}
+        catch
+            continue
+        end
         if isempty(ps)
             push!(_DEF_CHECKED, m)
         else
