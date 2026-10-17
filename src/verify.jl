@@ -339,9 +339,65 @@ mutable struct _Walk
     plans::Vector{Any}                          # ((X, U), builder): slow-path conformances to cache for a closed world
     views::Base.IdSet{Core.MethodInstance}      # entries analyzed at a call site's types (never compiled as such)
     native_only::Base.IdSet{Core.MethodInstance}   # the entries' real instances: checked for native code only
+    dyn_made::IdDict{Any,Vector{Any}}           # trait family => trait object types kept in its dynamic values
+    dyn_ops::Vector{Any}                        # (site, family, operation, other argument types): resolved after the walk
+    dyn_calls::Vector{Any}                      # (site, f, choices; a family where an argument is an opened dynamic value, caller)
 end
 _Walk(world::UInt) = _Walk(world, IdDict{Core.MethodInstance,_Scan}(), Base.IdSet{Core.MethodInstance}(), Any[],
-                           Base.IdSet{Core.MethodInstance}(), Base.IdSet{Core.MethodInstance}())
+                           Base.IdSet{Core.MethodInstance}(), Base.IdSet{Core.MethodInstance}(),
+                           IdDict{Any,Vector{Any}}(), Any[], Any[])
+
+"""
+A dynamic value made here (note "AOT": a `Dynamic` value adds the conformances whose types reach
+the place it is made): record the trait object type it keeps, for the operations on dynamic values
+of its trait, which dispatch on it.
+"""
+function _note_dyn_made!(cx::_Walk, @nospecialize(D), @nospecialize(T))
+    (D isa DataType && D <: Dynamic && length(D.parameters) == 1) || return nothing
+    (T isa DataType && T <: TObj && isconcretetype(T)) || return nothing
+    v = get!(() -> Any[], cx.dyn_made, _family(D.parameters[1]))
+    T in v || push!(v, T)
+    return nothing
+end
+"""
+An operation on a dynamic value (the method `@trait` defines for `Dynamic{<:X}`, usually inlined):
+a call whose first argument is the trait object a `Dynamic{X}` keeps (`opened(d)`, a `getfield` of
+its field `t`). The family `X`, or `nothing`.
+"""
+function _dyn_op_family(src, sptypes, @nospecialize(a))
+    return _dyn_op_family_(src, sptypes, a)
+end
+"Dynamic values that compiled code holds as constants (made at compile time from constant arguments)."
+function _note_dyn_consts!(cx::_Walk, @nospecialize(x), depth::Int = 0)
+    depth > 4 && return nothing
+    x isa QuoteNode && (x = x.value)
+    if x isa Dynamic
+        _note_dyn_made!(cx, typeof(x), typeof(getfield(x, :t)))
+    elseif x isa Tuple
+        for y in x
+            _note_dyn_consts!(cx, y, depth + 1)
+        end
+    elseif x isa Expr
+        for y in x.args
+            _note_dyn_consts!(cx, y, depth + 1)
+        end
+    end
+    return nothing
+end
+function _dyn_op_family_(src, sptypes, @nospecialize(a))
+    a isa Core.SSAValue || return nothing
+    st = src.code[a.id]
+    Meta.isexpr(st, :call) && length(st.args) >= 3 || return nothing
+    g = st.args[1]
+    g isa GlobalRef && (g = isdefined(g.mod, g.name) ? getglobal(g.mod, g.name) : nothing)
+    g === Core.getfield || return nothing
+    fld = st.args[3]
+    fld isa QuoteNode && (fld = fld.value)
+    (fld === :t || fld === 1) || return nothing
+    D = _argT(src, sptypes, st.args[2])
+    (D isa DataType && D <: Dynamic && length(D.parameters) == 1) || return nothing
+    return _family(D.parameters[1])
+end
 
 "An entry's code at narrower argument types, for analysis only."
 function _view_mi(m::Method, @nospecialize(sig), world::UInt)
@@ -531,6 +587,12 @@ function _scan(mi::Core.MethodInstance, cx::_Walk)
             Meta.isexpr(st, :invoke) && kind === :task && continue
             Meta.isexpr(st, :foreigncall) && continue
         end
+        st isa Expr && _note_dyn_consts!(cx, st)
+        if Meta.isexpr(st, :new)
+            D = _argT(src, sptypes, st.args[1])
+            D isa DataType && D <: Type && (D = D.parameters[1])
+            length(st.args) >= 2 && _note_dyn_made!(cx, D, _argT(src, sptypes, st.args[2]))
+        end
         if Meta.isexpr(st, :invoke)
             c = st.args[1]
             # the policy's call of the worker (facts.jl, inlined from `_facts_call`): a session's path
@@ -540,6 +602,9 @@ function _scan(mi::Core.MethodInstance, cx::_Walk)
             isdefined(Core, :ABIOverride) && cmi isa Core.ABIOverride && (cmi = cmi.def)
             cmi isa Core.MethodInstance || continue
             cm = cmi.def
+            let ps = cmi.specTypes.parameters
+                length(ps) == 2 && ps[1] isa DataType && ps[1] <: Type && _note_dyn_made!(cx, ps[1].parameters[1], ps[2])
+            end
             if cm === _enter_method()
                 # enter(EntryPos{F, pos, nargs}(), t): the conformances per user type
                 a = st.args[3:end]
@@ -688,9 +753,14 @@ function _scan(mi::Core.MethodInstance, cx::_Walk)
                     # the entry's call of the worker: one target per combination of what the entry built
                     choices = Vector{Any}[]
                     ok = true
+                    dynfam = Any[]                 # per argument: the family of an opened dynamic value, or nothing
                     for a in st.args[2:end]
                         r = _ssa_root(src, a)
-                        if r isa Core.SSAValue && haskey(alts, r.id)
+                        X = _dyn_op_family(src, sptypes, r)
+                        push!(dynfam, X)
+                        if X !== nothing
+                            push!(choices, Any[])  # filled after the walk from the dynamic values the program makes
+                        elseif r isa Core.SSAValue && haskey(alts, r.id)
                             push!(choices, alts[r.id])
                         else
                             c3 = _union_split(Any[_argT(src, sptypes, a)], 32)
@@ -700,6 +770,11 @@ function _scan(mi::Core.MethodInstance, cx::_Walk)
                     end
                     if !ok
                         hole(:trait_arg, i, f, ats)
+                        continue
+                    end
+                    if any(!isnothing, dynfam)
+                        site(:trait, i, :dynamic_worker, ats)
+                        push!(cx.dyn_calls, (sites[end], f, choices, dynfam, mi))
                         continue
                     end
                     combos = Vector{Any}[Any[]]
@@ -742,6 +817,11 @@ function _scan(mi::Core.MethodInstance, cx::_Walk)
                     # an entry's inverse of a result like the input: reached only for a function declared `::Like{t}`,
                     # whose inverses are not listed for AOT yet
                     mi.def isa Method && Base.unwrap_unionall(mi.def.sig).parameters[1] in _LIKE_FUNCS && hole(:inverse, i, f, ats)
+                elseif rc === nothing && !isempty(ats) && !_isleaf(ats[1]) && (X = _dyn_op_family(src, sptypes, st.args[2])) !== nothing
+                    # an operation on a dynamic value: its targets are the conformances of X whose trait
+                    # objects the program keeps in dynamic values, resolved after the walk
+                    site(:trait, i, :dynamic, ats)
+                    push!(cx.dyn_ops, (sites[end], X, f, ats[2:end], mi))
                 elseif rc === nothing
                     ts = _bounded_targets(f, ats, world)
                     ts === nothing ? hole(:dispatch, i, f, ats) : site(:bounded, i, f, ats, ts)
@@ -797,6 +877,7 @@ and reflection are switched off in the binary.
 """
 function verify_main(@nospecialize(f), @nospecialize(argtypes::Tuple = ()); compile::Bool = false, entrypoints::Bool = false,
                      close::Bool = entrypoints && Base.JLOptions().trim != 0)
+    close && _close_policy!()             # entries from session images: inferred again, plainly (the walk reads the latest world)
     world = Base.get_world_counter()
     cx = _Walk(world)
     entry = Base.signature_type(f, argtypes)
@@ -804,19 +885,51 @@ function verify_main(@nospecialize(f), @nospecialize(argtypes::Tuple = ()); comp
     root === nothing && error("verify_main: no method for $entry")
     level = IdDict{Core.MethodInstance,UInt8}()
     work = Tuple{Core.MethodInstance,UInt8}[(root, _NORMAL)]
-    while !isempty(work)
-        mi, lv = pop!(work)
-        old = get(level, mi, nothing)
-        old !== nothing && old >= lv && continue
-        level[mi] = lv
-        sc = _get_scan(cx, mi)
-        sc === nothing && continue
-        for (c, d, t) in sc.invokes
-            push!(work, (c, _sublevel(lv, d, t)))
+    while true
+        while !isempty(work)
+            mi, lv = pop!(work)
+            old = get(level, mi, nothing)
+            old !== nothing && old >= lv && continue
+            level[mi] = lv
+            sc = _get_scan(cx, mi)
+            sc === nothing && continue
+            for (c, d, t) in sc.invokes
+                push!(work, (c, _sublevel(lv, d, t)))
+            end
+            for s in sc.sites, t in s.targets
+                push!(work, (t, _sublevel(lv, s.doomed, s.intry)))
+            end
         end
-        for s in sc.sites, t in s.targets
-            push!(work, (t, _sublevel(lv, s.doomed, s.intry)))
+        # operations on dynamic values: one target per trait object type the program keeps in a
+        # dynamic value of the operation's trait; new targets can make new dynamic values, so repeat
+        grown = false
+        for (s, X, f, rest, smi) in cx.dyn_ops
+            haskey(level, smi) || continue
+            for T in get(cx.dyn_made, X, Any[])
+                t = _target_mi(Tuple{typeof(f), T, rest...}, world)
+                (t === nothing || t in s.targets) && continue
+                push!(s.targets, t)
+                push!(work, (t, _sublevel(level[smi], s.doomed, s.intry)))
+                grown = true
+            end
         end
+        # entries' calls of workers with a trait object opened from a dynamic value
+        for (s, f, choices, dynfam, smi) in cx.dyn_calls
+            haskey(level, smi) || continue
+            combos = Vector{Any}[Any[]]
+            for (ch, X) in zip(choices, dynfam)
+                opts = X === nothing ? ch : get(cx.dyn_made, X, Any[])
+                combos = Vector{Any}[Any[cmb..., x] for cmb in combos for x in opts]
+            end
+            for cmb in combos
+                t = _target_mi(Tuple{typeof(f), cmb...}, world)
+                (t === nothing || t in s.targets) && continue
+                push!(s.targets, t)
+                push!(work, (t, _sublevel(level[smi], s.doomed, s.intry)))
+                grown = true
+            end
+        end
+        grown || break
     end
     static_calls = bounded = trait_sites = guard_sites = roots = 0
     holes = Hole[]
@@ -832,6 +945,9 @@ function verify_main(@nospecialize(f), @nospecialize(argtypes::Tuple = ()); comp
                 for t in s.targets
                     push!(dyn_roots, t.specTypes)
                 end
+            elseif s.kind === :trait && (s.callee === :dynamic || s.callee === :dynamic_worker) && isempty(s.targets)
+                ep = _sublevel(lv, s.doomed, s.intry) == _ERR
+                push!(holes, Hole(:dynamic, ep, mi, s.stmt, s.callee, s.argtypes, s.line))
             elseif s.kind === :trait
                 trait_sites += 1
                 for t in s.targets

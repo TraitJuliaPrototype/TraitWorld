@@ -420,6 +420,19 @@ end
     $(Expr(:meta, :generated_only))
 end
 """
+In a closed build (`--trim`), replace `_facts_call` by the plain call (`verify_main` does it when it
+closes the world, after every package is loaded). Package images built in a session hold entries
+generated for the policy (`--trim` does not key images); replacing the method invalidates every
+entry compiled against it, so the build infers them again, for the closed world, where they call
+workers plainly. Nothing loads in a binary afterwards: the invalidation is free.
+"""
+function _close_policy!()
+    _closed_build() || return nothing
+    Core.eval(@__MODULE__, :(_facts_call(f, args...) = f(args...)))
+    return nothing
+end
+
+"""
     _facts_call(f, args...)
 
 The call of a worker under the policy, made by `checked_call`: a direct call of its CodeInstance
