@@ -204,9 +204,11 @@ end
 """
     owned_method(m::Method)
 
-Rule 3: the package that defined `m` owns, in every signature `m` applies to,
-the function or one of the types. Unlike Aqua's rule, `f(::Union{Mine, Int})`
-is not owned: it applies to `Int` alone too.
+Rule 3: the package that defined `m` owns, in each alternative of `m`'s own signature
+(each `Union` member taken separately), the function or one of the types. Unlike Aqua's
+rule, `f(::Union{Mine, Int})` is not owned: its alternative `f(::Int)` names nothing of
+the definer's. A method on an abstract type is owned by the type's owner also where it
+applies to another package's subtype (note "Ownership": stakeholders include supertypes' owners).
 """
 function owned_method(m::Method)
     definer = owner(m.module)
