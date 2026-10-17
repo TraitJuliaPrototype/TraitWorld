@@ -420,6 +420,7 @@ at the site, so what it calls is decided at each call, as in plain Julia. No met
 ambiguity, takes plain Julia's call, which raises the same error.
 """
 function _call_under_policy(@nospecialize(f), @nospecialize(args...))
+    f isa Core.Builtin && return f(args...)              # a builtin passed as a value
     w = Base.tls_world_age()
     tt = Tuple{Core.Typeof(f), Any[Core.Typeof(a) for a in args]...}
     mi = ccall(:jl_method_lookup_by_tt, Any, (Any, Csize_t, Any), tt, w, nothing)
@@ -427,18 +428,23 @@ function _call_under_policy(@nospecialize(f), @nospecialize(args...))
     _keep_method(mi.def) && return f(args...)
     ci = _owner_ci(mi, w)
     if !(ci isa Core.CodeInstance)
+        (@lock _NO_POLICY_LOCK haskey(_NO_POLICY, mi)) && return f(args...)
         _FACTS_DEBUG[] && Core.println("TraitWorld: compiling under the policy at a run-time site: ", mi)
         ci = try
             _typeinf_policy(w, mi, CC.SOURCE_MODE_ABI)
         catch
             nothing
         end
+        ci isa Core.CodeInstance || @lock _NO_POLICY_LOCK (_NO_POLICY[mi] = true)
     end
     ci isa Core.CodeInstance || return f(args...)       # inference gave up: plain Julia's code
     ci.invoke == C_NULL && ccall(:jl_compile_codeinst, Cint, (Any,), ci)
     ci.invoke == C_NULL && return f(args...)             # stock Julia cannot run this owner's code
     return Core.invoke(f, ci, args...)
 end
+"Method instances the policy could not compile at a run-time site: plain Julia's code, without trying again."
+const _NO_POLICY = IdDict{Core.MethodInstance,Bool}()
+const _NO_POLICY_LOCK = ReentrantLock()
 "Methods whose code runs as plain Julia's even from the policy's run-time sites: TraitWorld's, the compiler's, generated functions."
 function _keep_method(m::Method)
     r = Base.moduleroot(m.module)
