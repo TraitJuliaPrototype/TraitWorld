@@ -309,8 +309,36 @@ struct Dynamic{X}
     t::Any
     function Dynamic{X}(t::TObj{T}) where {X,T}
         _carries_static(T, X) || Base.inferencebarrier(_dyn_refuse)(X, T)
-        return new{X}(t)                 # the trait object is the user's object: a kept value follows its fields
+        return new{X}(_narrow(X, t))     # the trait object is the user's object: a kept value follows its fields
     end
+end
+"""
+A dynamic value of `X` keeps only the views of `X` and its supertraits: what its operations and
+the bounds that open it can see (note "Keys"). A column made from a reader's `CSVColumn` trait
+object and kept as a `Dynamic{Column}` then runs the table's workers compiled for `Column` alone,
+not new ones for the pair of views. A trait object with one view is kept as it is.
+"""
+@inline _narrow(::Type{X}, t::TObj{T,V}) where {X,T,V} = fieldcount(V) == 1 ? t : Base.inferencebarrier(_narrow_slow)(X, t)
+const _NARROW = IdDict{Any,Any}()
+function _narrow_slow(@nospecialize(X), @nospecialize(t::TObj))
+    V = typeof(getfield(t, :views))
+    keep = @lock _LOCK get(_NARROW, (X, V), nothing)
+    if keep === nothing
+        F = _family(X)
+        if F isa DataType || F isa UnionAll
+            fams = Any[]
+            for B in bound_traits(F), Y in trait_closure(_family(B))
+                push!(fams, _family(Y))
+            end
+            keep = Tuple(i for (i, P) in enumerate(V.parameters) if any(G -> P.parameters[1] <: G, fams))
+        else
+            keep = Tuple(1:fieldcount(V))
+        end
+        @lock _LOCK (_NARROW[(X, V)] = keep)
+    end
+    length(keep) == fieldcount(V) && return t
+    views = getfield(t, :views)
+    return TObj(Tuple(views[i] for i in keep))
 end
 Dynamic{X}(d::Dynamic{X}) where {X} = d
 Base.convert(::Type{Dynamic{X}}, t::TObj) where {X} = Dynamic{X}(t)

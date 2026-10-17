@@ -138,6 +138,8 @@ end
 precompile(_on_package_load, (Base.PkgId,))
 precompile(_vc_load!, ())
 precompile(viewcache_flush, ())
+precompile(_vc_atexit, ())
+precompile(_narrow_slow, (Any, TObj))
 
 """
     @workload begin … end
@@ -183,12 +185,14 @@ if ccall(:jl_generating_output, Cint, ()) == 1
                 Tuple{typeof(_check_projection_now), Module, DataType, DataType},
                 Tuple{typeof(_check_implementation_now), Module, DataType, DataType, Tuple{Symbol}},
                 Tuple{typeof(_check_own_fields_now), DataType, DataType},
-                Tuple{typeof(_analyze_keeps), Any})
+                Tuple{typeof(_analyze_keeps), Any},
+                Tuple{typeof(_vc_flush_detached)})                              # the view caches' exit hook
         facts_codeinstance(sig)
     end
     precompile(_facts_call, (typeof(_on_image_methods), Vector{Any}, String))
     precompile(_facts_call, (typeof(_on_method_definition), Method, Bool))
     precompile(_facts_call, (typeof(_on_package_load), Base.PkgId))
+    precompile(_facts_call, (typeof(_vc_flush_detached),))
     precompile(_facts_call, (typeof(_implement_expand), Module, Symbol, Vector{Any}))
     precompile(_facts_call, (typeof(_declare_conformance_now), DataType, DataType))
     precompile(_facts_call, (typeof(_check_projection_now), Module, DataType, DataType))

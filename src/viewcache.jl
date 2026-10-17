@@ -133,7 +133,23 @@ function _vc_in_image(@nospecialize(sig))
     return ccall(:jl_object_in_image, UInt8, (Any,), ci) != 0
 end
 
-_vc_atexit() = (try viewcache_flush(; wait = false) catch e; @warn "TraitWorld: writing view caches failed" exception = e; end; nothing)
+# not while an image is generated: the image holds the code compiled for it
+# under the policy, as the load hooks (hooks.jl): natively compiled, its code would be invalidated by
+# the session's loads and compiled again at exit
+function _vc_atexit()
+    ccall(:jl_generating_output, Cint, ()) == 1 && return nothing
+    try
+        try
+            _latest_under_policy(_vc_flush_detached)
+        catch
+            Base.invokelatest(_vc_flush_detached)
+        end
+    catch e
+        @warn "TraitWorld: writing view caches failed" exception = e
+    end
+    return nothing
+end
+_vc_flush_detached() = (viewcache_flush(; wait = false); nothing)
 
 """
     viewcache_flush(; wait = true) -> Vector{String}
@@ -258,7 +274,9 @@ end
 function _vc_build(d, names::Vector{String}; wait::Bool = true)
     _vc_loadpath!(d)
     ids = [Base.PkgId(Base.UUID(Base.parsed_toml(joinpath(d, n, "Project.toml"))["uuid"]), n) for n in names]
-    code = "push!(LOAD_PATH, $(repr(d))); for id in $(repr(ids)); try; Base.require(id); catch e; @error \"view cache \$(id.name)\" exception = e; end; end"
+    # a cache that fails to build is removed: its signatures are stale (a conformance changed, a
+    # package left the environment), and a session that needs them writes it again
+    code = "push!(LOAD_PATH, $(repr(d))); for id in $(repr(ids)); try; Base.require(id); catch e; @error \"view cache \$(id.name), removed\" exception = e; rm(joinpath($(repr(d)), id.name); recursive = true, force = true); end; end"
     jl = joinpath(Sys.BINDIR, Base.julia_exename())
     cmd = setenv(`nice -n 10 $jl --startup-file=no --project=$(Base.active_project()) -e $code`,
                  merge(ENV, Dict("JULIA_TW_VIEWCACHE" => "0")))

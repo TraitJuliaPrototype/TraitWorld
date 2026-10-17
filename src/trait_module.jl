@@ -156,6 +156,7 @@ function _dynamic_fields(mod::Module, ex::Expr)
 end
 
 function _dyn_type(mod::Module, T)
+    T isa Expr && T.head === :curly && _tryeval(mod, T.args[1]) === Dynamic && return T
     if T isa Symbol || (T isa Expr && T.head === :.)
         v = _tryeval(mod, T)
         return (v isa Type && is_trait(v)) ? :($TraitWorld.Dynamic{$T}) : T
@@ -165,6 +166,48 @@ function _dyn_type(mod::Module, T)
         return Expr(:curly, T.args[1], Any[(a isa Expr && a.head === :(<:)) ? a : _dyn_type(mod, a) for a in T.args[2:end]]...)
     end
     return T
+end
+
+"""
+A trait's name as a container's element type in a function means its dynamic value, as in a
+field (note "Traits as abstract types"): `Column[]`, `Column[a, b]`, `Vector{Column}(undef, n)`
+and `Dict{String, Column}()` in a body; `cs::Vector{Column}` in an argument. A trait's name in
+an argument itself stays a bound, and `Vector{<:ColTable}` keeps its meaning.
+"""
+function _dynamic_containers(mod::Module, ex::Expr)
+    sig, body = ex.args[1], ex.args[2]
+    return Expr(ex.head, _dyn_sig(mod, sig), _dyn_body(mod, body))
+end
+_istraitname(mod::Module, x) = (x isa Symbol || (x isa Expr && x.head === :.)) && (v = _tryeval(mod, x); v isa Type && is_trait(v))
+function _dyn_sig(mod::Module, s)
+    s isa Expr || return s
+    if s.head === :where
+        return Expr(:where, _dyn_sig(mod, s.args[1]), s.args[2:end]...)
+    elseif s.head === :call
+        return Expr(:call, s.args[1], Any[_dyn_arg(mod, a) for a in s.args[2:end]]...)
+    elseif s.head === :(::) && length(s.args) == 2 && s.args[1] isa Expr && s.args[1].head === :call
+        return Expr(:(::), _dyn_sig(mod, s.args[1]), s.args[2])
+    end
+    return s
+end
+function _dyn_arg(mod::Module, a)
+    a isa Expr || return a
+    if a.head === :parameters || a.head === :kw || a.head === :...
+        return Expr(a.head, Any[_dyn_arg(mod, x) for x in a.args]...)
+    elseif a.head === :(::) && length(a.args) == 2 && a.args[2] isa Expr && a.args[2].head === :curly && !_istraitname(mod, a.args[2].args[1])
+        return Expr(:(::), a.args[1], _dyn_type(mod, a.args[2]))
+    end
+    return a
+end
+function _dyn_body(mod::Module, x)
+    x isa Expr || return x
+    x.head in (:quote, :inert, :meta) && return x
+    if x.head in (:ref, :typed_vcat, :typed_hcat, :typed_comprehension) && _istraitname(mod, x.args[1])
+        return Expr(x.head, :($TraitWorld.Dynamic{$(x.args[1])}), Any[_dyn_body(mod, a) for a in x.args[2:end]]...)
+    elseif x.head === :curly && !_istraitname(mod, x.args[1]) && any(a -> _istraitname(mod, a), x.args[2:end])
+        return _dyn_type(mod, x)
+    end
+    return Expr(x.head, Any[_dyn_body(mod, a) for a in x.args]...)
 end
 
 function _is_fdef(ex)
@@ -366,6 +409,7 @@ function _like_returns(ex, t)
 end
 
 function _rewrite_fdef(mod::Module, ex)
+    ex = _dynamic_containers(mod, ex)
     head = ex.head
     sig, body = ex.args[1], ex.args[2]
     wheres = Any[]

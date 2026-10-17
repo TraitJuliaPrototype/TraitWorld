@@ -96,3 +96,47 @@ end)
     @test_throws ArgumentError Main.DynBad.keepwrong(Main.Always())
     @test isempty(check_definitions(Main.DynSolv))
 end
+
+# A trait's name as a container's element type in a function (body and arguments) means its
+# Dynamic, as in a field; a Dynamic of a supertrait keeps only that trait's views, so a bound
+# opening it runs the worker compiled for what it sees (TraitTables' columns made by TraitCSV).
+toplevel(quote
+    @trait_module module DynCols
+    using TraitWorld
+    export DCol, dlen, DGrow, dpush!, collectcols, keepall, dsum
+    @trait DCol{T} begin
+        T = eltype(Self)
+        dlen(c::DCol)::Int
+    end
+    @implement DCol A where {A <: Vector} begin
+        dlen(c) = length(c)
+    end
+    @trait DGrow{T} <: DCol begin
+        T = eltype(Self)
+        dpush!(c::DGrow, x::Float64)::Nothing
+    end
+    @implement DGrow Vector{Float64} begin
+        dpush!(c, x) = (push!(c, x); nothing)
+    end
+    dsum(c::DCol) = dlen(c)
+    asdcol(g::DGrow) = (dpush!(g, 1.0); Dynamic{DCol}(g))
+    function collectcols(gs::Vector{DGrow})              # an argument container: Vector{Dynamic{DGrow}}
+        out = DCol[]                                     # a body container: Dynamic{DCol}[]
+        for g in gs
+            push!(out, asdcol(g)::Dynamic{DCol})
+        end
+        return out
+    end
+    end
+end)
+
+@testset "Dynamic: containers in functions, supertrait views" begin
+    D = Main.DynCols
+    gs = Dynamic{D.DGrow}[Dynamic{D.DGrow}(Float64[]), Dynamic{D.DGrow}([2.0])]
+    cs = D.collectcols(gs)
+    @test cs isa Vector{Dynamic{D.DCol}}
+    @test [D.dsum(c) for c in cs] == [1, 2]
+    # the kept DCol has DCol's view only: the same type as one made from a plain vector
+    @test typeof(TraitWorld.opened(cs[1])) === typeof(TraitWorld.opened(Dynamic{D.DCol}([1.0])))
+    @test fieldcount(typeof(getfield(TraitWorld.opened(gs[1]), :views))) == 2
+end
