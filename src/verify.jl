@@ -40,9 +40,7 @@ struct _Site
     argtypes::Any
     targets::Vector{Core.MethodInstance}
     line::String
-    decl::Any               # a declared call's signature (`:declared` sites), else nothing
 end
-_Site(kind, doomed, intry, stmt, callee, argtypes, targets, line) = _Site(kind, doomed, intry, stmt, callee, argtypes, targets, line, nothing)
 
 struct _Scan
     invokes::Vector{Tuple{Core.MethodInstance,Bool,Bool}}   # static callee, doomed, intry
@@ -422,13 +420,6 @@ function _nt_with(@nospecialize(NT), k::Symbol, @nospecialize(T))
     return NamedTuple{names,Tuple{ts...}}
 end
 
-"A method of the declared-call machinery: the call of a `DeclaredCall`, its keyword sorter or body."
-function _declared_method(m::Method)
-    m.module === TraitWorld || return false
-    ps = Base.unwrap_unionall(m.sig).parameters
-    return any(p -> p isa DataType && p <: DeclaredCall, ps[1:min(3, length(ps))])
-end
-
 "User types a trait position could see: the leaf types of its argument type, or every registered projected type and representation."
 function _projected_types(@nospecialize(T))
     c = _union_split(Any[T], 32)
@@ -649,24 +640,6 @@ function _scan(mi::Core.MethodInstance, cx::_Walk)
                 alts[i] = outs
                 site(:trait, i, :enter_kw_callable, Any[NT], ts)
                 continue
-            elseif cm isa Method && _declared_method(cm)
-                # a declared call into the package an interface wraps: a target compiled as ordinary
-                # code at its declared signature (handles unwrapped to Any); never walked
-                dcv = nothing
-                for a in st.args[2:end]
-                    v = _constval(src, sptypes, a)
-                    v !== nothing && something(v) isa DeclaredCall && (dcv = something(v); break)
-                end
-                ats = Any[_argT(src, sptypes, a) for a in st.args[2:end]]
-                if dcv === nothing
-                    hole(:latest, i, :declared, ats)
-                    continue
-                end
-                k0 = findfirst(T -> T isa DataType && T <: DeclaredCall, ats)
-                rest = Any[T <: Handle ? Any : T for T in ats[k0+1:end]]
-                push!(sites, _Site(:trait, doomed[i], intry[i], i, :declared, ats, Core.MethodInstance[], _line(src, mi, i),
-                                   Tuple{Core.Typeof(dcv.f),rest...}))
-                continue
             elseif cm isa Method && _machinery_method(cm)
                 site(:guard, i, cm.name, Any[])
                 continue
@@ -860,10 +833,6 @@ function verify_main(@nospecialize(f), @nospecialize(argtypes::Tuple = ()); comp
                 end
             elseif s.kind === :trait
                 trait_sites += 1
-                if s.decl !== nothing && !(s.decl in tseen)
-                    push!(tseen, s.decl)
-                    push!(targets, :declared => s.decl)
-                end
                 for t in s.targets
                     t in tseen && continue
                     push!(tseen, t)

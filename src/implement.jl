@@ -63,7 +63,7 @@ function deep_concrete(@nospecialize(T); seen = Base.IdSet{Any}())
     push!(seen, T)
     isconcretetype(T) || return false
     # the design's dynamic positions: their `Any` field is what they are (note "Dynamic values", "Callable")
-    (T <: Dynamic || T <: Erased || T <: Handle) && return true
+    (T <: Dynamic || T <: Erased) && return true
     if T isa DataType
         for p in T.parameters
             deep_concrete(p; seen) || return false

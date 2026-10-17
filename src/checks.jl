@@ -21,7 +21,6 @@ function Base.showerror(io::IO, e::TraitUseError)
 end
 
 _istobj(@nospecialize(T)) = T isa DataType && T.name === Base.typename(TObj)
-_ishandle(@nospecialize(T)) = T isa DataType && T <: Handle
 _hastobj(@nospecialize(T)) = _istobj(T) || (T isa Union && any(_istobj, Base.uniontypes(T)))
 
 function _line_of(src, mi, i)
@@ -144,12 +143,6 @@ function _worker_problems(@nospecialize(sig), seen, out, root::Bool)
             fT = _CC.argextype(ex.args[1], src, sptypes)
             f = fT isa _CC.Const ? fT.val : (Base.issingletontype(_CC.widenconst(fT)) ? _CC.widenconst(fT).instance : nothing)
             if !any(k -> _hastobj(ats[k]), 2:length(ats))
-                if any(k -> _ishandle(ats[k]), 2:length(ats)) && (f === Core.getfield || f === Base.getproperty ||
-                   f === Core.setfield! || f === Base.setproperty! || f === Core.typeof || f === Base.fieldtype)
-                    push!(out, "$(_line_of(src, mi, i)): `h.ref` or `typeof(h)` on a handle: a handle is opaque inside the trait world, " *
-                               "a value to pass to the next declared call")
-                    continue
-                end
                 _layering!(out, seen, f, ats, src, mi, i, world)
                 continue
             end
@@ -170,10 +163,6 @@ function _worker_problems(@nospecialize(sig), seen, out, root::Bool)
              (f === Core.kwcall && length(ats) >= 3 && _CC.widenconst(ats[3]) === typeof(withfields))) && continue
             if f === nothing
                 push!(out, "$line: a trait object is passed to a function not known at compile time")
-                continue
-            end
-            if f isa DeclaredCall
-                push!(out, "$line: a trait object is passed to the declared call $f: trait objects never go up; pass what its operations return")
                 continue
             end
             fname = f isa Function ? nameof(f) : f
@@ -300,7 +289,7 @@ function _layering!(out, seen, @nospecialize(f), ats, src, mi, i, world)
             push!(out, "$(_line_of(src, mi, i)): calls $(m.module).$(m.name), outside the trait world (rule 1): " *
                        "the trait world uses only itself")
         elseif Base.moduleroot(m.module) === TraitWorld
-            continue                                      # the machinery: declared calls, operations, checked calls
+            continue                                      # the machinery: operations, checked calls
         elseif _is_entry(m)
             continue                                      # a plain value into another function's entry: its worker is checked at its own first call
         elseif owner(Base.moduleroot(m.module)) !== :Julia

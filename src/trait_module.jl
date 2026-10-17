@@ -672,7 +672,7 @@ function _check_import(mod::Module, ex::Expr)
     end
     for p in paths
         target = _module_path(mod, p)
-        !LAYERING[] || is_trait_world(target) || is_declarer(target) || is_wrapper_root(target) || throw(LayeringError(
+        !LAYERING[] || is_trait_world(target) || is_wrapper_root(target) || throw(LayeringError(
             "trait module $mod imports $target, which is outside the trait world. Layering (rule 1): ordinary code may " *
             "use the trait world, the trait world uses only itself. Make $target a trait module, or call it from an " *
             "ordinary module that uses both."))
@@ -758,7 +758,7 @@ function _finish_module(mod::Module)
     # imports made outside the checked statements (before the block) count too
     for u in ccall(:jl_module_usings, Any, (Any,), mod)::Vector{Any}
         u isa Module || continue
-        !LAYERING[] || is_trait_world(u) || is_declarer(u) || is_wrapper_root(u) || throw(LayeringError(
+        !LAYERING[] || is_trait_world(u) || is_wrapper_root(u) || throw(LayeringError(
             "trait module $mod uses $u, which is outside the trait world (rule 1)"))
     end
     seal!(mod)

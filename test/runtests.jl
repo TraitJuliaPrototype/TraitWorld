@@ -717,90 +717,23 @@ end
     @test e isa ImplementError && occursin("no field of", e.msg)
 end
 
-# --- poc3 M3: calls upward, declared calls, handles ---------------------------------------
-module FakeOutside                       # an ordinary package standing in for Makie
-mutable struct Fig; pts::Vector{Tuple{Float64,Float64}}; title::String; end
-newfig() = Fig(Tuple{Float64,Float64}[], "")
-addpoints!(f::Fig, xs, ys; title = "") = (append!(f.pts, zip(xs, ys)); f.title = title; nothing)
-npoints(f::Fig) = length(f.pts)
-title(f::Fig) = f.title
-end
-module FakeInterface
-using TraitWorld, ..FakeOutside
-@trait_module module Plots
-using TraitWorld
-export Figure, PointSeries, xs, ys, figure, scatter!, npts, ftitle, bad, leak
-@handle Figure
-@trait PointSeries{R} begin
-    xs(r::R)::Vector{Float64}
-    ys(r::R)::Vector{Float64}
-end
-@implement PointSeries{Matrix{Float64}} begin
-    xs(r) = r[:, 1]
-    ys(r) = r[:, 2]
-end
-figure() = @call FakeOutside.newfig()::Figure
-scatter!(f::Figure, t::PointSeries; title::String = "") = @call FakeOutside.addpoints!(f, xs(t), ys(t); title)::Nothing
-npts(f::Figure) = @call FakeOutside.npoints(f)::Int
-ftitle(f::Figure) = @call FakeOutside.title(f)::String
-bad(t::PointSeries, f::Figure) = (f.ref; xs(t))
-leak(t::PointSeries, f::Figure) = @call FakeOutside.addpoints!(f, t, t)::Nothing
-end
-using .Plots
-export Figure, PointSeries, xs, ys, figure, scatter!, npts, ftitle, bad, leak
-end
-@trait_module module UsesPlots
-using TraitWorld, ..FakeInterface
-export plot_it
-plot_it(t::PointSeries) = (f = figure(); scatter!(f, t; title = "two points"); (npts(f), ftitle(f)))
-end
-@testset "poc3 M3: calls upward, declared calls, handles" begin
-    m = [1.0 2.0; 3.0 4.0]
-    @test UsesPlots.plot_it(m) == (2, "two points")
-    f = FakeInterface.figure()
-    @test f isa FakeInterface.Figure && f.ref isa FakeOutside.Fig          # a handle is a value to ordinary code
-    FakeInterface.scatter!(f, m); @test FakeInterface.npts(f) == 2
-    e = try FakeInterface.bad(m, f) catch err; err end
-    @test e isa TraitUseError && occursin("handle is opaque", sprint(showerror, e))
-    e = try FakeInterface.leak(m, f) catch err; err end
-    @test e isa TraitUseError && occursin("never go up", sprint(showerror, e))
-    @test length(TraitWorld.declared_calls(FakeInterface)) == 5
-    @test TraitWorld.is_declarer(FakeInterface) && FakeInterface in TraitWorld.declarers()   # the ordinary module around the trait module holds them
-    e = thrown(quote
-        @trait_module module NoIface
-        using TraitWorld, ..FakeOutside
-        end
-    end)
-    @test TraitWorld.LAYERING[] ? e isa LayeringError : e === nothing   # the wrapped package itself stays outside (rule 1 only)
-    e = thrown(quote
-        @trait_module module BadCall
-        using TraitWorld
-        g() = @call Main.FakeOutside.newfig()::Int
-        end
-    end)
-    @test e isa ErrorException && occursin("needs an ordinary module around the trait module", e.msg)
-end
-
-# --- poc3 M8: verify_main with keyword entries and declared calls ------------------------------
+# --- poc3 M8: verify_main with keyword entries ------------------------------------------------
 module VKW
-using ..KW, ..UsesPlots
+using ..KW
 using Main: Measurements
 function main(args::Vector{String})
     t = Measurements([[1.0, 2.0]])
     z = colz(t, 1; tol = 0.5)::Vector{Float64}
-    n = plot_it([1.0 2.0; 3.0 4.0])::Tuple{Int,String}
-    return sum(z) + n[1]
+    return sum(z)
 end
 end
-@testset "poc3 M8: verify_main, keyword entries and declared calls" begin
+@testset "poc3 M8: verify_main, keyword entries" begin
     facts = TraitWorld.FACTS[]; TraitWorld.FACTS[] = false            # as in M7: a closed world's native workers
     VKW.main(String[])
     TraitWorld.FACTS[] = facts
     r = verify_main(VKW.main, (Vector{String},))
     @test isclosed(r)
-    @test count(p -> p.first === :declared, r.targets) == 4           # figure, addpoints!, npoints, title
     @test count(p -> p.first === :worker, r.targets) == 0             # every trait call static: entries are ordinary methods
-    @test any(p -> p.first === :declared && p.second <: Tuple{typeof(FakeOutside.newfig)}, r.targets)
 end
 
 # --- poc3 M6: sealing (last: refuse mode deletes the pirates of the session) ------------------------
@@ -904,20 +837,6 @@ end
     TraitWorld.DOOR_BUDGET[] = old
     # a door behind a dynamic call: the design checks the target when it compiles; stock Julia does not
     @test_broken occursin("inward door", msg(Doors.barrier_eval))
-    # the same door through a declared call is accepted
-    toplevel(quote
-        module TLSInterface
-        using TraitWorld
-        @trait_module module T
-        using TraitWorld
-        export tls
-        tls() = @call Base.task_local_storage(:tw_probe)::Int
-        end
-        using .T: tls
-        end
-    end)
-    task_local_storage(:tw_probe, 7)
-    @test Main.TLSInterface.tls() == 7
 end
 
 @testset "view caches: keys and recording" begin

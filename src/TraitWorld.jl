@@ -21,7 +21,7 @@ using PrecompileTools: PrecompileTools
 using Serialization: Serialization
 
 export Trait, Callable, CallMode, DynamicCall, CompiledCall, compiled_call, dynamic_call, TObj, Dynamic, DynamicFn, dynamic_fn,
-       @trait, @implement, @trait_module, @workload, @trait_wrapper, @handle, @call, Handle,
+       @trait, @implement, @trait_module, @workload, @trait_wrapper,
        TraitBoundError, TraitUseError, ImplementError, LayeringError, OwnershipError, PiracyError, mode!, verify_main, isclosed,
        piracy_mode!, check_no_piracy, viewcache_flush,
        @warn_on_abstract, @error_on_abstract, AbstractTypeError, check_concrete, check_definitions, conforms, withfields
@@ -53,6 +53,25 @@ function __init__()
     push!(Base.package_callbacks, _on_package_load)
 end
 
+"""
+After a package load: the generation moves (a load can bring projections and
+implementations without running `@implement` here), a trait wrapper loaded
+from its image is registered, a trait package seals itself, and the sealing
+scan runs once per top-level `using`.
+"""
+function _on_package_load(id::Base.PkgId)
+    _bump!()
+    m = get(Base.loaded_modules, id, nothing)
+    m isa Module || return nothing
+    is_wrapper_root(m) && _register_wrapper!(m, getglobal(m, :__tw_wrapper__)...)
+    Base.inferencebarrier(_filter_scan!)(m)
+    (isdefined(m, :__trait_module__) || _has_trait_module(m)) && seal!(m)   # a trait package seals itself (no rescan needed)
+    _report_refused_at_load()                                                # what the image hook left inactive (patched Julia)
+    Base.toplevel_load[] && _check_loads!()                                  # once per `using`, nested loads included
+    Base.toplevel_load[] && Base.inferencebarrier(_vc_load!)()               # the view caches of what is loaded now
+    return nothing
+end
+
 include("ownership.jl")
 include("facts.jl")
 include("core.jl")
@@ -61,7 +80,6 @@ include("trait.jl")
 include("implement.jl")
 include("entry.jl")
 include("trait_module.jl")
-include("calls.jl")
 include("wrapper.jl")
 include("sealing.jl")
 include("checks.jl")
@@ -109,17 +127,6 @@ struct _PCOwn; n::Int; end
 end
 struct _PCOne; data::Vector{Float64}; end
 @implement _PC.PCT _PCOne
-# a private package that calls out: declared calls and handles
-module _PCI
-using ..TraitWorld
-@trait_module module P
-using ..TraitWorld
-@handle H
-mk() = @call Base.Ref(1)::H
-rd(h::H) = @call Base.getindex(h)::Int
-tw(t::TraitWorld._PC.PCT, h::H) = rd(h) + TraitWorld._PC.pn(t)
-end
-end
 
 PrecompileTools.@compile_workload begin
     v = [1.0, 2.0]
@@ -141,8 +148,7 @@ PrecompileTools.@compile_workload begin
     _sig_alternatives(Tuple{typeof(sum),Union{Int,Float64},Union{Int,Float32},Union{Int8,Int16}})
     _sig_alternatives(Tuple{typeof(sum),Union{Int,Float64},Union{Int,Float32}})
     owned_method(first(methods(TraitWorld.owner)))
-    h = _PCI.P.mk(); _PCI.P.rd(h); _PCI.P.tw(v, h)
-    is_declarer(_PCI); is_wrapped(_PCI); find_pirates!()
+    is_wrapped(TraitWorld); find_pirates!()
 end
 precompile(_on_package_load, (Base.PkgId,))
 precompile(_vc_load!, ())
