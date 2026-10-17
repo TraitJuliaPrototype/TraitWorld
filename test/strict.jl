@@ -123,6 +123,29 @@ end)
         @test thrown_strict(:(@eval ImplT Base.Float64(t::Main.CoreT.T) = 2 * t.x)) === nothing
         @test latest(G(:tot), [latest(G(:CoreT).T, 1.0), latest(G(:CoreT).T, 2.0)]) == 6.0
 
+        # a method on its own abstract type is no pirate, also where it wins at another package's subtype
+        toplevel(:(module AbsA; abstract type AT end; Base.length(::AT) = 1; end))
+        toplevel(:(module AbsB; struct BT <: Main.AbsA.AT end; end))
+        toplevel(quote
+            @trait_module module StrictLib4
+            using TraitWorld
+            import ..AbsB
+            export BTs, cnt
+            @trait BTs{R} begin
+                bts(r::R)::Vector{AbsB.BT}
+            end
+            @implement BTs{Vector{AbsB.BT}} begin
+                bts(r) = r
+            end
+            cnt(b::BTs) = (s = 0; for x in bts(b); s += length(x); end; s)
+            end
+            using .StrictLib4
+        end)
+        bs = [latest(G(:AbsB).BT), latest(G(:AbsB).BT)]
+        @test latest(G(:cnt), bs) == 2
+        @test thrown_strict(:(@eval AbsA Base.length(::AT) = 5)) === nothing
+        @test latest(G(:cnt), bs) == 10
+
         @test isempty(TraitWorld._STRICT_MISSES)          # the check before the definition missed nothing
     finally
         TraitWorld.strict!(false)

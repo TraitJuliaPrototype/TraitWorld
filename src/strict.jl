@@ -1,9 +1,10 @@
 # ---------------------------------------------------------------------------
 # Strict mode (writeup/explorations/strict-mode.md): defining a winning pirate is an error.
-# A method definition is refused when it would win at a concrete signature where valid
-# trait-world code holds a fact (Julia would invalidate that code because of it), and its package
-# is not a stakeholder of that signature: it owns neither the function nor a type in it (an
-# extension counts as its parent, a declared delegate as the package it implements). Trait-world
+# A method definition is refused when it is a pirate (rule 3: its package does not own the
+# function or a type in every signature it applies to; an extension counts as its parent), it
+# would win at a concrete signature where valid trait-world code holds a fact (Julia would
+# invalidate that code because of it), and its package is not a declared delegate of an owner of
+# that signature. Trait-world
 # code is then never invalidated by a pirate; stakeholders' definitions are followed as before.
 # Nothing changes at run time: the check runs only when a method is defined.
 #
@@ -80,6 +81,11 @@ end
 function _strict_violation(m::Method)
     definer = owner(m.module)
     definer === :Julia && return nothing               # Julia is one owner, and owns its own functions
+    _strict_owned(m) && return nothing
+    # an owned method (rule 3: its package owns the function or a type in every signature it
+    # applies to, an abstract type included) is no pirate, wherever it wins: by Lemma O only
+    # pirates need the walk, and they are few (a package image's methods are nearly all owned)
+    owned_method(m) && return nothing
     world = Base.get_world_counter()
     check(s, caller) = caller isa Core.CodeInstance && caller.max_world == typemax(UInt) && _trait_world_code(caller) &&
                        _fact_sig(s) && _would_win(m, s, world) && !_stakeholder(definer, s)
@@ -150,7 +156,7 @@ function _strict_after!(m::Method)
     log = _strict_log_stop!()
     log isa Vector || return nothing
     definer = owner(m.module)
-    definer === :Julia && return nothing
+    (definer === :Julia || owned_method(m)) && return nothing
     w = Base.get_world_counter()
     nonstake = nothing
     hit = nothing
@@ -192,16 +198,42 @@ function _strict_on_definition(m::Method, after::Bool)
     return nothing
 end
 
+"Counts and times of the check at image loads: methods seen, pirates walked, seconds owning, seconds walking."
+const _STRICT_STATS = zeros(4)
 "Strict mode's part of the image hook: the image's methods that would break trait-world facts."
 function _strict_image_refusals(ms::Vector{Any})
     STRICT[] || return Any[]
     out = Any[]
+    _OWNER_MEMO[] = IdDict{Module,Any}()          # owners cannot change while one image's methods are scanned
+    try
     for m in ms
         m isa Method || continue
+        _STRICT_STATS[1] += 1
+        t0 = time_ns()
+        own = _strict_owned(m)
+        t1 = time_ns()
+        _STRICT_STATS[3] += (t1 - t0) / 1e9
+        own && continue
+        _STRICT_STATS[2] += 1
         v = _strict_violation(m)
+        _STRICT_STATS[4] += (time_ns() - t1) / 1e9
         v === nothing || push!(out, PirateError(m, owner(m.module), v[1], v[2], false))
     end
+    finally
+        _OWNER_MEMO[] = nothing
+    end
     return out
+end
+"Owned (no pirate): Julia's own, a method of the definer's own function (the common case), or owned by rule 3."
+function _strict_owned(m::Method)
+    d = owner(m.module)
+    d === :Julia && return true
+    body = Base.unwrap_unionall(m.sig)
+    if body isa DataType && !isempty(body.parameters)
+        ft = body.parameters[1]
+        ft isa DataType && owner(ft.name.module) === d && return true
+    end
+    return owned_method(m)
 end
 
 function _strict_init!()
