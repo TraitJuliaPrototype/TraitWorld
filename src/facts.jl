@@ -86,23 +86,41 @@ function _machinery_call(@nospecialize(ft))
 end
 
 """
-Facts at non-public functions (decided in session 26): a call at abstract argument types of a
-named function that its module neither exports nor declares `public` is inferred as usual, with its
-edges. Only the owner adds methods to its internal functions; another package extending them counts
-as piracy (rule 3), so such an invalidation is a pirate's, like a winning pirate at a concrete fact.
+Facts at non-public functions (decided in session 26), within the caller's own package: a call at
+abstract argument types of a named function that its module neither exports nor declares `public`,
+made from code of the same package, is inferred as usual, with its edges. Only the owner adds
+methods to its internal functions; another package extending them counts as piracy (rule 3).
 The edges are Julia's, so a definition there still invalidates the code ("identical or error").
+Scoped to the caller's package because Julia's own internals are extended by packages as a matter
+of course: applied to Base's, the rule let OffsetArrays, StatsBase and Unitful invalidate a report's
+code (5.4 s instead of 1.7 s after those loads, session 26).
 `JULIA_TW_INTERNAL_FACTS=0` turns the rule off (for comparison).
 """
 function _internal_function(ft::DataType)
     _INTERNAL_FACTS[] || return false
     (ft <: Function && isdefined(ft, :instance)) || return false
     m = ft.name.module
+    Base.moduleroot(m) === _CALLER_ROOT[] || return false
     n = ft.name.singletonname
     n isa Symbol || return false
     (isdefined(m, n) && getglobal(m, n) === ft.instance) || return false      # a named function, not a closure
     return !Base.ispublic(m, n)
 end
 const _INTERNAL_FACTS = Ref(true)
+"The root module of the code being inferred at the current call (set around each call's method lookup)."
+const _CALLER_ROOT = Ref{Module}(Core)
+
+function CC.abstract_call_gf_by_type(interp::FactsInterp, @nospecialize(func), arginfo::CC.ArgInfo,
+                                     si::CC.StmtInfo, @nospecialize(atype), sv::CC.AbsIntState, max_methods::Int)
+    prev = _CALLER_ROOT[]
+    _CALLER_ROOT[] = Base.moduleroot(CC.frame_module(sv))
+    try
+        return @invoke CC.abstract_call_gf_by_type(interp::CC.AbstractInterpreter, func::Any, arginfo::CC.ArgInfo,
+                                                   si::CC.StmtInfo, atype::Any, sv::CC.AbsIntState, max_methods::Int)
+    finally
+        _CALLER_ROOT[] = prev
+    end
+end
 
 """
 Concrete and semi-concrete evaluation under the policy. Both need foldable effects, which a run-time
