@@ -3,8 +3,12 @@
 
 A proof of concept of the design note "Traits for better Julia": trait
 modules, traits over a representation parameter, implementations and
-projections, layering (rule 1) and ownership (rule 3) checked when code is
-defined.
+projections. What library code may do with a trait object (rule 2) and
+ownership of the methods a trait module defines (rule 3) are checked when
+code is defined. Code written without traits is wrapped by facts: trait-world
+code may call any Julia code, and its workers are compiled under the trait
+world's compiler policy (`facts.jl`), so that only concrete facts decide their
+compiled code and Julia's own invalidation keeps it valid.
 """
 module TraitWorld
 
@@ -13,13 +17,11 @@ using Serialization: Serialization
 
 export Trait, Callable, CallMode, DynamicCall, CompiledCall, compiled_call, dynamic_call, TObj, Dynamic, DynamicFn, dynamic_fn,
        @trait, @implement, @trait_module, @workload,
-       TraitBoundError, TraitUseError, ImplementError, OwnershipError, PiracyError, mode!, verify_main, isclosed,
+       TraitBoundError, TraitUseError, ImplementError, OwnershipError, verify_main, isclosed,
        viewcache_flush,
        @warn_on_abstract, @error_on_abstract, AbstractTypeError, check_concrete, check_definitions, conforms, withfields
 
 function __init__()
-    m = get(ENV, "JULIA_TRAITWORLD", "")
-    isempty(m) || mode!(Symbol(m))
     empty!(_NOT_EXTENSIONS)
     _vc_init!()
     _hooks_init!()
@@ -48,7 +50,6 @@ end
 include("ownership.jl")
 include("facts.jl")
 include("core.jl")
-include("audit.jl")
 include("trait.jl")
 include("implement.jl")
 include("entry.jl")
@@ -110,8 +111,7 @@ PrecompileTools.@compile_workload begin
     macroexpand(_PC, :(f(t::PCT, i::Int) = pv(t, i)))
     conformance_problems(_PC.PCT, Vector{Float64}, (:pn, :pv))
     worker_problems(Tuple{typeof(_PC.pcsum),typeof(TObj((View{_PC.PCT}(Impl{(:pd,)}(), v),)))})
-    # the audit and rule 3 per signature (Union members expanded)
-    audit(Tuple{typeof(_PC.pcsum),typeof(TObj((View{_PC.PCT}(Impl{(:pd,)}(), v),)))})
+    # rule 3 per signature (Union members expanded)
     for m in methods(_PC.pv)
         owned_method(m)
     end

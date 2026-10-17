@@ -476,7 +476,7 @@ function _rewrite_fdef(mod::Module, ex)
             error("@trait_module: `::Like{$likearg}` names no trait-bounded argument of `$fname`")
     end
     wsig = _mksig(fname, wargs, wkws, ret, Any[wheres..., newwheres...])
-    worker = Expr(head, wsig, _rethrow_piracy(body))
+    worker = Expr(head, wsig, body)
     rest = Any[]
     likearg === nothing || push!(rest, :($TraitWorld._like!($fname)))
     # --- the entry, once per shape
@@ -591,24 +591,6 @@ function _rewrite_fdef(mod::Module, ex)
     key[1] !== mod && isdefined(mod, :__tw_extended__) && push!(mod.__tw_extended__, key)
     push!(rest, :($TraitWorld._bump!()))
     return worker, rest
-end
-
-"""
-Inside trait-bound code, `catch` must not swallow a `PiracyError`: a fallback
-taken after it would compute something plain Julia never computes.
-"""
-function _rethrow_piracy(ex)
-    ex isa Expr || return ex
-    args = Any[_rethrow_piracy(a) for a in ex.args]
-    if ex.head === :try && length(args) >= 3 && args[3] isa Expr
-        var = args[2]
-        if var === false
-            var = gensym(:err)
-            args[2] = var
-        end
-        args[3] = Expr(:block, :($var isa $TraitWorld.PiracyError && rethrow()), args[3])
-    end
-    return Expr(ex.head, args...)
 end
 
 # --- checks ----------------------------------------------------------------------

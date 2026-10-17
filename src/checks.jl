@@ -247,15 +247,11 @@ signature (rule 4 places it). The call to the worker is static.
 """
 function _checked_call_body(@nospecialize(f), argtypes, argsyms)
     flag = Ref(false)
-    guard = GuardState()
     sig = Tuple{f,argtypes...}
     return quote
         Base.@_inline_meta
         # a dynamic call: the check's reflection stays out of compiled code (and out of trimmed binaries)
         $(flag)[] || CLOSED_WORLD[] || Base.inferencebarrier(_latest_under_policy)(_check_once, $flag, $sig)
-        # the piracy guard audits native code; under rule R a winning pirate is followed as in
-        # plain Julia (wrapping-by-facts.md, G1), so the policy's path has none
-        $(_policy_path() ? nothing : :(_guard($guard, $sig)))
         # a result like the input goes on to the entry, which inverts it
         $(_worker_call(:f, argsyms))
     end
@@ -292,11 +288,9 @@ fills the defaults inside the trait world.
 """
 @generated function checked_kwcall(nt::NamedTuple, f, args...)
     flag = Ref(false)
-    guard = GuardState()
     sig = Tuple{typeof(Core.kwcall),nt,f,args...}
     return quote
         $(flag)[] || CLOSED_WORLD[] || Base.inferencebarrier(_latest_under_policy)(_check_once, $flag, $sig)
-        $(_policy_path() ? nothing : :(_guard($guard, $sig)))
         $(_worker_call(:(Core.kwcall), [:nt, :f, :(args...)]))
     end
 end

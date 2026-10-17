@@ -11,7 +11,7 @@
 #                are enumerated from the program's argument types and the
 #                registered projections and implementations;
 #   root         a closure handed to the runtime (task, atexit, finalizer);
-#   guard        the machinery's slow paths (checks, the audit, reflection):
+#   guard        the machinery's slow paths (checks, reflection):
 #                not followed, a verified closed-world build runs them now;
 #   hole         anything else.
 #
@@ -63,8 +63,7 @@ struct MainReport
     holes::Vector{Hole}
     uncompiled::Vector{Any}         # normal-path MethodInstances without native code
     checked_native::Bool            # false while generating a package image
-    findings::Vector{Pair{Any,Vector{PiracyFinding}}}
-    problems::Vector{String}        # build-time checks of the enumerated workers (rules 1 and 2)
+    problems::Vector{String}        # build-time checks of the enumerated workers (rule 2)
 end
 
 "`true` iff no hole lies on a normal path and every normal-path method instance has native code."
@@ -398,10 +397,10 @@ function _runtime_closure(src, sptypes, @nospecialize(st))
     return nothing
 end
 
-# the machinery's slow paths: reflection, checks, the audit. Not followed: in a
+# the machinery's slow paths: reflection and checks. Not followed: in a
 # closed world they are switched off and verify_main runs them at build time.
 _machinery_method(m::Method) = m.module === TraitWorld && m.name in
-    (:_check_once, :_latest_under_policy, :_conformance_slow, :_needed_slow, :_guard_slow, :_builder_for, :worker_problems, :audit, :_rule3_error,
+    (:_check_once, :_latest_under_policy, :_conformance_slow, :_needed_slow, :_builder_for, :worker_problems, :_rule3_error,
      :_closed_miss, :_witness, :witness, :proj_lookup, :_no_worker_error, :_refuse_overrides, :_merge_dyn)
 
 const _ENTER = Ref{Any}(nothing)
@@ -763,6 +762,8 @@ function _scan(mi::Core.MethodInstance, cx::_Walk)
     return _Scan(invokes, sites, throws, returns)
 end
 
+_isvalid(ci::Core.CodeInstance, world::UInt) = ci.min_world <= world <= ci.max_world
+
 function _has_native(mi::Core.MethodInstance, world::UInt)
     isdefined(mi, :cache) || return false
     ci = mi.cache
@@ -786,13 +787,13 @@ Check that calling `f` with arguments of types `argtypes` can only reach
 compiled code: every dynamic call has finitely many targets known now, or is
 one of TraitWorld's entry steps, whose targets are enumerated from the
 argument types and the registered projections. Runs the build-time checks of
-every enumerated worker (rules 1 and 2, the piracy audit) and reports the
+every enumerated worker (rule 2) and reports the
 holes, separating those reached only on the way to an uncaught `throw`.
 
 `compile = true` compiles every target. `entrypoints = true` registers them
 with `Base.Experimental.entrypoint` for `juliac --trim`; in a trimmed build it
-also closes the world: entry caches are filled now, and the checks, the guard,
-erasure and reflection are switched off in the binary.
+also closes the world: entry caches are filled now, and the checks, erasure
+and reflection are switched off in the binary.
 """
 function verify_main(@nospecialize(f), @nospecialize(argtypes::Tuple = ()); compile::Bool = false, entrypoints::Bool = false,
                      close::Bool = entrypoints && Base.JLOptions().trim != 0)
@@ -847,16 +848,13 @@ function verify_main(@nospecialize(f), @nospecialize(argtypes::Tuple = ()); comp
         end
     end
     sort!(holes; by = h -> (h.errorpath, string(h.kind), string(h.callee)))
-    # build-time checks of every enumerated worker: rules 1 and 2, and the piracy audit
-    findings = Pair{Any,Vector{PiracyFinding}}[]
+    # build-time checks of every enumerated worker: rule 2
     problems = String[]
     for (kind, S) in targets
         kind === :worker || continue
         W = S.parameters[1] === typeof(checked_kwcall) ? Tuple{typeof(Core.kwcall),S.parameters[2:end]...} :
                                                           Tuple{S.parameters[2:end]...}
         append!(problems, worker_problems(W))
-        fs = audit(W; compile = false)
-        isempty(fs) || push!(findings, W => fs)
     end
     unique!(problems)
     allroots = Any[entry; [S for (_, S) in targets]; collect(dyn_roots); [mi.specTypes for mi in cx.native_only]]
@@ -883,7 +881,7 @@ function verify_main(@nospecialize(f), @nospecialize(argtypes::Tuple = ()); comp
         end
     end
     return MainReport(entry, length(level), count(!=(_ERR), values(level)), static_calls, bounded,
-                      trait_sites, targets, roots, guard_sites, holes, uncompiled, !generating, findings, problems)
+                      trait_sites, targets, roots, guard_sites, holes, uncompiled, !generating, problems)
 end
 
 """
@@ -899,13 +897,11 @@ function close_world!(plans)
     _SLOW[] = d
     _SLOW_WORLD[] = Base.get_world_counter()
     CLOSED_WORLD[] = true
-    MODE[] = :recompile
     return nothing
 end
-"Undo `close_world!` in a session (for tests): the open world's checks, guard and erasure again."
+"Undo `close_world!` in a session (for tests): the open world's checks and erasure again."
 function open_world!()
     CLOSED_WORLD[] = false
-    MODE[] = :warn
     _bump!()
     return nothing
 end
@@ -950,13 +946,11 @@ function Base.show(io::IO, ::MIME"text/plain", r::MainReport)
     else
         println(io, "  native code: not checked (generating a package image)")
     end
-    println(io, "  build-time checks of enumerated workers (rules 1 and 2): ",
+    println(io, "  build-time checks of enumerated workers (rule 2): ",
             isempty(r.problems) ? "clean" : string(length(r.problems)) * " problem(s)")
     for p in first(r.problems, 10)
         println(io, "    ", p)
     end
-    print(io, "  build-time piracy audit of enumerated workers: ",
-          isempty(r.findings) ? "clean" : string(sum(length ∘ last, r.findings)) * " finding(s)")
 end
 
 function _calleestr(h::Hole)

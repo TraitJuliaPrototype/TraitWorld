@@ -419,23 +419,14 @@ sneak(t::ColTable) = Main.Plain2.f(colmean(t, 1))
 guarded(t::ColTable, i::Int) = try weighted(t, i) catch; -1.0 end
 end
 using .Weights
-@testset "M6: rule 1 on typed code; the piracy audit" begin
+@testset "M6: calls into ordinary code; a winning pirate is followed" begin
     @test Weights.sneak([[1.0]]) == 2.0                              # an ordinary package's function: called as in plain Julia
     m = [1.0 2.0; 3.0 4.0]
     @test weighted(m, 1) == 4.0
     toplevel(:(module Pirate2; using ..Weights; Weights.weight(x::Float64) = 2.0; end))
-    if TraitWorld._policy_path()
-        # wrapping by facts: a winning pirate is followed as plain Julia follows it (G1)
-        @test weighted(m, 1) == 8.0
-    else
-        TraitWorld.mode!(:error)
-        @test_throws PiracyError weighted(m, 1)
-        TraitWorld.mode!(:recompile)
-        @test weighted(m, 1) == 8.0                                  # the opt-out: plain Julia
-        TraitWorld.mode!(:warn)
-        @test (@test_logs (:warn, r"PiracyError") match_mode=:any weighted(m, 1)) == 8.0
-    end
-    @test TraitWorld._rethrow_piracy(:(try f() catch; 0 end)).args[3].args[1].head === :&&   # catch rethrows PiracyError
+    # wrapping by facts: a winning pirate is followed as plain Julia follows it (G1)
+    @test weighted(m, 1) == 8.0
+    @test !TraitWorld.owned_method(only(methods(Weights.weight, (Float64,))))   # still a pirate under rule 3
 end
 
 # --- M7: concrete mode, verify_main ---------------------------------------------------------
@@ -478,7 +469,7 @@ end
     @test isclosed(r)
     # entries are ordinary inlined methods (keys-plan §6): for types the program knows, every trait call is static
     @test count(p -> p.first in (:enter, :worker), r.targets) == 0
-    @test isempty(r.problems) && isempty(r.findings)
+    @test isempty(r.problems)
 end
 
 # --- the review's findings, one test each -----------------------------------------------------
@@ -587,18 +578,15 @@ end
     @test TraitWorld.enter_callable(Tuple{Float64}, Float64, nothing, Base.Fix1(userf2, 2.0)).f isa TraitWorld.Erased
 end
 
-@testset "review: catch rethrows PiracyError; a closed world in a session" begin
+@testset "review: a pirate behind a catch; a closed world in a session" begin
     toplevel(quote
         @trait_module module Catcher
         using TraitWorld, ..Columns, ..Weights
         safe(t::ColTable) = try Weights.weighted([[1.0, 2.0]], 1) catch; -1.0 end
         end
     end)
-    TraitWorld.mode!(:error)
-    # wrapping by facts follows the pirate (G1): no PiracyError to rethrow
-    TraitWorld._policy_path() ? (@test Main.Catcher.safe([[1.0]]) == 2.0 * 1.0 + 2.0 * 2.0) :
-        (@test_throws PiracyError Main.Catcher.safe([[1.0]]))
-    TraitWorld.mode!(:warn)
+    # wrapping by facts follows the pirate (G1), as plain Julia does
+    @test Main.Catcher.safe([[1.0]]) == 2.0 * 1.0 + 2.0 * 2.0
     r = verify_main(VMain.main, (Vector{String},); close = true)
     @test TraitWorld.CLOSED_WORLD[]
     @test VMain.main(String[]) == VMain.main(String[]) && VMain.main(["m"]) isa Float64

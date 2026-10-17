@@ -161,7 +161,7 @@ end
 """
 Owners of every function and type mentioned in a method signature. An
 identity set on purpose: hashing values of type `Any` is a call other
-packages extend, and the audit must not be invalidated by their loads.
+packages extend, and the ownership check must not be invalidated by their loads.
 """
 sig_owners(@nospecialize(sig)) = _owners!(Base.IdSet{Any}(), sig)
 

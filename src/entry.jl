@@ -17,8 +17,7 @@
 # `conformance` is declared with `@max_methods 1` and has a fallback, so code
 # compiled at `conformance(X, ::Any)` infers nothing from its methods, holds
 # no edge to them, and a new conformance invalidates nothing (a new type's
-# method would otherwise change what such code inferred, and the trait-world
-# filter, which keeps code from methods outside its view, would keep it stale).
+# method would otherwise change what such code inferred, and invalidate it).
 # ---------------------------------------------------------------------------
 
 struct NoTrait end
@@ -84,6 +83,20 @@ refresh!() = _bump!()
 "One lock for the machinery's slow paths: concurrent first calls must not race on its caches."
 const _LOCK = ReentrantLock()
 
+"""
+The method match of a call signature in `world`, or `nothing`: the runtime's
+own lookup, called directly. `Base._which` goes through the compiler's
+`findsup_mt`, whose compiled code unrelated loads invalidate (DataFrames'
+dependencies do, through `convert(UInt, Integer)`), which put a recompile of
+Base on the first call of every session (session 19).
+"""
+function _match(@nospecialize(sig), world::UInt)
+    min_valid = Ref{UInt}(typemin(UInt))
+    max_valid = Ref{UInt}(typemax(UInt))
+    r = ccall(:jl_gf_invoke_lookup_worlds, Any, (Any, Any, UInt, Ptr{Csize_t}, Ptr{Csize_t}),
+              sig, nothing, world, min_valid, max_valid)
+    return r === nothing ? nothing : r::Core.MethodMatch
+end
 "Set by `verify_main(…; entrypoints = true)` in a trimmed build: the slow path's cache is complete and nothing may be loaded."
 const CLOSED_WORLD = Ref(false)
 
