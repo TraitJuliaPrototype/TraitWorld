@@ -95,7 +95,12 @@ site rules out, unless effects are asserted (`@assume_effects :foldable`, `Base.
 fold would run plain Julia's code, or resolve the site at constant arguments, and record only the
 edge to the policy's CodeInstance, which holds no fact for the run-time site; a later definition
 there would leave the folded value stale (G1). So no evaluation at compile time when the callee's
-code under the policy (or code it invokes) has a run-time call.
+code under the policy (or code it invokes) has a run-time call, with one exception: a method of
+Julia's own (Base, Core) whose effects Julia itself asserts foldable (`@_total_meta`,
+`@assume_effects :foldable`), such as `eltype` of a tuple type behind every keyword splat's
+`pairs`. Plain Julia folds such a call by the same assertion and records the same edge, so the
+trait code is as fresh as plain Julia's precompiled code: only a pirate of Base's functions at
+Base's types could make either stale, and strict mode refuses those.
 """
 function CC.concrete_eval_eligible(interp::FactsInterp, @nospecialize(f), result::CC.MethodCallResult,
                                    arginfo::CC.ArgInfo, sv::CC.AbsIntState)
@@ -104,8 +109,17 @@ function CC.concrete_eval_eligible(interp::FactsInterp, @nospecialize(f), result
     _FACTS_POLICY[] || return r
     (r === :concrete_eval || r === :semi_concrete_eval) || return r
     edge = result.edge
-    edge isa Core.CodeInstance && _has_runtime_sites(edge) && return :none
+    edge isa Core.CodeInstance && _has_runtime_sites(edge) && !_julia_asserted_foldable(edge) && return :none
     return r
+end
+"Whether `ci` is the code of a method of Base or Core whose effects Julia asserts foldable."
+function _julia_asserted_foldable(ci::Core.CodeInstance)
+    m = Core.Compiler.get_ci_mi(ci).def
+    m isa Method || return false
+    r = Base.moduleroot(m.module)
+    (r === Base || r === Core) || return false
+    o = CC.decode_effects_override(m.purity)
+    return o.consistent && o.effect_free && o.terminates_globally
 end
 
 const _RUNTIME_SITES = IdDict{Core.CodeInstance,Bool}()
