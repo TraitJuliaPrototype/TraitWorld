@@ -25,6 +25,7 @@ function __init__()
     empty!(_NOT_EXTENSIONS)
     _vc_init!()
     _hooks_init!()
+    _strict_init!()
     FACTS[] = get(ENV, "JULIA_TW_FACTS", "1") != "0"
     _FACTS_POLICY[] = get(ENV, "JULIA_TW_FACTS_POLICY", "1") != "0"
     _FACTS_DEBUG[] = get(ENV, "JULIA_TW_FACTS_DEBUG", "0") == "1"
@@ -42,6 +43,7 @@ function _on_package_load(id::Base.PkgId)
     _bump!()
     m = get(Base.loaded_modules, id, nothing)
     m isa Module || return nothing
+    _strict_known_delegates!()
     _report_refused_at_load()                                                # what the image hook left inactive (patched Julia)
     Base.toplevel_load[] && Base.inferencebarrier(_vc_load!)()               # the view caches of what is loaded now
     return nothing
@@ -60,6 +62,7 @@ include("concrete.jl")
 include("viewcache.jl")
 include("defcheck.jl")
 include("hooks.jl")
+include("strict.jl")
 
 # ---------------------------------------------------------------------------
 # Precompile the machinery itself: macro expansion, registration, checks,

@@ -13,6 +13,8 @@
 const _HAS_DEF_HOOK = Ref(false)
 "Overrides an image hook left inactive in this session, reported after the load."
 const _REFUSED_OVERRIDES = Method[]
+"Strict mode: an image's winning pirates left inactive at its load, reported after it."
+const _REFUSED_PIRATES = Any[]
 
 function _hooks_init!()
     # piece 5: an image of a package using TraitWorld keeps the machine code its workload made for
@@ -99,7 +101,9 @@ function _on_method_definition(m::Method, after::Bool)
         if !after
             msg = _override_violation(m)
             msg === nothing || (err = ImplementError(msg))
+            err === nothing && (err = _strict_check(m, false))
         else
+            err = _strict_check(m, true)
             _OVR_BUILT[] && _is_declared_defaults(m) && _index_declared!(m)
             # a method added to a complete trait module: its functions' keep flags may change
             mod = _finished_trait_module(m)
@@ -113,6 +117,16 @@ function _on_method_definition(m::Method, after::Bool)
     return nothing
 end
 const _HOOK_FAILED = Ref(false)
+"Strict mode's check, as an error to throw or `nothing` (a failure of the check itself is the hook's failure)."
+function _strict_check(m::Method, after::Bool)
+    try
+        _strict_on_definition(m, after)
+    catch e
+        e isa PirateError && return e
+        rethrow()
+    end
+    return nothing
+end
 
 "The complete trait module a method belongs to (by where it is defined or by its function's owner), or `nothing`."
 function _finished_trait_module(m::Method)
@@ -167,6 +181,10 @@ function _on_image_methods(ms::Vector{Any}, pkg::String)
                 push!(_REFUSED_OVERRIDES, m)
             end
         end
+        for e in _strict_image_refusals(ms)
+            push!(refused, e.method)
+            push!(_REFUSED_PIRATES, e)
+        end
     catch e
         _HOOK_FAILED[] || (_HOOK_FAILED[] = true; @warn "TraitWorld's image hook failed; the load proceeds unchecked" exception = (e, catch_backtrace()))
     end
@@ -178,6 +196,10 @@ function _report_refused_at_load()
     if !isempty(_REFUSED_OVERRIDES)
         ms = copy(_REFUSED_OVERRIDES); empty!(_REFUSED_OVERRIDES)
         @error "ImplementError: overrides after a conformance were left inactive at load:\n  " * join(string.(ms), "\n  ")
+    end
+    if !isempty(_REFUSED_PIRATES)
+        es = copy(_REFUSED_PIRATES); empty!(_REFUSED_PIRATES)
+        @error "strict mode left a package's winning pirates inactive at its load:\n  " * join(sprint.(showerror, es), "\n  ")
     end
     return nothing
 end
