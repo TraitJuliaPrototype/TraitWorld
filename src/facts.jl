@@ -340,7 +340,7 @@ That edge says nothing about dispatch at the call's own signature: the generated
 edge `(sig, ci)`, a dispatch fact at the concrete signature (as native code records for a call
 whose method instance is wider than the call), and the lookup's world bounds. A method added
 later that is more specific at `sig` invalidates the entry (acceptance G1.6).
-The call is marked `@noinline`: Julia's inliner resolves `:invoke ci` by the method instance in
+The call is marked `@noinline` unless the runtime has piece 10 (`_INLINER_KEEPS_CI`): Julia's inliner resolves `:invoke ci` by the method instance in
 the caller's own cache, so a native caller would inline the worker's native code, and the edge
 to that code would be dropped as a duplicate of `ci`'s (a stale-code hole, review of 2026-10-17).
 A worker that calls its own function's entry again (recursion through an entry, also with
@@ -349,6 +349,14 @@ re-entry, or beyond `_FACTS_GEN_DEPTH` nested generations, the generator throws,
 call gives up without caching, and the caller calls `_facts_call` at run time. Not a `CachedGenerator`: its result is generated again whenever the entry is inferred again.
 """
 struct _FactsCallGen end
+"""
+Whether Julia's inliner inlines exactly the CodeInstance an `invoke` names when it belongs to another
+owner (julia-support.md piece 10: a resolver for a given CodeInstance). Then the entry's call of the
+worker need not be `@noinline`: a native caller inlines the policy's code, with its edge.
+"""
+const _INLINER_KEEPS_CI = Ref(false)
+_inliner_keeps_ci() = hasmethod(CC.resolve_todo, Tuple{Core.CodeInstance, CC.CallInfo, UInt32, CC.InliningState})
+_INLINER_KEEPS_CI[] = _inliner_keeps_ci()        # also while an image is built (no `__init__` then)
 struct _FactsReentry <: Exception
     sig::Any
 end
@@ -392,9 +400,11 @@ function (::_FactsCallGen)(world::UInt, source::Method, self, f, args)
             edges = Core.svec(sig, ci)
         end
     end
-    body = Expr(:block, Expr(:meta, :inline),
-                Expr(:noinline, true), Expr(:local, Expr(:(=), :val, call)), Expr(:noinline, false),
-                Expr(:return, :val))
+    body = _INLINER_KEEPS_CI[] ?
+        Expr(:block, Expr(:meta, :inline), Expr(:local, Expr(:(=), :val, call)), Expr(:return, :val)) :
+        Expr(:block, Expr(:meta, :inline),
+             Expr(:noinline, true), Expr(:local, Expr(:(=), :val, call)), Expr(:noinline, false),
+             Expr(:return, :val))
     lam = Expr(:lambda, Any[Symbol("#self#"), :f, :args], Expr(:var"scope-block", body))
     src = Base.generated_body_to_codeinfo(lam, @__MODULE__, true)
     if edges !== nothing
