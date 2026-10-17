@@ -407,7 +407,7 @@ function _compile_pending!(world::UInt)
 end
 
 """
-The policy's CodeInstance of `mi` valid in `world`, or `nothing`: a walk of the instance's cache,
+The policy's CodeInstance of `mi` valid in `world` that can be invoked, or `nothing`: a walk of the instance's cache,
 which runs no compiler code (an image keeps CodeInstances without IR, which `jl_rettype_inferred`
 does not return; entering the compiler instead costs seconds when loads have invalidated its native
 code for `FactsInterp`, open-issues §1.3).
@@ -416,10 +416,14 @@ function _owner_ci(mi::Core.MethodInstance, world::UInt)
     isdefined(mi, :cache) || return nothing
     ci = mi.cache
     while true
-        ci.owner isa FactsOwner && ci.min_world <= world <= ci.max_world && return ci
-        isdefined(ci, :next) || return nothing
+        # with native code (an image on stock Julia keeps none for the policy's code: piece 5)
+        ci.owner isa FactsOwner && ci.min_world <= world <= ci.max_world && ci.invoke != C_NULL && return ci
+        isdefined(ci, :next) || break
         ci = ci.next
     end
+    # else code the runtime can compile, as `facts_codeinstance` finds it
+    c = ccall(:jl_rettype_inferred, Any, (Any, Any, UInt, UInt), FactsOwner(), mi, world, world)
+    return c isa Core.CodeInstance ? c : nothing
 end
 "The call of method instance `mi` in the policy's code, compiled under the policy in the caller's world if needed."
 function _invoke_under_policy(mi::Core.MethodInstance, @nospecialize(f), @nospecialize(args...))
@@ -430,7 +434,14 @@ function _invoke_under_policy(mi::Core.MethodInstance, @nospecialize(f), @nospec
         ci = _typeinf_policy(w, mi, CC.SOURCE_MODE_ABI)
         _FACTS_DEBUG[] && Core.println("  ", round(time() - t0; digits = 3), " s")
     end
-    return Core.invoke(f, ci::Core.CodeInstance, args...)
+    ci = ci::Core.CodeInstance
+    ci.invoke == C_NULL && ccall(:jl_compile_codeinst, Cint, (Any,), ci)
+    if ci.invoke == C_NULL
+        # the runtime cannot compile this owner's code here (stock Julia, without the patched
+        # build's support for foreign code instances): plain Julia's code of the same method, as before
+        return Core.invoke(f, Tuple{mi.specTypes.parameters[2:end]...}, args...)
+    end
+    return Core.invoke(f, ci, args...)
 end
 
 # the runtime compiles a CodeInstance of this owner through these (e.g. an `:invoke` target)
