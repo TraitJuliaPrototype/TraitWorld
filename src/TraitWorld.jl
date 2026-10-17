@@ -24,7 +24,6 @@ export Trait, Callable, CallMode, DynamicCall, CompiledCall, compiled_call, dyna
 function __init__()
     empty!(_NOT_EXTENSIONS)
     FACTS[] = get(ENV, "JULIA_TW_FACTS", "1") != "0"
-    _INTERNAL_FACTS[] = get(ENV, "JULIA_TW_INTERNAL_FACTS", "1") != "0"
     _vc_init!()
     _hooks_init!()
     _strict_init!()
