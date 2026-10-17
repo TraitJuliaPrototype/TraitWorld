@@ -573,6 +573,60 @@ function _conformance_methods(Xex, Tex)
 end
 
 """
+The statements that make a family's conformance a method: `conformance(X, u::T) where {…}` for
+the whole family, with a registry of builders per member type in the declaring module. A member's
+builder is found once on the slow path and kept there; builders found by the declaring package's
+workload are saved with its image, so a session does not find them again (34 ms for the solver's
+`FunctionModel` and integrator, session 27). A builder that holds a session's pointers is not kept.
+A later declaration for one member is a more specific method. (A generator cannot fix the builder:
+code reflection is not allowed in generated functions.)
+"""
+function _family_conformance_methods(@nospecialize(Xex), Tpat, wheres)
+    TW = TraitWorld
+    reg = gensym(:family_builders)
+    return Any[
+        :(const $reg = Ref($TW.IdDict{Any,Any}())),
+        Expr(:(=), Expr(:where, :($TW.conformance(::$TW.As{$Xex}, u::$Tpat)), wheres...),
+             :($TW._conf_family($reg, $Xex, u)))]
+end
+"A family member's conformance: its kept builder, or the slow path, which keeps it."
+@inline function _conf_family(reg::Base.RefValue{IdDict{Any,Any}}, ::Type{X}, u) where {X}
+    b = get(reg[], typeof(u), nothing)
+    b === nothing && return Base.inferencebarrier(_conf_family_slow)(reg, X, u)
+    return (b::Builder)(u)
+end
+@noinline function _conf_family_slow(reg::Base.RefValue{IdDict{Any,Any}}, @nospecialize(X), @nospecialize(u))
+    r = _conformance_slow(X, u)                         # warns once for a member that does not conform
+    U = typeof(u)
+    b = r === NOTRAIT ? nothing : _latest_under_policy(_family_builder, X, U)
+    if b isa Builder
+        @lock _LOCK begin
+            d = copy(reg[])
+            d[U] = b
+            reg[] = d                                   # readers see the old table or the new one
+        end
+    end
+    return r
+end
+"The builder of a family member's conformance, fixed when first compiled: `nothing` if it cannot be."
+function _family_builder(@nospecialize(X), @nospecialize(U))
+    (U isa DataType && isconcretetype(U)) || return nothing
+    try
+        # a member of a family declared by existing methods that does not conform (it breaks the
+        # family's documented interface) keeps the slow path, which warns at its first use
+        rec = _impl(X, U)
+        if rec isa ImplRec && rec.kind === :family && !isempty(_ops(X))
+            D = _existing_defaults(X, U)
+            isempty(conformance_problems(X, U, Tuple(op for op in _ops(X) if !(op in D)))) || return nothing
+        end
+        b = _conformance_builder(X, U)
+        return b isa Builder ? b : nothing
+    catch
+        return nothing
+    end
+end
+
+"""
     check_overrides() -> Vector{String}
 
 Methods of a trait's operation defined after a conformance whose default serves that
@@ -856,6 +910,7 @@ function _implement_family(mod::Module, @nospecialize(X), tr, wheres::Vector{Any
     end
     push!(out, Expr(:(=), Expr(:where, :($TW.implementation(::Type{$X}, ::Type{$Rex})), wheres...), rec))
     push!(out, :($TW._check_implementation(@__MODULE__, $X, $(Expr(:where, Rex, wheres...)), ())))
+    append!(out, _family_conformance_methods(X, Rex, wheres))
     push!(out, :($TW._bump!()))
     push!(out, :nothing)
     return esc(Expr(:block, out...))
@@ -907,6 +962,7 @@ function _implement_where(mod::Module, head, block)
         end
         famR = isempty(family) ? X : family[1].args[2]
         push!(out, :($TW._check_implementation(@__MODULE__, $X, $famR, ())))
+        isempty(family) || append!(out, _family_conformance_methods(X, Rsym, family))
         push!(out, :($TW._bump!()))
         push!(out, :nothing)
         return esc(Expr(:block, out...))
@@ -1097,6 +1153,7 @@ function _implement_projection(mod::Module, head, rest; field::Int = 0, fmap = n
                 Expr(:(=), Expr(:where, :($TW.implementation(::Type{$(traits[1])}, ::Type{$Tb})), wh...), :($TW.ImplRec(:family, ()))),
                 Expr(:(=), Expr(:where, :($TW.projection(::Type{$(traits[1])}, ::Type{$Tb})), wh...),
                      :($TW.ProjRec(identity, $Iex, false, nothing, 0, nothing, $fex))),
+                _family_conformance_methods(X, Tb, wh)...,
                 :($TW._bump!()), :nothing))
         end
         return _implement_family(mod, X, Expr(:curly, traits[1], pexs..., Tex.args[1]), Any[Tex.args[2:end]...], nothing)

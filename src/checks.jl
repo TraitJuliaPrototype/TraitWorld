@@ -309,6 +309,7 @@ _noescape(::Union{TObj,AbstractView,CObj,CMulti,LikeResult}) = throw(TraitUseErr
 @noinline function _check_once(flag::Base.RefValue{Bool}, @nospecialize(sig))
     CLOSED_WORLD[] && (flag[] = true; return nothing)      # checked by verify_main at build time
     sig in _VC_CHECKED && (flag[] = true; return nothing)   # checked when its view cache was built
+    _FACTS_DEBUG[] && Core.println("TraitWorld: first-call check of ", sig, ccall(:jl_generating_output, Cint, ()) == 1 ? " (while generating an image)" : "")
     # a value conforming at parameters no bound accepts: no worker for the signature
     ms = Base._methods_by_ftype(_worker_sig(sig), -1, Base.get_world_counter())::Vector
     any(m -> !_is_entry(m.method), ms) || _no_worker_error(_worker_sig(sig))

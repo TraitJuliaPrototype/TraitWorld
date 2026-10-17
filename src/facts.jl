@@ -338,10 +338,105 @@ function CC.find_method_matches(interp::FactsInterp, argtypes::Vector{Any}, @nos
     return CC.find_simple_method_matches(interp, atype, max_methods)
 end
 
+"""
+Bare `:invoke`s of a `MethodInstance` in the policy's code: the optimizer emits them for a callee
+whose result was not cached when the caller was optimized (a partner in a recursion cycle, a callee
+inferred without caching). At run time such an invoke runs the *native* code of that instance,
+which loads invalidate and which depends on the method table beyond concrete facts. So each one is
+made an `:invoke` of the policy's CodeInstance of the same instance when it exists, or else a call
+of `_invoke_under_policy`, which finds or compiles it at run time. A call that only throws
+(`Union{}`) keeps plain Julia's code: it is a cold path, and its native code comes with the system
+image. Edges are unchanged, so invalidation is as before (piece 9 makes bare edges owner-aware).
+"""
+function CC.transform_result_for_cache(interp::FactsInterp, result::CC.InferenceResult, edges::Core.SimpleVector)
+    src = @invoke CC.transform_result_for_cache(interp::CC.AbstractInterpreter, result::CC.InferenceResult, edges::Core.SimpleVector)
+    _FACTS_POLICY[] && src isa Core.CodeInfo && _owner_invokes!(src, CC.get_inference_world(interp))
+    return src
+end
+function _owner_invokes!(src::Core.CodeInfo, world::UInt)
+    code = src.code
+    types = src.ssavaluetypes
+    for i in eachindex(code)
+        st = code[i]
+        (st isa Expr && st.head === :invoke) || continue
+        mi = st.args[1]
+        (mi isa Core.MethodInstance && mi.def isa Method) || continue
+        types isa Vector{Any} && types[i] === Union{} && continue
+        ci = _owner_ci(mi, world)
+        if ci isa Core.CodeInstance
+            st.args[1] = ci
+        else
+            code[i] = Expr(:call, GlobalRef(TraitWorld, :_invoke_under_policy), QuoteNode(mi), st.args[2:end]...)
+            push!(get!(() -> Core.MethodInstance[], task_local_storage(), :tw_policy_pending)::Vector{Core.MethodInstance}, mi)
+        end
+    end
+    return src
+end
+"""
+Inference under the policy from the top: Julia's `typeinf_ext_toplevel` with `FactsInterp`, in the
+compiler's world. When the outermost one returns, the callees that its code reaches through
+`_invoke_under_policy` are compiled under the policy too, so that they are found at run time and
+kept in the image being built (otherwise a session compiles them on first use, which after big loads
+also compiles the policy's compiler code again, seconds, open-issues §1.3).
+"""
+function _typeinf_policy(world::UInt, mi::Core.MethodInstance, source_mode::UInt8)
+    tls = task_local_storage()
+    depth = get(tls, :tw_policy_depth, 0)::Int
+    tls[:tw_policy_depth] = depth + 1
+    ci = try
+        _in_compiler_world(CC.typeinf_ext_toplevel, FactsInterp(world), mi, source_mode)
+    finally
+        tls[:tw_policy_depth] = depth
+    end
+    depth == 0 && _compile_pending!(world)
+    return ci
+end
+function _compile_pending!(world::UInt)
+    pend = get(task_local_storage(), :tw_policy_pending, nothing)
+    pend === nothing && return nothing
+    while !isempty(pend)
+        mi = pop!(pend::Vector{Core.MethodInstance})
+        _owner_ci(mi, world) === nothing || continue
+        try
+            _typeinf_policy(world, mi, CC.SOURCE_MODE_ABI)
+        catch
+            # left to run time (`_invoke_under_policy`)
+        end
+    end
+    return nothing
+end
+
+"""
+The policy's CodeInstance of `mi` valid in `world`, or `nothing`: a walk of the instance's cache,
+which runs no compiler code (an image keeps CodeInstances without IR, which `jl_rettype_inferred`
+does not return; entering the compiler instead costs seconds when loads have invalidated its native
+code for `FactsInterp`, open-issues §1.3).
+"""
+function _owner_ci(mi::Core.MethodInstance, world::UInt)
+    isdefined(mi, :cache) || return nothing
+    ci = mi.cache
+    while true
+        ci.owner isa FactsOwner && ci.min_world <= world <= ci.max_world && return ci
+        isdefined(ci, :next) || return nothing
+        ci = ci.next
+    end
+end
+"The call of method instance `mi` in the policy's code, compiled under the policy in the caller's world if needed."
+function _invoke_under_policy(mi::Core.MethodInstance, @nospecialize(f), @nospecialize(args...))
+    w = Base.tls_world_age()
+    ci = _owner_ci(mi, w)
+    if !(ci isa Core.CodeInstance)
+        _FACTS_DEBUG[] && (t0 = time(); Core.println("TraitWorld: compiling under the policy at run time: ", mi))
+        ci = _typeinf_policy(w, mi, CC.SOURCE_MODE_ABI)
+        _FACTS_DEBUG[] && Core.println("  ", round(time() - t0; digits = 3), " s")
+    end
+    return Core.invoke(f, ci::Core.CodeInstance, args...)
+end
+
 # the runtime compiles a CodeInstance of this owner through these (e.g. an `:invoke` target)
 import Core.OptimizedGenerics.CompilerPlugins: typeinf, typeinf_edge
 @noinline typeinf(::FactsOwner, mi::Core.MethodInstance, source_mode::UInt8) =
-    _in_compiler_world(CC.typeinf_ext_toplevel, FactsInterp(Base.tls_world_age()), mi, source_mode)
+    _typeinf_policy(Base.tls_world_age(), mi, source_mode)
 @noinline typeinf_edge(::FactsOwner, mi::Core.MethodInstance, parent_frame::CC.InferenceState, world::UInt, source_mode::UInt8) =
     CC.typeinf_edge(FactsInterp(world), mi.def, mi.specTypes, Core.svec(), parent_frame, false, false)
 
@@ -360,7 +455,7 @@ function facts_codeinstance(@nospecialize(sig), world::UInt = Base.tls_world_age
     # compile it again), and a first call of code the images hold needs no inference at all
     c = ccall(:jl_rettype_inferred, Any, (Any, Any, UInt, UInt), FactsOwner(), mi, world, world)
     c isa Core.CodeInstance && return c
-    return _in_compiler_world(CC.typeinf_ext_toplevel, FactsInterp(world), mi, CC.SOURCE_MODE_ABI)::Core.CodeInstance
+    return _typeinf_policy(world, mi, CC.SOURCE_MODE_ABI)::Core.CodeInstance
 end
 
 "Whether entries call workers through the trait world's policy (`JULIA_TW_FACTS=0` turns it off)."

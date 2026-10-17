@@ -144,6 +144,7 @@ const _SLOW_WORLD = Ref{UInt}(0)                  # the world `_SLOW` was decide
         b === nothing || return b === NOTRAIT ? NOTRAIT : (b::Builder)(u)
         CLOSED_WORLD[] && Base.inferencebarrier(_closed_miss)(X, u)
     end
+    _FACTS_DEBUG[] && Core.println("TraitWorld: conformance slow path: ", X, " for ", U)
     b = _in_world_under_policy(w, _builder_for, Any[X], U)
     b === NOTRAIT || _vc_note_builder(b, U)
     @lock _LOCK begin

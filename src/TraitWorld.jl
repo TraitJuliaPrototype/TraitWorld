@@ -140,6 +140,8 @@ precompile(_vc_load!, ())
 precompile(viewcache_flush, ())
 precompile(_vc_atexit, ())
 precompile(_narrow_slow, (Any, TObj))
+precompile(_invoke_under_policy, (Core.MethodInstance, Any, Vararg{Any}))
+precompile(_conf_family_slow, (Base.RefValue{IdDict{Any,Any}}, Any, Any))
 
 """
     @workload begin … end
@@ -186,7 +188,8 @@ if ccall(:jl_generating_output, Cint, ()) == 1
                 Tuple{typeof(_check_implementation_now), Module, DataType, DataType, Tuple{Symbol}},
                 Tuple{typeof(_check_own_fields_now), DataType, DataType},
                 Tuple{typeof(_analyze_keeps), Any},
-                Tuple{typeof(_vc_flush_detached)})                              # the view caches' exit hook
+                Tuple{typeof(_vc_flush_detached)},                              # the view caches' exit hook
+                Tuple{typeof(_family_builder), DataType, DataType})
         facts_codeinstance(sig)
     end
     precompile(_facts_call, (typeof(_on_image_methods), Vector{Any}, String))
