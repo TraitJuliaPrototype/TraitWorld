@@ -58,7 +58,7 @@ function _is_closure_type(@nospecialize(F))
         startswith(n, "#") || return false
         b = Symbol(n[2:end])
         m = F.name.module
-        isdefined(m, b) && getglobal(m, b) === F.instance && return false       # a named function
+        Base.invokelatest(_const_binding, m, b) === F.instance && return false   # a named function (bindings read in the latest world, not the compiler's)
     end
     return startswith(String(F.name.name), "#")
 end
@@ -156,7 +156,7 @@ function _has_runtime_sites(ci::Core.CodeInstance; limit::Int = 500)
                 t isa Core.CodeInstance && push!(todo, t)
             elseif Meta.isexpr(st, :call)
                 g = st.args[1]
-                g isa GlobalRef && (g = isdefined(g.mod, g.name) ? getglobal(g.mod, g.name) : nothing)
+                g isa GlobalRef && (g = Base.invokelatest(_const_binding, g.mod, g.name))
                 g isa QuoteNode && (g = g.value)
                 if !(g isa Core.Builtin) || g === Core._apply_iterate || g === Core._call_latest ||
                    g === Core._call_in_world || g === Core.invoke || g === Core.finalizer
@@ -351,7 +351,7 @@ function _owner_invokes!(src::Core.CodeInfo, world::UInt)
             push!(get!(() -> Core.MethodInstance[], task_local_storage(), :tw_policy_pending)::Vector{Core.MethodInstance}, mi)
         end
     end
-    _RUNTIME_POLICY[] && _policy_sites!(src)
+    _RUNTIME_POLICY[] && _policy_sites!(src, world)
     return src
 end
 
@@ -363,13 +363,14 @@ keep it.
 """
 const _RUNTIME_POLICY = Ref(true)
 
-"The value a statement's callee `g` stands for, if it is a constant."
-function _callee_value(@nospecialize(g))
-    g isa GlobalRef && return isdefined(g.mod, g.name) && isconst(g.mod, g.name) ? getglobal(g.mod, g.name) : nothing
+"The value a statement's callee `g` stands for in `world`, if it is a constant (bindings are read in the world inferred for, not the compiler's)."
+function _callee_value(@nospecialize(g), world::UInt)
+    g isa GlobalRef && return Base.invoke_in_world(world, _const_binding, g.mod, g.name)
     g isa QuoteNode && return g.value
     g isa Union{Core.SSAValue, Core.Argument, Expr} && return nothing
     return g
 end
+_const_binding(m::Module, n::Symbol) = isdefined(m, n) && isconst(m, n) ? getglobal(m, n) : nothing
 "Whether a call of `g` stays as it is: builtins, and TraitWorld's and the compiler's own functions."
 function _keep_call(@nospecialize(gv))
     gv isa Core.Builtin && return true
@@ -384,19 +385,21 @@ Run-time sites made calls of `_call_under_policy`, which dispatches at run time 
 and runs the policy's code of the method found: a `:call` of a function that is no builtin, and the
 function of a splatted call (`Core._apply_iterate`). TraitWorld's and the compiler's own calls stay.
 """
-function _policy_sites!(src::Core.CodeInfo)
+function _policy_sites!(src::Core.CodeInfo, world::UInt)
     code = src.code
     for i in eachindex(code)
         st = code[i]
         st isa Expr || continue
         if st.head === :call
             g = st.args[1]
-            gv = _callee_value(g)
+            gv = _callee_value(g, world)
             if gv === Core._apply_iterate && length(st.args) >= 3
-                h = _callee_value(st.args[3])
-                (h === nothing || !_keep_call(h)) || continue
+                # a splatted call of a known function: its function becomes the first argument (a
+                # constant tuple, so the IR stays flat); one of unknown function stays as it is
+                h = _callee_value(st.args[3], world)
+                (h === nothing || _keep_call(h)) && continue
                 code[i] = Expr(:call, st.args[1], st.args[2], GlobalRef(TraitWorld, :_call_under_policy),
-                               Expr(:call, GlobalRef(Core, :tuple), st.args[3]), st.args[4:end]...)
+                               QuoteNode((h,)), st.args[4:end]...)
                 continue
             end
             (gv === nothing || !_keep_call(gv)) || continue
