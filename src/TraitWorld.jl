@@ -33,6 +33,9 @@ function __init__()
     _RUNTIME_POLICY[] = get(ENV, "JULIA_TW_RUNTIME_SITES", "policy") != "native"
     _COMPILER_WORLD[] = Base.get_world_counter()
     _SESSION[] = _session_token()
+    _WIT_SESSION[] = _SESSION[]
+    _WIT_ON[] = get(ENV, "JULIA_TW_WITNESS", "1") != "0"
+    empty!(_WIT_TABLES)
     _INLINER_KEEPS_CI[] = _inliner_keeps_ci() && get(ENV, "JULIA_TW_NOINLINE", "0") != "1"
     push!(Base.package_callbacks, _on_package_load_callback)
     _register_type_printers()

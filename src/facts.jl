@@ -633,7 +633,9 @@ function _invoke_under_policy(mi::Core.MethodInstance, @nospecialize(f), @nospec
         ci = _typeinf_policy(w, mi, CC.SOURCE_MODE_ABI)
         _FACTS_DEBUG[] && Core.println("  ", round(time() - t0; digits = 3), " s")
     end
-    ci = ci::Core.CodeInstance
+    # the policy could not compile the instance (a generated function's, as `_carries_static`
+    # reached by a bare call): plain Julia's code of the same method, as at a run-time site
+    ci isa Core.CodeInstance || return Core.invoke(f, Tuple{mi.specTypes.parameters[2:end]...}, args...)
     ci.invoke == C_NULL && ccall(:jl_compile_codeinst, Cint, (Any,), ci)
     if ci.invoke == C_NULL
         # the runtime cannot compile this owner's code here (stock Julia, without the patched

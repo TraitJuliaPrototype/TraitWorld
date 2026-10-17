@@ -11,6 +11,10 @@
 
 "Supertype of every trait: `@trait ColTable{R}` defines `abstract type ColTable{R} <: Trait end`."
 abstract type Trait end
+# defined before the generators that use it (`_carries_static`): a generator run as plain code
+# executes in the world of its definition
+"`is_trait(X)`: whether `X` was declared with `@trait`."
+is_trait(@nospecialize(X)) = X isa Type && X !== Union{} && X <: Trait
 
 """
     Callable{A, S, M}
@@ -294,6 +298,66 @@ code that computes it (whose native code a load may invalidate).
 
 # --- dynamic values ----------------------------------------------------------
 
+# --- witness tables: a dynamic value's operations as pointers ------------------
+
+"""
+A dynamic value's witness table: for each operation of its trait (in declaration order), a pointer
+to code compiled for the operation at the value's trait-object type, with the declared argument
+and result types (Swift's witness tables; `Erased`'s technique). Filled on an operation's first
+call for that type, shared by all dynamic values of the pair. The pointers are this process's:
+`session` keeps a table stored in an image (a dynamic value made at precompile time) from being
+used in another process; such a value takes the dispatching path.
+"""
+struct _Witness
+    session::UInt
+    ptrs::Memory{Ptr{Cvoid}}
+end
+"This process's token for witness tables (set when TraitWorld is initialized)."
+const _WIT_SESSION = Ref{UInt}(0)
+"Whether dynamic values call through witness tables (`JULIA_TW_WITNESS=0`: always the dispatching path, for comparison)."
+const _WIT_ON = Ref(true)
+const _WIT_TABLES = IdDict{Any,_Witness}()
+"An operation's declarations for witness tables: `(f, argument types, result type)` per declaration, or `nothing` where the dispatching path stays (constructor operations); `@trait` defines it."
+_wit_decls(@nospecialize(F)) = ()
+"The witness table of trait `X` for trait objects of type `typeof(t)` (empty pointers, filled on first calls)."
+@noinline function _wit_table(@nospecialize(X), @nospecialize(t))
+    key = (X, typeof(t))
+    w = @lock _LOCK get(_WIT_TABLES, key, nothing)
+    w === nothing || return w
+    n = length(_wit_decls(_family(X)))
+    ptrs = Memory{Ptr{Cvoid}}(undef, n::Int)
+    fill!(ptrs, C_NULL)
+    w = _Witness(_WIT_SESSION[], ptrs)
+    return @lock _LOCK get!(_WIT_TABLES, key, w)
+end
+"The callee behind a witness pointer: the operation at the trait object's own type, its result asserted."
+struct _WitOp{F,RT} end
+# fixed arities: a varargs callee would not be specialized behind the pointer (as `_CallWrap`)
+(::_WitOp{F,RT})(o) where {F,RT} = F.instance(o)::RT
+(::_WitOp{F,RT})(o, a) where {F,RT} = F.instance(o, a)::RT
+(::_WitOp{F,RT})(o, a, b) where {F,RT} = F.instance(o, a, b)::RT
+(::_WitOp{F,RT})(o, a, b, c) where {F,RT} = F.instance(o, a, b, c)::RT
+(::_WitOp{F,RT})(o, a, b, c, d) where {F,RT} = F.instance(o, a, b, c, d)::RT
+(::_WitOp{F,RT})(o, a, b, c, d, e) where {F,RT} = F.instance(o, a, b, c, d, e)::RT
+(::_WitOp{F,RT})(o, a, b, c, d, e, g) where {F,RT} = F.instance(o, a, b, c, d, e, g)::RT
+_wdecl(@nospecialize(T)) = isconcretetype(T) ? _cdecl(T) : Any        # callee side
+_wctype(@nospecialize(T)) = isconcretetype(T) ? _ctype(T) : Any       # caller side
+_wret(@nospecialize(T)) = isconcretetype(T) ? _ctype(T) : Any
+@generated function _wptr(::Type{W}, ::Type{TO}, ::Type{AT}) where {W,TO,AT}
+    RT = W.parameters[2]
+    return :(@cfunction($(W()), $(_wret(RT)), (Ref{$TO}, $(map(_wdecl, AT.parameters)...))))
+end
+"Fill pointer `k` of witness table `w` for trait object `t` (the first call of that operation for its type)."
+@noinline function _wit_fill!(w::_Witness, k::Int, @nospecialize(f), @nospecialize(AT), @nospecialize(RT), @nospecialize(t))
+    p = try
+        _wptr(_WitOp{typeof(f), RT}, typeof(t), AT)
+    catch
+        C_NULL
+    end
+    p = p isa Ptr{Cvoid} ? p : C_NULL
+    @inbounds w.ptrs[k] = p
+    return p::Ptr{Cvoid}
+end
 """
     Dynamic{X}
 
@@ -307,9 +371,11 @@ its representation runs.
 """
 struct Dynamic{X}
     t::Any
+    w::_Witness          # X's operations compiled for the trait object's type: one indirect call each
     function Dynamic{X}(t::TObj{T}) where {X,T}
         _carries_static(T, X) || Base.inferencebarrier(_dyn_refuse)(X, T)
-        return new{X}(_narrow(X, t))     # the trait object is the user's object: a kept value follows its fields
+        tn = _narrow(X, t)               # the trait object is the user's object: a kept value follows its fields
+        return new{X}(tn, _wit_table(X, tn))
     end
 end
 """
@@ -346,6 +412,33 @@ Base.convert(::Type{Dynamic{X}}, t::TObj) where {X} = Dynamic{X}(t)
     throw(ArgumentError("a trait object carrying $(join(string.(Base.uniontypes(_decode_traits(T))), ", ")) cannot be kept as a Dynamic{$X}"))
 "The trait object a dynamic value keeps: what a bound opens."
 @inline opened(d::Dynamic) = getfield(d, :t)
+
+"""
+Operation `k` of a dynamic value's trait, declared with argument types `AT` and result type `RT`:
+one indirect call through the witness table, typed by the declaration; the dispatching path for
+arguments outside the declaration, for a table of another process, and where no pointer can be made.
+"""
+@generated function _dyn_call(dyn::Dynamic, ::Val{k}, f::F, ::Type{AT}, ::Type{RT}, args::Vararg{Any,N}) where {k,F,AT,RT,N}
+    slow = :(_dyn_assert(f(opened(dyn), args...), RT))
+    # a trimmed build makes no pointers at run time: it dispatches, to the targets verify_main enumerates
+    (length(AT.parameters) == N <= 6 && !_closed_build()) || return slow
+    cts = map(_wctype, AT.parameters)
+    argex = [:(args[$i]) for i in 1:N]
+    return quote
+        Base.@_inline_meta
+        w = getfield(dyn, :w)
+        if args isa AT && w.session === _WIT_SESSION[] && _WIT_ON[] && $k <= length(w.ptrs)
+            p = @inbounds w.ptrs[$k]
+            p == C_NULL && (p = _wit_fill!(w, $k, f, AT, RT, getfield(dyn, :t)))
+            if p != C_NULL
+                x = ccall(p, $(_wret(RT)), (Any, $(cts...)), getfield(dyn, :t), $(argex...))
+                return x::RT
+            end
+        end
+        return $slow
+    end
+end
+
 # equal when they keep the same trait object: same representation type, same implementation, egal data
 Base.:(==)(a::Dynamic{X}, b::Dynamic{X}) where {X} = getfield(a, :t) === getfield(b, :t)
 Base.hash(d::Dynamic, h::UInt) = hash(getfield(d, :t), hash(:TraitWorldDynamic, h))
@@ -543,8 +636,6 @@ supertraits(@nospecialize(X)) = ()
 Base.Experimental.@max_methods 1 function bundle end
 "`bundle(X)`: for a bundle trait, the traits it names; `t::Table` means `t::(ColTable, RowTable)`."
 bundle(@nospecialize(X)) = nothing
-"`is_trait(X)`: whether `X` was declared with `@trait`."
-is_trait(@nospecialize(X)) = X isa Type && X !== Union{} && X <: Trait
 
 # --- operation calls -------------------------------------------------------
 
