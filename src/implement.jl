@@ -586,9 +586,12 @@ function _family_conformance_methods(@nospecialize(Xex), Tpat, wheres)
     reg = gensym(:family_builders)
     return Any[
         :(const $reg = Ref($TW.IdDict{Any,Any}())),
+        :($TW._family_registry(::Val{$(QuoteNode(reg))}) = $reg),      # found again after an image loads
         Expr(:(=), Expr(:where, :($TW.conformance(::$TW.As{$Xex}, u::$Tpat)), wheres...),
              :($TW._conf_family($reg, $Xex, u)))]
 end
+"`_family_registry(Val(name))`: a family conformance's builder registry, for the index of default-served operations."
+function _family_registry end
 "A family member's conformance: its kept builder, or the slow path, which keeps it."
 @inline function _conf_family(reg::Base.RefValue{IdDict{Any,Any}}, ::Type{X}, u) where {X}
     b = get(reg[], typeof(u), nothing)
@@ -605,6 +608,9 @@ end
             d[U] = b
             reg[] = d                                   # readers see the old table or the new one
         end
+        # the member's conformance is now fixed: a later override of an operation its defaults
+        # serve is refused, as for a single type's declaration (note "Declaring a trait")
+        _OVR_BUILT[] && _index_builder!(X, U, b)
     end
     return r
 end
@@ -651,6 +657,11 @@ function check_overrides()
                            "An override belongs to the conformance: define it before `@implement`, or in its block")
             end
         end
+    end
+    for (Y, op, R, X, T) in _family_records()
+        _has_op_method(Y, op, R) || continue
+        push!(out, "`$op` of $Y now has a method for $R, but $R's conformance to $X, fixed at its first use, serves it by the trait's default. " *
+                   "An override belongs to the conformance: define it before the type's first use")
     end
     return out
 end

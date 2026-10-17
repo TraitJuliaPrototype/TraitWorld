@@ -87,9 +87,50 @@ function _override_index()
         for m in methods(_declared_defaults)
             _index_declared!(m)
         end
+        for (Y, op, R, X, U) in _family_records()      # family members whose builders were fixed
+            push!(get!(_OVR_INDEX, _opfn(Y, op), Any[]), (Y, op, R, X, U))
+        end
         _OVR_BUILT[] = true
     end
     return _OVR_INDEX
+end
+"The default-served operations of a family member's fixed builder: records `(Y, op, R, X, T)`."
+function _builder_records(@nospecialize(X), @nospecialize(U), b::Builder)
+    out = Any[]
+    for spec in typeof(b).parameters[1].parameters
+        Xi, W, K = spec.parameters[1], spec.parameters[2], spec.parameters[3]
+        W <: Impl || continue
+        R = _impl(K)
+        R === Nothing && continue
+        Y = _family(Xi)
+        for op in W.parameters[1]
+            push!(out, (Y, op, R, X, U))
+        end
+    end
+    return out
+end
+"Add a family member's records to the index (when its builder is fixed in the session)."
+function _index_builder!(@nospecialize(X), @nospecialize(U), b::Builder)
+    for (Y, op, R, X2, U2) in _builder_records(X, U, b)
+        push!(get!(_OVR_INDEX, _opfn(Y, op), Any[]), (Y, op, R, X2, U2))
+    end
+    return nothing
+end
+"Every family member whose builder is fixed (in this session or in an image), as records `(Y, op, R, X, T)`."
+function _family_records()
+    out = Any[]
+    for m in methods(_family_registry)
+        sig = Base.unwrap_unionall(m.sig)
+        V = sig.parameters[2]
+        (V isa DataType && V <: Val) || continue
+        reg = Base.invokelatest(_family_registry, V())
+        for (U, b) in reg[]
+            b isa Builder || continue
+            X = _family(typeof(b).parameters[1].parameters[1].parameters[1])
+            append!(out, _builder_records(X, U, b))
+        end
+    end
+    return out
 end
 _is_declared_defaults(m::Method) = (sig = Base.unwrap_unionall(m.sig); sig isa DataType && !isempty(sig.parameters) && sig.parameters[1] === typeof(_declared_defaults))
 

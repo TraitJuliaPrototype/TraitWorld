@@ -102,3 +102,35 @@ end)
     while e isa LoadError; e = e.error; end
     @test e isa ErrorException && occursin("defined by the field", e.msg)
 end
+
+# A family conformance fixes each member's conformance at its first use: an override of an operation
+# its default serves, defined later, is refused (as for a single type's declaration); defined before
+# the member's first use, it is the member's own (session 27; the review of decisions 1 and 4, case v).
+toplevel(quote
+    @trait_module module FamOv
+    using TraitWorld
+    export Fam2, nf2, dbl, S2, d2
+    @trait Fam2 begin
+        nf2(x::Fam2)::Int
+        dbl(x::Fam2)::Int = 2 * nf2(x)
+    end
+    struct S2{P}; p::P; k::Int; end
+    nf2(s::S2) = s.k
+    @implement Fam2 S2{P} where {P}
+    d2(x::Fam2) = dbl(x)
+    end
+end)
+@testset "Keys: late overrides for family members" begin
+    F = Main.FamOv
+    @test F.d2(F.S2{Int}(1, 2)) == 4                        # S2{Int}'s conformance is now fixed
+    if TraitWorld._HAS_DEF_HOOK[]
+        @test_throws Exception Core.eval(Main, :(FamOv.dbl(s::FamOv.S2{Int}) = 100))
+        @test F.d2(F.S2{Int}(1, 2)) == 4
+    else
+        Core.eval(Main, :(FamOv.dbl(s::FamOv.S2{Int}) = 100))
+        @test !isempty(TraitWorld.check_overrides())         # without the hook: found at the next checkpoint
+        Base.delete_method(which(F.dbl, (F.S2{Int},)))
+    end
+    Core.eval(Main, :(FamOv.dbl(s::FamOv.S2{Float64}) = 100))  # before S2{Float64}'s first use: its own
+    @test F.d2(F.S2{Float64}(1.0, 2)) == 100
+end
