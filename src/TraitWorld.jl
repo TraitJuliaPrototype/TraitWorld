@@ -8,41 +8,20 @@ defined.
 """
 module TraitWorld
 
-"""
-Marks TraitWorld's code for the patched Julia's invalidation filter: the machinery is trait-world
-code, protected like a trait module. That is sound because the machinery's registries
-(`trait_fields(X)`, `projection(X, T)`, …) are declared with `@max_methods 1` and sentinel
-methods: its code compiled at abstract types holds no edge to them, so no later declaration
-could have changed what it inferred.
-"""
-const __trait_world_machinery__ = true
-
 using PrecompileTools: PrecompileTools
 using Serialization: Serialization
 
 export Trait, Callable, CallMode, DynamicCall, CompiledCall, compiled_call, dynamic_call, TObj, Dynamic, DynamicFn, dynamic_fn,
-       @trait, @implement, @trait_module, @workload, @trait_wrapper,
+       @trait, @implement, @trait_module, @workload,
        TraitBoundError, TraitUseError, ImplementError, LayeringError, OwnershipError, PiracyError, mode!, verify_main, isclosed,
-       piracy_mode!, check_no_piracy, viewcache_flush,
+       viewcache_flush,
        @warn_on_abstract, @error_on_abstract, AbstractTypeError, check_concrete, check_definitions, conforms, withfields
 
 function __init__()
     m = get(ENV, "JULIA_TRAITWORLD", "")
     isempty(m) || mode!(Symbol(m))
-    s = get(ENV, "JULIA_TRAITWORLD_SEAL", "")
-    isempty(s) || piracy_mode!(Symbol(s))
-    # the project's tolerations, read before any other package loads
-    proj = Base.active_project()
-    proj === nothing || union!(TOLERATED, _tolerations_of(proj))
-    # the scan's state as serialized by the precompile workload means nothing here: the first
-    # top-level load scans everything loaded before TraitWorld (a pirate may have come first)
-    _RESCAN[] = true
-    _SCAN_WORLD[] = 0
-    empty!(_REPORTED)
     empty!(_DOOR_FACTS)
     empty!(_NOT_EXTENSIONS)
-    empty!(WRAPPERS); empty!(DELEGATES)
-    _filter_init!()
     _vc_init!()
     _hooks_init!()
     FACTS[] = get(ENV, "JULIA_TW_FACTS", "1") != "0"
@@ -55,19 +34,15 @@ end
 
 """
 After a package load: the generation moves (a load can bring projections and
-implementations without running `@implement` here), a trait wrapper loaded
-from its image is registered, a trait package seals itself, and the sealing
-scan runs once per top-level `using`.
+implementations without running `@implement` here), the overrides the image hook
+left inactive are reported, and once per top-level `using` the view caches of
+what is loaded now are read.
 """
 function _on_package_load(id::Base.PkgId)
     _bump!()
     m = get(Base.loaded_modules, id, nothing)
     m isa Module || return nothing
-    is_wrapper_root(m) && _register_wrapper!(m, getglobal(m, :__tw_wrapper__)...)
-    Base.inferencebarrier(_filter_scan!)(m)
-    (isdefined(m, :__trait_module__) || _has_trait_module(m)) && seal!(m)   # a trait package seals itself (no rescan needed)
     _report_refused_at_load()                                                # what the image hook left inactive (patched Julia)
-    Base.toplevel_load[] && _check_loads!()                                  # once per `using`, nested loads included
     Base.toplevel_load[] && Base.inferencebarrier(_vc_load!)()               # the view caches of what is loaded now
     return nothing
 end
@@ -80,8 +55,6 @@ include("trait.jl")
 include("implement.jl")
 include("entry.jl")
 include("trait_module.jl")
-include("wrapper.jl")
-include("sealing.jl")
 include("checks.jl")
 include("doors.jl")
 include("verify.jl")
@@ -148,11 +121,9 @@ PrecompileTools.@compile_workload begin
     _sig_alternatives(Tuple{typeof(sum),Union{Int,Float64},Union{Int,Float32},Union{Int8,Int16}})
     _sig_alternatives(Tuple{typeof(sum),Union{Int,Float64},Union{Int,Float32}})
     owned_method(first(methods(TraitWorld.owner)))
-    is_wrapped(TraitWorld); find_pirates!()
 end
 precompile(_on_package_load, (Base.PkgId,))
 precompile(_vc_load!, ())
-precompile(_register_wrapper!, (Module, Module, Tuple{}))
 precompile(viewcache_flush, ())
 
 """

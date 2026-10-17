@@ -58,7 +58,7 @@ end
 Parent package of a package extension, or `nothing`. `Base.EXT_PRIMED` knows
 the extensions primed in this session; one loaded from an image (Adapt's,
 Compat's, when their triggers were already loaded) is recognized by its source
-file, which lies in the parent's `ext/` directory (session 19: the sealing scan
+file, which lies in the parent's `ext/` directory (session 19: a scan for pirates
 reported such extensions as pirates of their own parents).
 """
 function _extension_parent(r::Module)
@@ -80,8 +80,8 @@ function _extension_parent(r::Module)
             return m
         end
     end
-    # a loaded package that is no extension stays one: remembered, since the
-    # sealing scan asks once per method (without this, 15 s instead of 2 s
+    # a loaded package that is no extension stays one: remembered, since a scan
+    # over all methods asks once per method (without this, 15 s instead of 2 s
     # for a full scan with Makie loaded)
     haskey(Base.loaded_modules, Base.PkgId(r)) && push!(_NOT_EXTENSIONS, r)
     return nothing
@@ -112,7 +112,7 @@ function owner(m::Module)
     o === nothing || return o
     return memo[m] = _owner(m)
 end
-"Owners by module while one package image's methods are checked (the image hook), where they cannot change."
+"Owners by module, memoized while a caller scans many methods at once (a package image's), where they cannot change; `nothing` otherwise."
 const _OWNER_MEMO = Ref{Union{Nothing,IdDict{Module,Any}}}(nothing)
 function _owner(m::Module)
     r = Base.moduleroot(m)
@@ -202,22 +202,6 @@ function _sig_alternatives(@nospecialize(sig), limit::Int = 256)
 end
 
 """
-Whether `definer` owns something in a signature's owners `os`, or is a
-delegate of an owner there: an implementation a trait wrapper names for the
-package it wraps (rule 3).
-"""
-function _owns_or_delegate(@nospecialize(definer), os::Base.IdSet{Any})
-    definer in os && return true
-    definer isa Module || return false
-    for o in os
-        for d in delegates_of(o)
-            d === definer && return true
-        end
-    end
-    return false
-end
-
-"""
     owned_method(m::Method)
 
 Rule 3: the package that defined `m` owns, in every signature `m` applies to,
@@ -227,7 +211,57 @@ is not owned: it applies to `Int` alone too.
 function owned_method(m::Method)
     definer = owner(m.module)
     for s in _sig_alternatives(m.sig)
-        _owns_or_delegate(definer, sig_owners(s)) || return false
+        definer in sig_owners(s) || return false
     end
     return true
 end
+
+# --- package roots of modules and types ----------------------------------------------------
+# Which package a value of a given type belongs to. Written for the patched runtime's
+# invalidation policy (now removed); kept for a strict mode, which needs the same lookups.
+
+"A package's root module: a module under `Main` counts as its own package."
+function _pkg_root(m::Module)
+    while true
+        p = parentmodule(m)
+        (p === m || p === Main) && return m
+        m = p
+    end
+end
+
+"""
+The packages (outside Base, Core and the trait world) that every value matching `t` mentions in its
+type: `t` itself (or a `Vararg`'s element, a type variable's bound) is a package's type, or a type
+parameter requires one (`Ref{T} where T<:InlineString`, `Diagonal{T, Ones{T}}`); for a `Union`, the
+packages both sides require. `Type{T}` counts as `T`.
+"""
+function _required_roots(@nospecialize(t), depth::Int = 0)
+    out = Module[]
+    depth > 4 && return out
+    t isa UnionAll && return _required_roots(Base.unwrap_unionall(t), depth)
+    t isa TypeVar && return _required_roots(t.ub, depth + 1)
+    t isa Core.TypeofVararg && return isdefined(t, :T) ? _required_roots(t.T, depth + 1) : out
+    t isa Union && return intersect(_required_roots(t.a, depth + 1), _required_roots(t.b, depth + 1))
+    t isa DataType || return out
+    r = _type_root(t.name.module)
+    r === nothing || push!(out, r)
+    for p in t.parameters
+        union!(out, _required_roots(p, depth + 1))
+    end
+    return out
+end
+
+const _TYPE_ROOTS = IdDict{Module,Any}()           # module => its package root, or `nothing`
+"The package whose types a module's are: `nothing` for Base's and Core's types (everyone's) and the trait world's; a standard library's types are its own (`LibGit2`, `SparseArrays`)."
+function _type_root(mod::Module)
+    r = get(_TYPE_ROOTS, mod, missing)
+    r === missing || return r
+    r = _julia_core(mod) || _trait_world_package(mod) ? nothing : _pkg_root(mod)
+    _TYPE_ROOTS[mod] = r
+    return r
+end
+
+"Whether a module belongs to Base, Core or the compiler."
+_julia_core(mod::Module) = (p = _pkg_root(mod); p === Base || p === Core || p === Base.Compiler)
+"In the trait world and not one of Julia's standard libraries (whose types and methods are their own here)."
+_trait_world_package(mod::Module) = owner(_pkg_root(mod)) !== :Julia && is_trait_world(mod)

@@ -37,13 +37,12 @@ Base.showerror(io::IO, e::OwnershipError) = print(io, "OwnershipError: ", e.msg)
 """
     is_trait_world(m::Module)
 
-Base, Core, the standard libraries, TraitWorld itself, every trait module
-(and the modules inside one), and every package a trait wrapper brings in,
-with the implementations it names.
+Base, Core, the standard libraries, TraitWorld itself, and every trait module
+(and the modules inside one).
 """
 function is_trait_world(m::Module)
     r = Base.moduleroot(m)
-    (owner(r) === :Julia || r === TraitWorld || is_wrapped(m)) && return true
+    (owner(r) === :Julia || r === TraitWorld) && return true
     x = m
     while true
         isdefined(x, :__trait_module__) && return true
@@ -69,10 +68,7 @@ _prologue() = Any[:(const __trait_module__ = true),
                   :(const __tw_extended__ = Set{Any}()),          # other modules' functions given workers here
                   :(const __tw_methods_seen__ = Base.IdSet{Method}()),
                   :(const __tw_positions__ = Any[]),          # (function, position, nargs) of the entries' trait positions
-                  :(const __tw_finished__ = Ref(false)),
-                  # registered with the patched Julia's filter from its start: the methods it defines
-                  # while it loads are trait-world definitions, which invalidate as in plain Julia
-                  :($TraitWorld._filter_add!(@__MODULE__))]
+                  :(const __tw_finished__ = Ref(false))]
 _epilogue() = :($TraitWorld._latest_under_policy($TraitWorld._finish_module, @__MODULE__))
 
 function _transform_all(stmts)
@@ -672,7 +668,7 @@ function _check_import(mod::Module, ex::Expr)
     end
     for p in paths
         target = _module_path(mod, p)
-        !LAYERING[] || is_trait_world(target) || is_wrapper_root(target) || throw(LayeringError(
+        !LAYERING[] || is_trait_world(target) || throw(LayeringError(
             "trait module $mod imports $target, which is outside the trait world. Layering (rule 1): ordinary code may " *
             "use the trait world, the trait world uses only itself. Make $target a trait module, or call it from an " *
             "ordinary module that uses both."))
@@ -758,11 +754,9 @@ function _finish_module(mod::Module)
     # imports made outside the checked statements (before the block) count too
     for u in ccall(:jl_module_usings, Any, (Any,), mod)::Vector{Any}
         u isa Module || continue
-        !LAYERING[] || is_trait_world(u) || is_wrapper_root(u) || throw(LayeringError(
+        !LAYERING[] || is_trait_world(u) || throw(LayeringError(
             "trait module $mod uses $u, which is outside the trait world (rule 1)"))
     end
-    seal!(mod)
-    Base.inferencebarrier(_filter_add!)(mod)
     isdefined(mod, :__tw_entries__) || return nothing
     # this module's functions, and other modules' functions it gave workers to
     ks = Any[k for k in keys(mod.__tw_entries__) if k[1] === mod]

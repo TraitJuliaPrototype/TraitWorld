@@ -3,10 +3,10 @@
 # image does not hold is compiled once and cached in a package of its own,
 # which depends on exactly the owners of what the worker's signature names:
 # the function's package, the traits' packages, the representations'
-# packages. Rule 4's view says the worker sees nothing else, and sealing
-# (rule 3) says nothing else may change what it sees, so the cache is keyed
-# by those packages and their versions only: not by what else a session
-# loads, nor by the order it loads in.
+# packages. Rule 4's view says the worker sees nothing else, and a later
+# definition that changes what it sees invalidates it as in plain Julia (its
+# facts are concrete), so the cache is keyed by those packages and their
+# versions only: not by what else a session loads, nor by the order it loads in.
 #
 # Recording: `_check_once` notes each worker signature it checks (a signature
 # a loaded image holds was checked when that image was built, and is not

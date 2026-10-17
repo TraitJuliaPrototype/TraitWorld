@@ -736,62 +736,20 @@ end
     @test count(p -> p.first === :worker, r.targets) == 0             # every trait call static: entries are ordinary methods
 end
 
-# --- poc3 M6: sealing (last: refuse mode deletes the pirates of the session) ------------------------
-@testset "poc3 M6: sealing" begin
-    @test "Julia" in TraitWorld.SEALED && "Columns" in TraitWorld.SEALED     # a trait module seals itself
-    toplevel(:(module BasePirate; Base.sum(x::Vector{Int16}) = Int16(0); end))
-    found = TraitWorld.find_pirates!()
-    @test any(p -> p.definer == "BasePirate" && "Julia" in p.needs, found)
-    @test any(p -> p.definer == "Pirate2", found)                           # Weights.weight(::Float64): Weights is sealed
-    @test_throws PiracyError TraitWorld.check_no_piracy()
-    # warn mode keeps the pirate and reports it once (a full scan, as after a new seal)
-    TraitWorld._RESCAN[] = true
-    @test (@test_logs (:warn, r"BasePirate defines") match_mode=:any TraitWorld._check_loads!()) === nothing
-    @test which(sum, (Vector{Int16},)).module === Main.BasePirate
-    # refuse mode deletes a pirate that loads afterwards, and reports it
-    TraitWorld.find_pirates!()                                              # the cursor past everything so far
-    TraitWorld.piracy_mode!(:refuse)
-    if TraitWorld._HAS_DEF_HOOK[]
-        # the patched runtime's definition hook: refused at its definition, never visible
-        e = thrown(:(module BasePirate2; Base.sum(x::Vector{Int32}) = Int32(0); end))
-        @test e isa PiracyError && occursin("BasePirate2", sprint(showerror, e))
-    else
-        toplevel(:(module BasePirate2; Base.sum(x::Vector{Int32}) = Int32(0); end))
-        @test which(sum, (Vector{Int32},)).module === Main.BasePirate2
-        @test_logs (:error, r"BasePirate2 defines") match_mode=:any TraitWorld._check_loads!()
-    end
-    @test which(sum, (Vector{Int32},)).module === Base
-    # a tolerated package is never touched
-    push!(TraitWorld.TOLERATED, "Tolerated1")
-    toplevel(:(module Tolerated1; Base.sum(x::Vector{UInt16}) = UInt16(0); end))
-    @test TraitWorld._check_loads!() === nothing
-    @test which(sum, (Vector{UInt16},)).module === Main.Tolerated1
-    TraitWorld.piracy_mode!(:warn)
-    # a call method of a sealed callable type: not bound to any name, found in the global method table
-    toplevel(:(module FixPirate; (f::Base.Fix1{typeof(sum)})(x::Vector{Int8}) = Int8(0); end))
-    @test any(p -> p.definer == "FixPirate", TraitWorld.find_pirates!())
-    # a loaded package that is no extension is remembered as such (the scan asks once per method)
-    @test TraitWorld._extension_parent(TraitWorld) === nothing && TraitWorld in TraitWorld._NOT_EXTENSIONS
-end
-
-# --- trait wrappers: a split core, its named implementation, one it does not name --------------
+# --- ownership outside trait modules: a split core and an implementation package ----------------
 module CoreX; struct V; x::Vector{Float64}; end; end
 module ImplX; using ..CoreX; Base.length(v::CoreX.V) = length(v.x); end
-module ImplY; using ..CoreX; Base.size(v::CoreX.V) = (length(v.x),); end
-@testset "trait wrappers" begin
-    lx = first(methods(length, (CoreX.V,))); sy = first(methods(size, (CoreX.V,)))
-    @test !TraitWorld.owned_method(lx) && !TraitWorld.is_trait_world(CoreX)    # unwrapped: ImplX owns neither
-    toplevel(:(module CoreXWrapper; using TraitWorld, ..CoreX, ..ImplX; @trait_wrapper CoreX ImplX; end))
-    @test TraitWorld.wrapper_of(CoreX) === Main.CoreXWrapper && "CoreX" in TraitWorld.SEALED && "ImplX" in TraitWorld.SEALED
-    @test TraitWorld.owned_method(lx) && !TraitWorld.owned_method(sy)        # the named implementation is a delegate
-    found = TraitWorld.find_pirates!()                                       # a new seal: a full scan
-    @test any(p -> p.definer == "ImplY", found) && !any(p -> p.definer == "ImplX", found)
-    @test TraitWorld.is_trait_world(CoreX) && TraitWorld.is_trait_world(ImplX)
-    toplevel(:(@trait_module module UsesCoreX; using TraitWorld, ..CoreX; end))      # a wrapped package may be imported
-    @test isdefined(Main, :UsesCoreX)
-    # at most one wrapper per package: a second decides nothing
-    @test_logs (:error, r"second trait wrapper") match_mode=:any toplevel(:(module CoreXWrapper2; using TraitWorld, ..CoreX; @trait_wrapper CoreX; end))
-    @test TraitWorld.wrapper_of(CoreX) === Main.CoreXWrapper
+@testset "ownership of methods outside trait modules (rule 3 lookups)" begin
+    lx = first(methods(length, (CoreX.V,)))
+    @test !TraitWorld.owned_method(lx) && !TraitWorld.is_trait_world(CoreX)    # ImplX owns neither the function nor the type
+    toplevel(:(module BasePirate; Base.sum(x::Vector{Int16}) = Int16(0); end))
+    @test !TraitWorld.owned_method(only(methods(sum, (Vector{Int16},))))     # Julia owns both
+    @test TraitWorld.owned_method(first(methods(CoreX.V)))                   # a type's constructor: its own
+    # a loaded package that is no extension is remembered as such (a scan asks once per method)
+    @test TraitWorld._extension_parent(TraitWorld) === nothing && TraitWorld in TraitWorld._NOT_EXTENSIONS
+    # package roots of types, for a strict mode
+    @test TraitWorld._required_roots(Vector{CoreX.V}) == [CoreX]
+    @test isempty(TraitWorld._required_roots(Vector{Int}))
 end
 
 # --- poc3 M5: the Base wrapper, the door check -----------------------------------------------------
