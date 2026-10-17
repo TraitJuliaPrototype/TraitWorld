@@ -34,6 +34,7 @@ function __init__()
     _INLINER_KEEPS_CI[] = _inliner_keeps_ci() && get(ENV, "JULIA_TW_NOINLINE", "0") != "1"
     push!(Base.package_callbacks, _on_package_load_callback)
     _register_type_printers()
+    _install_frame_filter!()
 end
 
 "The package callback: `_on_package_load` under the policy, for the reason the hooks run there (hooks.jl)."
@@ -76,6 +77,7 @@ include("viewcache.jl")
 include("defcheck.jl")
 include("hooks.jl")
 include("strict.jl")
+include("frames.jl")
 
 # ---------------------------------------------------------------------------
 # Precompile the machinery itself: macro expansion, registration, checks,

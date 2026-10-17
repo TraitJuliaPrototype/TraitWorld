@@ -23,6 +23,8 @@ toplevel(quote
 end)
 
 frames(f) = try f(); "" catch; sprint(Base.show_backtrace, catch_backtrace()) end
+# every frame, the machinery's included (the tiny workers here are inlined into TraitWorld's `checked_call`)
+allframes(f) = withenv(() -> frames(f), "JULIA_TW_ALL_FRAMES" => "1")
 
 # Readable types need Julia's type-printer registry (patched build); without it types print as
 # Julia prints them, and TraitWorld must not widen `show(::IO, ::Type)` to get there.
@@ -36,10 +38,10 @@ end
 
 HAS_PRINTERS && @testset "Printing by bound and representation" begin
     P = Main.PrintLib
-    bt = frames(() -> P.boom([1.0, 2.0]))
+    bt = allframes(() -> P.boom([1.0, 2.0]))
     @test occursin("PVec{Float64} at Vector{Float64}", bt)
     @test !occursin("TraitWorld.View{", bt) && !occursin("Impl{", bt)
-    bt2 = frames(() -> P.apply(x -> 2x, [1.0]))
+    bt2 = allframes(() -> P.apply(x -> 2x, [1.0]))
     @test occursin("Callable{Tuple{Float64}, Float64} at ", bt2)
     T = TraitWorld.TObj{TraitWorld._encode_traits(Any[P.PVec{Float64, Vector{Float64}}]),
                         Tuple{TraitWorld.View{P.PVec{Float64, Vector{Float64}}, TraitWorld.Impl{()}, Vector{Float64}, 0, Tuple{Vector{Float64}}}}}
@@ -58,3 +60,10 @@ end
     @test !conforms(String, P.PVec)
     @test conforms(Dynamic{P.PVec}, P.PVec)
 end
+
+@testset "Stack traces hide the machinery's frames" begin
+    bt = frames(() -> Main.PrintLib.boom([1.0, 2.0]))
+    @test occursin("boom", bt) && !occursin("TraitWorld/src/", bt) && !occursin("checked_call", bt)
+    @test occursin("checked_call", allframes(() -> Main.PrintLib.boom([1.0, 2.0])))
+end
+
