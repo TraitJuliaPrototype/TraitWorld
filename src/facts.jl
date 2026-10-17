@@ -351,7 +351,98 @@ function _owner_invokes!(src::Core.CodeInfo, world::UInt)
             push!(get!(() -> Core.MethodInstance[], task_local_storage(), :tw_policy_pending)::Vector{Core.MethodInstance}, mi)
         end
     end
+    _RUNTIME_POLICY[] && _policy_sites!(src)
     return src
+end
+
+"""
+Whether run-time sites in the policy's code run the policy's code (`_call_under_policy`), or plain
+Julia's native code (`JULIA_TW_RUNTIME_SITES=native`, the design until session 27). Read when
+TraitWorld is loaded; it decides the IR stored in CodeInstances, so images built with one setting
+keep it.
+"""
+const _RUNTIME_POLICY = Ref(true)
+
+"The value a statement's callee `g` stands for, if it is a constant."
+function _callee_value(@nospecialize(g))
+    g isa GlobalRef && return isdefined(g.mod, g.name) && isconst(g.mod, g.name) ? getglobal(g.mod, g.name) : nothing
+    g isa QuoteNode && return g.value
+    g isa Union{Core.SSAValue, Core.Argument, Expr} && return nothing
+    return g
+end
+"Whether a call of `g` stays as it is: builtins, and TraitWorld's and the compiler's own functions."
+function _keep_call(@nospecialize(gv))
+    gv isa Core.Builtin && return true
+    gv isa Function || return false
+    m = parentmodule(typeof(gv))
+    r = Base.moduleroot(m)
+    return r === TraitWorld || m === Base.Compiler || parentmodule(m) === Base.Compiler || r === Core.Compiler
+end
+
+"""
+Run-time sites made calls of `_call_under_policy`, which dispatches at run time as plain Julia does
+and runs the policy's code of the method found: a `:call` of a function that is no builtin, and the
+function of a splatted call (`Core._apply_iterate`). TraitWorld's and the compiler's own calls stay.
+"""
+function _policy_sites!(src::Core.CodeInfo)
+    code = src.code
+    for i in eachindex(code)
+        st = code[i]
+        st isa Expr || continue
+        if st.head === :call
+            g = st.args[1]
+            gv = _callee_value(g)
+            if gv === Core._apply_iterate && length(st.args) >= 3
+                h = _callee_value(st.args[3])
+                (h === nothing || !_keep_call(h)) || continue
+                code[i] = Expr(:call, st.args[1], st.args[2], GlobalRef(TraitWorld, :_call_under_policy),
+                               Expr(:call, GlobalRef(Core, :tuple), st.args[3]), st.args[4:end]...)
+                continue
+            end
+            (gv === nothing || !_keep_call(gv)) || continue
+            code[i] = Expr(:call, GlobalRef(TraitWorld, :_call_under_policy), st.args...)
+        elseif st.head === :(=) && length(st.args) == 2 && Meta.isexpr(st.args[2], :call)
+            # (optimized IR has no assignments; kept for safety)
+            continue
+        end
+    end
+    return src
+end
+
+"""
+A run-time site in the policy's code: dispatch at run time, in the caller's world, as plain Julia
+does; then run the policy's code of the method found, compiled under the policy and kept in images,
+rather than plain Julia's native code, which other packages' loads invalidate. No fact is recorded
+at the site, so what it calls is decided at each call, as in plain Julia. No method, or an
+ambiguity, takes plain Julia's call, which raises the same error.
+"""
+function _call_under_policy(@nospecialize(f), @nospecialize(args...))
+    w = Base.tls_world_age()
+    tt = Tuple{Core.Typeof(f), Any[Core.Typeof(a) for a in args]...}
+    mi = ccall(:jl_method_lookup_by_tt, Any, (Any, Csize_t, Any), tt, w, nothing)
+    (mi isa Core.MethodInstance && mi.def isa Method) || return f(args...)
+    _keep_method(mi.def) && return f(args...)
+    ci = _owner_ci(mi, w)
+    if !(ci isa Core.CodeInstance)
+        _FACTS_DEBUG[] && Core.println("TraitWorld: compiling under the policy at a run-time site: ", mi)
+        ci = try
+            _typeinf_policy(w, mi, CC.SOURCE_MODE_ABI)
+        catch
+            nothing
+        end
+    end
+    ci isa Core.CodeInstance || return f(args...)       # inference gave up: plain Julia's code
+    ci.invoke == C_NULL && ccall(:jl_compile_codeinst, Cint, (Any,), ci)
+    ci.invoke == C_NULL && return f(args...)             # stock Julia cannot run this owner's code
+    return Core.invoke(f, ci, args...)
+end
+"Methods whose code runs as plain Julia's even from the policy's run-time sites: TraitWorld's, the compiler's, generated functions."
+function _keep_method(m::Method)
+    r = Base.moduleroot(m.module)
+    r === TraitWorld && return true
+    (m.module === Base.Compiler || parentmodule(m.module) === Base.Compiler) && return true
+    isdefined(m, :generator) && return true
+    return false
 end
 """
 Inference under the policy from the top: Julia's `typeinf_ext_toplevel` with `FactsInterp`, in the
