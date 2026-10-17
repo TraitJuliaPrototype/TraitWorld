@@ -391,12 +391,25 @@ function _typeinf_policy(world::UInt, mi::Core.MethodInstance, source_mode::UInt
     depth == 0 && _compile_pending!(world)
     return ci
 end
+# bounds, as the generator's depth: a recursion with growing types would otherwise go on compiling
+# ever deeper signatures; what is left over is compiled at run time, on first use, like plain Julia
+const _PENDING_MAX = 256
+const _PENDING_DEPTH = 8
+_type_depth(@nospecialize(T)) = T isa DataType ? 1 + maximum(_type_depth, T.parameters; init = 0) :
+    T isa UnionAll ? _type_depth(Base.unwrap_unionall(T)) : T isa Union ? max(_type_depth(T.a), _type_depth(T.b)) : 0
 function _compile_pending!(world::UInt)
     pend = get(task_local_storage(), :tw_policy_pending, nothing)
     pend === nothing && return nothing
+    done = 0
     while !isempty(pend)
         mi = pop!(pend::Vector{Core.MethodInstance})
+        if done >= _PENDING_MAX
+            empty!(pend)
+            break
+        end
         _owner_ci(mi, world) === nothing || continue
+        _type_depth(mi.specTypes) > _PENDING_DEPTH + 2 && continue
+        done += 1
         try
             _typeinf_policy(world, mi, CC.SOURCE_MODE_ABI)
         catch
