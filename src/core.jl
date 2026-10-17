@@ -369,9 +369,23 @@ function _show_tobj(io::IO, @nospecialize(T))
     end
 end
 
-function Base.show(io::IO, T::Type{<:TObj})
-    _printable_tobj(T) || return invoke(show, Tuple{IO,Type}, io, T)
+# A trait object's type prints by bound and key, wherever Julia prints a type, through type
+# printers (`Base.Experimental.register_type_printer`, patched Julia) rather than methods of
+# `show(::IO, ::Type{<:TObj})`: such a method invalidates every caller compiled for
+# `show(::IO, ::Type)`, most code that prints a type (CSV's parser among them: 1.0 s on its
+# first read, session 26). Without the registry (stock Julia) types print as Julia prints them.
+function _show_tobj_type(io::IO, @nospecialize(T))
+    _printable_tobj(T) || return _show_type_plain(io, T)
     return _show_tobj(io, T)
+end
+_show_type_plain(io::IO, @nospecialize(T)) =
+    isdefined(Base.Experimental, :show_type_plain) ? Base.Experimental.show_type_plain(io, T) : invoke(show, Tuple{IO,Type}, io, T)
+"Register the printers of trait objects' and function bounds' types, where Julia has the registry."
+function _register_type_printers()
+    isdefined(Base.Experimental, :register_type_printer) || return nothing
+    Base.Experimental.register_type_printer(Base.typename(TObj), _show_tobj_type)
+    Base.Experimental.register_type_printer(Base.typename(CObj), _show_cobj_type)
+    return nothing
 end
 Base.show(io::IO, t::TObj) = (print(io, "trait object "); _show_tobj(io, typeof(t)))
 "A key as a reader wants it: the implementing type, then the declared fields' types, `Vector{Float64}; u::Vector{Float64}, p::Params`."
@@ -602,10 +616,11 @@ CObj{A,S}(f::F) where {A,S,F} = CObj{A,S,F}(f)
     return c.f(args...)::S
 end
 
-# a function inside library code prints as its bound and how it is called
-function Base.show(io::IO, T::Type{<:CObj})
+# a function inside library code prints as its bound and how it is called (a type printer,
+# registered in `__init__`: see `_register_type_printers`)
+function _show_cobj_type(io::IO, @nospecialize(T))
     T isa DataType && length(T.parameters) == 3 && T.parameters[3] isa Type ||
-        return invoke(show, Tuple{IO,Type}, io, T)
+        return _show_type_plain(io, T)
     A, S, F = T.parameters
     print(io, "Callable{")
     show(io, A); print(io, ", "); show(io, S)

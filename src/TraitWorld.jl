@@ -23,15 +23,16 @@ export Trait, Callable, CallMode, DynamicCall, CompiledCall, compiled_call, dyna
 
 function __init__()
     empty!(_NOT_EXTENSIONS)
+    FACTS[] = get(ENV, "JULIA_TW_FACTS", "1") != "0"
     _vc_init!()
     _hooks_init!()
     _strict_init!()
-    FACTS[] = get(ENV, "JULIA_TW_FACTS", "1") != "0"
     _FACTS_POLICY[] = get(ENV, "JULIA_TW_FACTS_POLICY", "1") != "0"
     _FACTS_DEBUG[] = get(ENV, "JULIA_TW_FACTS_DEBUG", "0") == "1"
     _COMPILER_WORLD[] = Base.get_world_counter()
     _INLINER_KEEPS_CI[] = _inliner_keeps_ci() && get(ENV, "JULIA_TW_NOINLINE", "0") != "1"
     push!(Base.package_callbacks, _on_package_load)
+    _register_type_printers()
 end
 
 """

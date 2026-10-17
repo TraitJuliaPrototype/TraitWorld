@@ -127,7 +127,8 @@ end
     @test Ka === Kb === TraitWorld.Key{Nothing,NamedTuple{(:data,),Tuple{Vector{Float64}}}}
     @test Ks === TraitWorld.Key{Sorted,NamedTuple{(:data,),Tuple{Vector{Float64}}}}
     @test typeof(tobj(RT.rmean, a, 1)) === typeof(tobj(RT.rmean, b, 1))   # one worker for both
-    @test endswith(sprint(show, typeof(tobj(RT.rmean, a, 1))), "Sampled{Float64} at data::Vector{Float64}")
+    # the type printer, which patched Julia registers (stock Julia prints the machinery type)
+    @test endswith(sprint(TraitWorld._show_tobj_type, typeof(tobj(RT.rmean, a, 1))), "Sampled{Float64} at data::Vector{Float64}")
 end
 
 @testset "fields define parameters by matching" begin

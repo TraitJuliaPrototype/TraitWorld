@@ -24,7 +24,17 @@ end)
 
 frames(f) = try f(); "" catch; sprint(Base.show_backtrace, catch_backtrace()) end
 
-@testset "Printing by bound and representation" begin
+# Readable types need Julia's type-printer registry (patched build); without it types print as
+# Julia prints them, and TraitWorld must not widen `show(::IO, ::Type)` to get there.
+const HAS_PRINTERS = isdefined(Base.Experimental, :register_type_printer)
+
+@testset "TraitWorld adds no method of show at types of types" begin
+    widening = [m for m in methods(Base.show) if parentmodule(m) === TraitWorld &&
+                any(p -> p isa Type && p <: Type && p !== Union{}, Base.unwrap_unionall(m.sig).parameters[2:end])]
+    @test isempty(widening)
+end
+
+HAS_PRINTERS && @testset "Printing by bound and representation" begin
     P = Main.PrintLib
     bt = frames(() -> P.boom([1.0, 2.0]))
     @test occursin("PVec{Float64} at Vector{Float64}", bt)

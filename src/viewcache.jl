@@ -28,24 +28,40 @@ const _VC_BUILDERS = Any[]               # builder call signatures built in this
 const _VC_CHECKED = Base.IdSet{Any}()    # worker signatures a loaded view cache checked when it was built
 const _VC_SEEN = Set{String}()           # view caches loaded, or found not built, in this session
 const _VC_STALE = String[]               # found but not built (new, or a dependency changed)
+const _VC_ARMED = Ref(false)             # the exit hook is registered (only once there is something to write)
 
 viewcache_dir() = get(ENV, "JULIA_TW_VIEWCACHE_DIR", joinpath(first(DEPOT_PATH), "traitworld", "views"))
 
 function _vc_init!()
-    _VC_ON[] = get(ENV, "JULIA_TW_VIEWCACHE", "1") != "0" && ccall(:jl_generating_output, Cint, ()) == 0
+    # under the facts policy a view cache holds the policy's code, whose machine code an image
+    # keeps only with piece 5 (`jl_set_image_keep_compiled`); on stock Julia it would cache nothing
+    piece5 = try; cglobal(:jl_set_image_keep_compiled) != C_NULL; catch; false; end
+    _VC_ON[] = get(ENV, "JULIA_TW_VIEWCACHE", "1") != "0" && ccall(:jl_generating_output, Cint, ()) == 0 &&
+               (!FACTS[] || piece5)
     empty!(_VC_NEW); empty!(_VC_BUILDERS); empty!(_VC_CHECKED); empty!(_VC_SEEN); empty!(_VC_STALE)
-    _VC_ON[] && atexit(_vc_atexit)
+    _VC_ARMED[] = false
+    return nothing
+end
+
+# A session that compiles nothing new pays nothing at exit: the exit hook is registered when the
+# first worker whose code no image holds is noted (or a view cache is found not built).
+function _vc_arm!()
+    @lock _LOCK (_VC_ARMED[] && return nothing; _VC_ARMED[] = true)
+    atexit(_vc_atexit)
     return nothing
 end
 
 @noinline function _vc_note_worker(@nospecialize(sig))
     _VC_ON[] || return nothing
+    _vc_in_image(sig) && return nothing           # its code came with an image
     @lock _LOCK push!(_VC_NEW, sig)
+    _vc_arm!()
     return nothing
 end
 @noinline function _vc_note_builder(@nospecialize(b), @nospecialize(U))
     _VC_ON[] || return nothing
     @lock _LOCK push!(_VC_BUILDERS, Tuple{typeof(b),U})
+    _vc_arm!()
     return nothing
 end
 
@@ -106,6 +122,17 @@ end
 
 # --- flushing: write the packages, build them ---------------------------------------
 
+"Whether the code of the worker for `sig` (under the facts policy, else native) came from a package image."
+function _vc_in_image(@nospecialize(sig))
+    world = Base.get_world_counter()
+    mi = ccall(:jl_method_lookup_by_tt, Any, (Any, Csize_t, Any), _worker_sig(sig), world, nothing)
+    mi isa Core.MethodInstance || return false
+    owner = FACTS[] ? FactsOwner() : nothing
+    ci = ccall(:jl_rettype_inferred, Any, (Any, Any, UInt, UInt), owner, mi, world, world)
+    ci isa Core.CodeInstance || return false
+    return ccall(:jl_object_in_image, UInt8, (Any,), ci) != 0
+end
+
 _vc_atexit() = (try viewcache_flush(; wait = false) catch e; @warn "TraitWorld: writing view caches failed" exception = e; end; nothing)
 
 """
@@ -119,6 +146,8 @@ function viewcache_flush(; wait::Bool = true)
     _VC_ON[] || return String[]
     groups = Dict{String,Tuple{Any,Vector{Module},Vector{Any}}}()       # name => (key, packages, signatures)
     workers = @lock _LOCK (s = copy(_VC_NEW); empty!(_VC_NEW); s)
+    filter!(!_vc_in_image, workers)               # an image holds its code already: nothing to cache
+    isempty(workers) && isempty(_VC_STALE) && return String[]
     builders = @lock _LOCK (s = unique(_VC_BUILDERS); empty!(_VC_BUILDERS); s)
     for sig in unique(workers)
         pkgs = _vc_packages(sig)
@@ -265,6 +294,7 @@ function _vc_load!()
                 Base.require(id)
             else
                 push!(_VC_STALE, name)            # never compiled in the session: built at exit
+                _vc_arm!()
             end
         catch e
             @warn "TraitWorld: loading view cache $name failed" exception = e
