@@ -77,6 +77,13 @@ function _would_win(m::Method, @nospecialize(s), world::UInt)
     return ccall(:jl_type_morespecific, Cint, (Any, Any), cur.sig, m.sig) == 0
 end
 
+"Whether `m` would win at one of the concrete signatures the fact at `s` stands for (`_fact_splits`)."
+function _would_win_split(m::Method, @nospecialize(s), world::UInt)
+    ss = _fact_splits(s)
+    ss === nothing && return _would_win(m, s, world)          # a closure's call at kinds
+    return any(sp -> _would_win(m, sp, world), ss)
+end
+
 "The first fact of valid trait-world code that `m`, defined by a non-stakeholder, would break: `(sig, caller)`, or `nothing`."
 function _strict_violation(m::Method)
     definer = owner(m.module)
@@ -88,7 +95,7 @@ function _strict_violation(m::Method)
     owned_method(m) && return nothing
     world = Base.get_world_counter()
     check(s, caller) = caller isa Core.CodeInstance && caller.max_world == typemax(UInt) && _trait_world_code(caller) &&
-                       _fact_sig(s) && _would_win(m, s, world) && !_stakeholder(definer, s)
+                       _fact_sig(s) && _would_win_split(m, s, world) && !_stakeholder(definer, s)
     # 1. calls that dispatch to an existing method's specializations, where m would win
     ms = Base._methods_by_ftype(m.sig, nothing, -1, world, false, Ref{UInt}(typemin(UInt)), Ref{UInt}(typemax(UInt)), Ptr{Int32}(C_NULL))
     if ms isa Vector

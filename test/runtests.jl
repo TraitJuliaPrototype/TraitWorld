@@ -762,6 +762,21 @@ end
     @test AnyCode.clean(v) == 1.5 + 1.0 + 1
 end
 
+@testset "facts at tuples with unions of concrete elements (iteration with missing values)" begin
+    ii = typeof(Base.indexed_iterate)
+    # `item, state = iterate(v, s)` over a Vector{Union{Missing, Int}}: two concrete facts
+    s = Tuple{ii, Tuple{Union{Missing, Int}, Int}, Int}
+    @test TraitWorld._fact_sig(s)
+    @test Set(TraitWorld._fact_splits(s)) == Set([Tuple{ii, Tuple{Missing, Int}, Int}, Tuple{ii, Tuple{Int, Int}, Int}])
+    @test TraitWorld._fact_splits(Tuple{ii, Tuple{Int, Int}, Int}) == [Tuple{ii, Tuple{Int, Int}, Int}]
+    # not finite sets of concrete signatures: abstract elements, varargs, more splits than union splitting allows
+    @test !TraitWorld._fact_sig(Tuple{ii, Tuple{Integer, Int}, Int})
+    @test !TraitWorld._fact_sig(Tuple{ii, Tuple{Vararg{Int}}, Int})
+    @test !TraitWorld._fact_sig(Tuple{ii, Tuple{Union{Missing, Int}, Union{Missing, Float64}, Union{Nothing, Int}}, Int})
+    # top-level unions are left to union splitting
+    @test !TraitWorld._fact_sig(Tuple{typeof(sin), Union{Int, Float64}})
+end
+
 @testset "view caches: keys and recording" begin
     vc = TraitWorld
     # a signature's view: the packages it names; Julia's own modules are in every view

@@ -45,8 +45,56 @@ at a kind is broken by any method of the function with an argument that admits a
 (`zero`, a package's trait function) it would let unrelated packages invalidate trait code (final
 review of 2026-10-17). Only a closure's owner adds methods to it.
 """
-_fact_sig(@nospecialize(T)) = T isa DataType && (Base.isdispatchtuple(T) ||
+_fact_sig(@nospecialize(T)) = T isa DataType && (Base.isdispatchtuple(T) || _fact_splits(T) !== nothing ||
     (T <: Tuple && !isempty(T.parameters) && _is_closure_type(T.parameters[1]) && _kinds_ok(T.parameters)))
+
+"The most concrete signatures one fact may stand for: Julia's own bound on union splitting."
+const _MAX_FACT_SPLITS = 4
+
+"""
+The concrete signatures a fact at `T` stands for, or `nothing`: `T` itself when it is a dispatch
+tuple, else the splits of unions of concrete types inside its tuple-typed arguments (at most
+`_MAX_FACT_SPLITS`). A tuple value's type is always concrete, so `Tuple{Union{Missing, Int}, Int}`
+admits exactly the values of `Tuple{Missing, Int}` and `Tuple{Int, Int}`: a fact there is the facts at
+both, as top-level union splitting gives facts at each split. Such arguments are everywhere in
+iteration over data with missing values (`item, state = iterate(v, s)` destructures a
+`Tuple{Union{Missing, T}, Int}`); without this every one is a run-time site, once per element.
+Top-level unions are left to union splitting (`find_method_matches`).
+"""
+function _fact_splits(@nospecialize(T))
+    T isa DataType && T <: Tuple || return nothing
+    Base.isdispatchtuple(T) && return Any[T]
+    ps = T.parameters
+    (isempty(ps) || Base.isvarargtype(ps[end])) && return nothing
+    alts = Vector{Any}[]
+    n = 1
+    for p in ps
+        a = Base.isdispatchelem(p) ? Any[p] : _tuple_splits(p)
+        a === nothing && return nothing
+        n *= length(a)
+        n > _MAX_FACT_SPLITS && return nothing
+        push!(alts, a)
+    end
+    return Any[Tuple{c...} for c in Iterators.product(alts...)][:]
+end
+"The concrete tuple types a tuple type with unions of concrete element types admits, or `nothing`."
+function _tuple_splits(@nospecialize(P))
+    P isa DataType && P <: Tuple || return nothing
+    ps = P.parameters
+    (isempty(ps) || Base.isvarargtype(ps[end])) && return nothing
+    alts = Vector{Any}[]
+    n = 1
+    for q in ps
+        a = Base.isdispatchelem(q) ? Any[q] :
+            q isa Union ? (us = Base.uniontypes(q); all(Base.isdispatchelem, us) ? us : nothing) :
+            _tuple_splits(q)
+        a === nothing && return nothing
+        n *= length(a)
+        n > _MAX_FACT_SPLITS && return nothing
+        push!(alts, a)
+    end
+    return Any[Tuple{c...} for c in Iterators.product(alts...)][:]
+end
 """
 A closure's type: a function type that is not a named function's (whose module binds its name to
 its instance, as for `typeof(sum)`, also named `#sum`). Only its owner adds methods to it.
@@ -403,7 +451,10 @@ function _policy_sites!(src::Core.CodeInfo, world::UInt)
                 continue
             end
             (gv === nothing || !_keep_call(gv)) || continue
-            code[i] = Expr(:call, GlobalRef(TraitWorld, :_call_under_policy), st.args...)
+            # a site of fixed arity keeps its own cache (`_CallSite`); longer calls take the trampoline
+            code[i] = length(st.args) <= _SITE_MAXARGS + 1 ?
+                Expr(:call, GlobalRef(TraitWorld, :_call_site), QuoteNode(_CallSite()), st.args...) :
+                Expr(:call, GlobalRef(TraitWorld, :_call_under_policy), st.args...)
         elseif st.head === :(=) && length(st.args) == 2 && Meta.isexpr(st.args[2], :call)
             # (optimized IR has no assignments; kept for safety)
             continue
@@ -420,27 +471,81 @@ at the site, so what it calls is decided at each call, as in plain Julia. No met
 ambiguity, takes plain Julia's call, which raises the same error.
 """
 function _call_under_policy(@nospecialize(f), @nospecialize(args...))
-    f isa Core.Builtin && return f(args...)              # a builtin passed as a value
-    w = Base.tls_world_age()
+    ci = _policy_ci(Base.tls_world_age(), f, args)
+    return ci === nothing ? f(args...) : Core.invoke(f, ci, args...)
+end
+"""
+The policy's CodeInstance that a call of `f` with `args` runs in `world`, compiled if needed; or
+`nothing` when plain Julia's call runs: a builtin, no method or an ambiguity (the call raises the same
+error), the machinery's own methods, or code the policy cannot compile.
+"""
+function _policy_ci(world::UInt, @nospecialize(f), args::Tuple)
+    f isa Core.Builtin && return nothing                 # a builtin passed as a value
     tt = Tuple{Core.Typeof(f), Any[Core.Typeof(a) for a in args]...}
-    mi = ccall(:jl_method_lookup_by_tt, Any, (Any, Csize_t, Any), tt, w, nothing)
-    (mi isa Core.MethodInstance && mi.def isa Method) || return f(args...)
-    _keep_method(mi.def) && return f(args...)
-    ci = _owner_ci(mi, w)
+    mi = ccall(:jl_method_lookup_by_tt, Any, (Any, Csize_t, Any), tt, world, nothing)
+    (mi isa Core.MethodInstance && mi.def isa Method) || return nothing
+    _keep_method(mi.def) && return nothing
+    ci = _owner_ci(mi, world)
     if !(ci isa Core.CodeInstance)
-        (@lock _NO_POLICY_LOCK haskey(_NO_POLICY, mi)) && return f(args...)
+        (@lock _NO_POLICY_LOCK haskey(_NO_POLICY, mi)) && return nothing
         _FACTS_DEBUG[] && Core.println("TraitWorld: compiling under the policy at a run-time site: ", mi)
         ci = try
-            _typeinf_policy(w, mi, CC.SOURCE_MODE_ABI)
+            _typeinf_policy(world, mi, CC.SOURCE_MODE_ABI)
         catch
             nothing
         end
         ci isa Core.CodeInstance || @lock _NO_POLICY_LOCK (_NO_POLICY[mi] = true)
     end
-    ci isa Core.CodeInstance || return f(args...)       # inference gave up: plain Julia's code
+    ci isa Core.CodeInstance || return nothing           # inference gave up: plain Julia's code
     ci.invoke == C_NULL && ccall(:jl_compile_codeinst, Cint, (Any,), ci)
-    ci.invoke == C_NULL && return f(args...)             # stock Julia cannot run this owner's code
-    return Core.invoke(f, ci, args...)
+    ci.invoke == C_NULL && return nothing                # stock Julia cannot run this owner's code
+    return ci
+end
+
+"""
+A run-time site's cache, as Julia keeps one for its own dynamic dispatch: the last dispatch the
+site made. Dispatch is a function of the world and the arguments' `Core.Typeof` (`Type{Int}` for
+the value `Int`, which dispatches apart from a value of type `Int`), so a call in the same world
+with the same keys runs the same CodeInstance, which stays valid in that world (invalidation only
+ends a CodeInstance's validity after the world it was valid in). An entry holds this process's token: a
+cache kept in an image never hits with a world number of the process that built it. Without the
+cache a hot site cost 6.5 µs per call (a type built and looked up per call), against 26 ns for
+plain dynamic dispatch.
+"""
+mutable struct _CallSite
+    @atomic entry::Any
+end
+_CallSite() = _CallSite(nothing)
+struct _CallSiteEntry{N}
+    session::UInt
+    world::UInt
+    key::NTuple{N,Any}           # the callee's and the arguments' dispatch keys
+    ci::Union{Nothing,Core.CodeInstance}     # nothing: plain Julia's call
+end
+"This process's token for site caches (set when TraitWorld is initialized)."
+const _SESSION = Ref{UInt}(0)
+_session_token() = UInt(time_ns()) ⊻ (UInt(getpid()) << 40) | UInt(1)
+_dkey(@nospecialize(x)) = Core.Typeof(x)      # the lookup's own key: `Type{X}` for a type value
+const _SITE_MAXARGS = 4
+"A site's miss: dispatch as `_call_under_policy` does, and keep the result for the next call."
+function _site_miss(s::_CallSite, w::UInt, @nospecialize(f), args::Tuple)
+    ci = _policy_ci(w, f, args)
+    key = (_dkey(f), map(_dkey, args)...)
+    @atomic :release s.entry = _CallSiteEntry{length(key)}(_SESSION[], w, key, ci)
+    return ci === nothing ? f(args...) : Core.invoke(f, ci, args...)
+end
+for n in 0:_SITE_MAXARGS
+    as = [Symbol(:a, k) for k in 1:n]
+    hit = foldl((x, k) -> :($x && e.key[$(k + 1)] === _dkey($(as[k]))), 1:n; init = :(e.key[1] === _dkey(f)))
+    @eval function _call_site(s::_CallSite, @nospecialize(f), $([:(@nospecialize($a)) for a in as]...))
+        e = @atomic :acquire s.entry
+        w = Base.tls_world_age()
+        if e isa _CallSiteEntry{$(n + 1)} && e.world == w && e.session == _SESSION[] && $hit
+            ci = e.ci
+            return ci === nothing ? f($(as...)) : Core.invoke(f, ci, $(as...))
+        end
+        return _site_miss(s, w, f, ($(as...),))
+    end
 end
 "Method instances the policy could not compile at a run-time site: plain Julia's code, without trying again."
 const _NO_POLICY = IdDict{Core.MethodInstance,Bool}()

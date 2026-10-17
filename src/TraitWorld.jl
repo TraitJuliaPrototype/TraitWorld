@@ -32,6 +32,7 @@ function __init__()
     _FACTS_DEBUG[] = get(ENV, "JULIA_TW_FACTS_DEBUG", "0") == "1"
     _RUNTIME_POLICY[] = get(ENV, "JULIA_TW_RUNTIME_SITES", "policy") != "native"
     _COMPILER_WORLD[] = Base.get_world_counter()
+    _SESSION[] = _session_token()
     _INLINER_KEEPS_CI[] = _inliner_keeps_ci() && get(ENV, "JULIA_TW_NOINLINE", "0") != "1"
     push!(Base.package_callbacks, _on_package_load_callback)
     _register_type_printers()
@@ -147,6 +148,8 @@ precompile(_narrow_slow, (Any, TObj))
 for n in 0:6                         # the trampoline specializes on its arity
     precompile(_invoke_under_policy, (Core.MethodInstance, Any, ntuple(_ -> Any, n)...))
     precompile(_call_under_policy, (Any, ntuple(_ -> Any, n)...))
+    n <= _SITE_MAXARGS && precompile(_call_site, (_CallSite, Any, ntuple(_ -> Any, n)...))
+    n <= _SITE_MAXARGS && precompile(_site_miss, (_CallSite, UInt, Any, NTuple{n,Any}))
 end
 precompile(_conf_family_slow, (Base.RefValue{IdDict{Any,Any}}, Any, Any))
 
