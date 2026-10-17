@@ -81,8 +81,28 @@ function _machinery_call(@nospecialize(ft))
     ft = CC.widenconst(ft)
     ft isa DataType || return false
     m = ft.name.module
-    return Base.moduleroot(m) === TraitWorld
+    Base.moduleroot(m) === TraitWorld && return true
+    return _internal_function(ft)
 end
+
+"""
+Facts at non-public functions (decided in session 26): a call at abstract argument types of a
+named function that its module neither exports nor declares `public` is inferred as usual, with its
+edges. Only the owner adds methods to its internal functions; another package extending them counts
+as piracy (rule 3), so such an invalidation is a pirate's, like a winning pirate at a concrete fact.
+The edges are Julia's, so a definition there still invalidates the code ("identical or error").
+`JULIA_TW_INTERNAL_FACTS=0` turns the rule off (for comparison).
+"""
+function _internal_function(ft::DataType)
+    _INTERNAL_FACTS[] || return false
+    (ft <: Function && isdefined(ft, :instance)) || return false
+    m = ft.name.module
+    n = ft.name.singletonname
+    n isa Symbol || return false
+    (isdefined(m, n) && getglobal(m, n) === ft.instance) || return false      # a named function, not a closure
+    return !Base.ispublic(m, n)
+end
+const _INTERNAL_FACTS = Ref(true)
 
 """
 Concrete and semi-concrete evaluation under the policy. Both need foldable effects, which a run-time

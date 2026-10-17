@@ -24,6 +24,7 @@ export Trait, Callable, CallMode, DynamicCall, CompiledCall, compiled_call, dyna
 function __init__()
     empty!(_NOT_EXTENSIONS)
     FACTS[] = get(ENV, "JULIA_TW_FACTS", "1") != "0"
+    _INTERNAL_FACTS[] = get(ENV, "JULIA_TW_INTERNAL_FACTS", "1") != "0"
     _vc_init!()
     _hooks_init!()
     _strict_init!()
@@ -180,7 +181,9 @@ if ccall(:jl_generating_output, Cint, ()) == 1
                 Tuple{typeof(_implement_expand), Module, Symbol, Vector{Any}},  # `@implement` and its checks
                 Tuple{typeof(_declare_conformance_now), DataType, DataType},
                 Tuple{typeof(_check_projection_now), Module, DataType, DataType},
-                Tuple{typeof(_check_implementation_now), Module, DataType, DataType, Tuple{Symbol}})
+                Tuple{typeof(_check_implementation_now), Module, DataType, DataType, Tuple{Symbol}},
+                Tuple{typeof(_check_own_fields_now), DataType, DataType},
+                Tuple{typeof(_analyze_keeps), Any})
         facts_codeinstance(sig)
     end
     precompile(_facts_call, (typeof(_on_image_methods), Vector{Any}, String))

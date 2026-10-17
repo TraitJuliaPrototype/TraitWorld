@@ -1,3 +1,10 @@
+# `@implement` and the conformance checks are cold code that works on expressions and types held
+# as `Any`: its methods do not specialize on their arguments (`@nospecialize` for the whole file,
+# undone at its end). Under the facts policy a call of one of them at abstract argument types is
+# then a fact at a non-public function and compiles to an `:invoke` of the policy's code, instead
+# of a run-time call into native code that large loads invalidate (session 26).
+@nospecialize
+
 # ---------------------------------------------------------------------------
 # @implement: implementations (per representation, per family, generic) and
 # projections (single, joint, dynamic). All are registered as methods, so they
@@ -444,7 +451,8 @@ function _check_projection_now(mod::Module, @nospecialize(X), @nospecialize(T))
 end
 
 "A type declared to conform by its own methods has the fields the trait and its supertraits declare."
-function _check_own_fields(@nospecialize(X), @nospecialize(T))
+_check_own_fields(@nospecialize(X), @nospecialize(T)) = _latest_under_policy(_check_own_fields_now, X, T)
+function _check_own_fields_now(@nospecialize(X), @nospecialize(T))
     for Y in trait_closure(X)
         ps = _field_problems(Y, T, nothing, isempty(_ops(Y)) ? Nothing : T)
         isempty(ps) || throw(ImplementError("$T does not have the fields $Y declares:\n  " * join(ps, "\n  ")))
@@ -1184,3 +1192,5 @@ function _implement_projection(mod::Module, head, rest; field::Int = 0, fmap = n
     push!(out, :nothing)
     return esc(Expr(:block, out...))
 end
+
+@specialize
