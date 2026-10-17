@@ -149,8 +149,9 @@ for n in 0:6                         # the trampoline specializes on its arity
     precompile(_invoke_under_policy, (Core.MethodInstance, Any, ntuple(_ -> Any, n)...))
     precompile(_call_under_policy, (Any, ntuple(_ -> Any, n)...))
     n <= _SITE_MAXARGS && precompile(_call_site, (_CallSite, Any, ntuple(_ -> Any, n)...))
-    n <= _SITE_MAXARGS && precompile(_site_miss, (_CallSite, UInt, Any, NTuple{n,Any}))
 end
+precompile(_site_miss, (_CallSite, UInt, Any, Tuple))
+precompile(_policy_ci, (UInt, Any, Tuple))
 precompile(_conf_family_slow, (Base.RefValue{IdDict{Any,Any}}, Any, Any))
 
 """

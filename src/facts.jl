@@ -479,7 +479,7 @@ The policy's CodeInstance that a call of `f` with `args` runs in `world`, compil
 `nothing` when plain Julia's call runs: a builtin, no method or an ambiguity (the call raises the same
 error), the machinery's own methods, or code the policy cannot compile.
 """
-function _policy_ci(world::UInt, @nospecialize(f), args::Tuple)
+function _policy_ci(world::UInt, @nospecialize(f), @nospecialize(args::Tuple))
     f isa Core.Builtin && return nothing                 # a builtin passed as a value
     tt = Tuple{Core.Typeof(f), Any[Core.Typeof(a) for a in args]...}
     mi = ccall(:jl_method_lookup_by_tt, Any, (Any, Csize_t, Any), tt, world, nothing)
@@ -528,7 +528,7 @@ _session_token() = UInt(time_ns()) ⊻ (UInt(getpid()) << 40) | UInt(1)
 _dkey(@nospecialize(x)) = Core.Typeof(x)      # the lookup's own key: `Type{X}` for a type value
 const _SITE_MAXARGS = 4
 "A site's miss: dispatch as `_call_under_policy` does, and keep the result for the next call."
-function _site_miss(s::_CallSite, w::UInt, @nospecialize(f), args::Tuple)
+function _site_miss(s::_CallSite, w::UInt, @nospecialize(f), @nospecialize(args::Tuple))
     ci = _policy_ci(w, f, args)
     key = (_dkey(f), map(_dkey, args)...)
     @atomic :release s.entry = _CallSiteEntry{length(key)}(_SESSION[], w, key, ci)
