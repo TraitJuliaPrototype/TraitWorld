@@ -178,7 +178,7 @@ end
         struct Abstr; x::Real; end
         @implement ColTable{Abstr} begin ncols(r) = 1; col(r, i) = [1.0] end
     end)
-    @test e isa ImplementError && occursin("deeply concrete", sprint(showerror, e))
+    @test e === nothing                  # a field the trait does not declare is not part of the key (decision 1)
     e = thrown(quote
         struct NoInfer; x::Vector{Vector{Float64}}; end
         @implement ColTable NoInfer project(t) = rand() > 2 ? t.x : nothing
@@ -694,8 +694,8 @@ end
     @test overview(Main.Grid1([1.0 2.0; 3.0 4.0])) == (2.0, [1.0, 2.0])
     e = thrown(quote struct TwoF; a::Vector{Vector{Float64}}; b::Vector{Vector{Float64}}; end; @implement ColTable TwoF end)
     @test e isa ImplementError && occursin("several fields", e.msg) && occursin("a, b", e.msg)
-    e = thrown(quote struct Abs1; data::AbstractVector{Vector{Float64}}; end; @implement GTable Abs1 end)   # conforms through a family
-    @test e isa ImplementError && occursin("field `data`", e.msg) && occursin("not deeply concrete", e.msg)
+    e = thrown(quote struct Abs1; data::AbstractVector{Vector{Float64}}; end; @implement GTable Abs1 end)   # an abstract key: allowed (decision 1)
+    @test e === nothing && gmean(Main.Abs1([[1.0, 3.0]])) == 2.0
     e = thrown(quote struct Abs2; data::AbstractVector; end; @implement ColTable Abs2 end)                   # conforms to nothing
     @test e isa ImplementError && occursin("no field of", e.msg)
     e = thrown(quote struct Part1; n::Int; end; Columns.ncols(r::Part1) = r.n; @implement ColTable Part1 end)

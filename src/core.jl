@@ -529,6 +529,14 @@ Base.Experimental.@max_methods 1 function has_default end
 has_default(@nospecialize(X), @nospecialize(op)) = false
 Base.Experimental.@max_methods 1 function is_mutating end
 is_mutating(@nospecialize(X), @nospecialize(op)) = false
+Base.Experimental.@max_methods 1 function trait_concreteness end
+"""
+`trait_concreteness(X)`: what trait `X` asks of its keys (decision 1, session 27): `:none` (the
+default: a key may be abstract, silently), `:warn` (`@warn_on_abstract` in the trait's body: a
+conformance with an abstract key warns) or `:concrete_only` (`@concrete_only`: such a conformance,
+or a family member at an abstract parameter, is refused).
+"""
+trait_concreteness(@nospecialize(X)) = :none
 Base.Experimental.@max_methods 1 function supertraits end
 "`supertraits(X)`: traits whose operations `X` includes; their views travel with every `X` view."
 supertraits(@nospecialize(X)) = ()

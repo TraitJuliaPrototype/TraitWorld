@@ -147,7 +147,8 @@ function _override_violation(m::Method)
             A = _declared_args(Y, op, R, N)
             Tuple{FT,R,A.parameters...} <: m.sig || continue
             return "`$op` of $Y gets a method for $R ($m), but the conformance of $T to $X serves it by the trait's default. " *
-                   "An override belongs to the conformance: define it before `@implement`, or in its block"
+                   "An override belongs to the conformance, and a declared conformance cannot change (compiled code and kept values depend on it): " *
+                   "define the method before `@implement`, or in its block, and restart the session"
         end
     end
     return nothing

@@ -172,13 +172,31 @@ function _tobj_where(name, np::Int, T::Symbol)
     return Any[Expr(:(>:), T, name)]                 # the family: no free type variable (see `PTag`)
 end
 
+"The trait's concreteness policy from a line `@concrete_only` or `@warn_on_abstract` in its body, removed from it."
+function _concreteness_policy(block)
+    block isa Expr && block.head === :block || return :none, block
+    policy = :none
+    args = Any[]
+    for ex in block.args
+        if ex isa Expr && ex.head === :macrocall && all(a -> a isa LineNumberNode, ex.args[2:end]) &&
+           ex.args[1] in (Symbol("@concrete_only"), Symbol("@warn_on_abstract"))
+            policy = ex.args[1] === Symbol("@concrete_only") ? :concrete_only : :warn
+        else
+            push!(args, ex)
+        end
+    end
+    return policy, Expr(:block, args...)
+end
+
 macro trait(header, block = nothing)
+    policy, block = _concreteness_policy(block)
     header, block, fieldparams = _keys_form(header, block)
     name, Rsym, supers, params = _parse_trait_header(header)
     TW = TraitWorld
     pnames = Symbol[p for (p, _) in params]
     np = length(pnames)
     out = Any[:(Core.@__doc__ abstract type $name{$(pnames...), $Rsym} <: $TW.Trait end)]
+    policy === :none || push!(out, :($TW.trait_concreteness(::Type{$name}) = $(QuoteNode(policy))))
     if np > 0
         push!(out, :($TW.trait_params(::Type{$name}) = $(Tuple(pnames))))
         for (i, (p, b)) in enumerate(params)

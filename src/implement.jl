@@ -63,7 +63,45 @@ struct ImplementError <: Exception
 end
 Base.showerror(io::IO, e::ImplementError) = print(io, "ImplementError: ", e.msg)
 
-"Recursive concreteness: `T`, its type parameters, and its field types, all the way down."
+"""
+A key part is concrete (decision 1, session 27): the type is concrete and its type parameters are,
+all the way down. Fields the trait does not declare are not looked at: the code compiled for a key
+never reads them. `Dynamic` and `Erased` parts are what they are.
+"""
+function key_concrete(@nospecialize(T))
+    T isa Type || return true
+    T === Union{} && return true
+    isconcretetype(T) || return false
+    (T <: Dynamic || T <: Erased) && return true
+    if T isa DataType
+        for p in T.parameters
+            key_concrete(p) || return false
+        end
+    end
+    return true
+end
+"The strictest concreteness policy of `X` and its supertraits."
+function _concreteness_of(@nospecialize(X))
+    pol = :none
+    for Y in trait_closure(_family(X))
+        p = _in_decision_world(trait_concreteness, Y)::Symbol
+        p === :concrete_only && return p
+        p === :warn && (pol = :warn)
+    end
+    return pol
+end
+"Apply `X`'s policy to a key part `T` (`what` names it in the message)."
+function _concreteness_check(@nospecialize(X), @nospecialize(T), what::String)
+    pol = _concreteness_of(X)
+    pol === :none && return nothing
+    key_concrete(T) && return nothing
+    msg = "$what `$T` is not concrete, and $X asks for concrete keys"
+    pol === :concrete_only && throw(ImplementError(msg * " (`@concrete_only`)"))
+    @warn msg * " (`@warn_on_abstract`): code compiled for this key dispatches at run time where it reads that part"
+    return nothing
+end
+
+"Recursive concreteness: `T`, its type parameters, and its field types, all the way down (used by concrete mode's reports)."
 function deep_concrete(@nospecialize(T); seen = Base.IdSet{Any}())
     T isa Type || return true
     T in seen && return true
@@ -421,7 +459,7 @@ function _check_implementation_now(mod::Module, @nospecialize(X), @nospecialize(
         end
     end
     isconcretetype(R) || return nothing          # families and generic implementations are checked per type
-    deep_concrete(R) || throw(ImplementError("$R is not deeply concrete, so it cannot implement a trait"))
+    _concreteness_check(X, R, "the implementing type")
     ps = conformance_problems(X, R, given)       # fields belong to a conformance, not to an implementation
     isempty(ps) || throw(ImplementError("the implementation of $X for $R does not conform:\n  " * join(ps, "\n  ")))
     for S in trait_closure(X)[2:end]
@@ -439,8 +477,8 @@ function _check_projection_now(mod::Module, @nospecialize(X), @nospecialize(T))
     (definer === owner(parentmodule(X)) || _owns(definer, T)) ||
         throw(ImplementError("$(mod) may not declare that $T conforms to $X: it owns neither (rule 3)"))
     R = p.R
-    (R isa Type && (deep_concrete(R) || R === Nothing)) ||
-        throw(ImplementError("$T forwards $X to a field of type $R, which is not deeply concrete"))
+    R isa Type || throw(ImplementError("$T forwards $X to something that is not a type: $R"))
+    R === Nothing || _concreteness_check(X, R, "$T forwards $X to a field whose type")
     for Y in trait_closure(X)
         w = Y === X ? proj_witness(X, T, p) : witness(Y, R)
         w === nothing && throw(ImplementError("$T forwards $X to a field of type $R, which does not implement $Y"))
@@ -506,18 +544,24 @@ function _field_problems(@nospecialize(X), @nospecialize(T), fmap, @nospecialize
         else
             ST <: FT || push!(ps, "field `$g` of $T has type `$ST`, but $X declares `$FT` for `$f`")
         end
+        # a declared field's type is part of the key (decision 1)
+        key_concrete(ST) || _concreteness_of(X) !== :concrete_only ||
+            push!(ps, "field `$g` of $T has type `$ST`, which is not concrete, and $X asks for concrete keys (`@concrete_only`)")
     end
     return ps
 end
 
 "The representation a projection returns: declared, or inferred (must be concrete)."
-function _rep_of(@nospecialize(f), @nospecialize(T), @nospecialize(Rdecl))
+function _rep_of(@nospecialize(f), @nospecialize(T), @nospecialize(Rdecl), Xs = ())
     Rinf = Base.infer_return_type(f, Tuple{T})
     if Rdecl !== nothing
         Rinf <: Rdecl || throw(ImplementError("the projection of $T returns $Rinf, declared $Rdecl"))
         return Rdecl
     end
-    isconcretetype(Rinf) || throw(ImplementError(
+    # an abstract representation is an abstract key: allowed unless a trait asks for concrete keys
+    abstract_ok = !isempty(Xs) && Rinf isa Type && Rinf !== Union{} && Rinf !== Any &&
+                  all(X -> _concreteness_of(X) !== :concrete_only, Xs)
+    isconcretetype(Rinf) || abstract_ok || throw(ImplementError(
         "cannot infer a concrete representation for the projection of $T (got $Rinf): declare it, as in `@implement Trait{R} $T …`"))
     return Rinf
 end
@@ -599,8 +643,11 @@ function _family_registry end
     return (b::Builder)(u)
 end
 @noinline function _conf_family_slow(reg::Base.RefValue{IdDict{Any,Any}}, @nospecialize(X), @nospecialize(u))
-    r = _conformance_slow(X, u)                         # warns once for a member that does not conform
     U = typeof(u)
+    # a member at an abstract parameter (`S{Any}`) is refused at the entry where X asks for concrete keys
+    _latest_under_policy(_concreteness_of, X) === :concrete_only && !key_concrete(U) &&
+        throw(TraitBoundError("a $U has an abstract type parameter, and $X asks for concrete keys (`@concrete_only`)"))
+    r = _conformance_slow(X, u)                         # warns once for a member that does not conform
     b = r === NOTRAIT ? nothing : _latest_under_policy(_family_builder, X, U)
     if b isa Builder
         @lock _LOCK begin
@@ -654,14 +701,15 @@ function check_overrides()
             for op in D
                 _has_op_method(Y, op, R) || continue
                 push!(out, "`$op` of $Y now has a method for $R, but the conformance of $T to $X serves it by the trait's default. " *
-                           "An override belongs to the conformance: define it before `@implement`, or in its block")
+                           "An override belongs to the conformance, and a declared conformance cannot change (compiled code and kept values depend on it): " *
+                   "define the method before `@implement`, or in its block, and restart the session")
             end
         end
     end
     for (Y, op, R, X, T) in _family_records()
         _has_op_method(Y, op, R) || continue
         push!(out, "`$op` of $Y now has a method for $R, but $R's conformance to $X, fixed at its first use, serves it by the trait's default. " *
-                   "An override belongs to the conformance: define it before the type's first use")
+                   "An override belongs to the conformance, and a fixed conformance cannot change: define the method before the type's first use, and restart the session")
     end
     return out
 end
@@ -1084,7 +1132,8 @@ function _implement_oneline(mod::Module, traits::Vector{Any}, Tex, Rdecl; pexs =
         FT = fieldtype(T, i)
         FT isa Type || continue
         all(X -> witness(X, FT) !== nothing, Xs) || continue
-        deep_concrete(FT) ? push!(conforming, i) : push!(abstract_conforming, i)
+        # a concrete field first; an abstract one where the traits allow abstract keys
+        key_concrete(FT) ? push!(conforming, i) : push!(abstract_conforming, i)
     end
     idata = findfirst(==(:data), fns)
     fld = if idata !== nothing && idata in conforming
@@ -1094,12 +1143,18 @@ function _implement_oneline(mod::Module, traits::Vector{Any}, Tex, Rdecl; pexs =
     elseif isempty(conforming)
         if !isempty(abstract_conforming)
             i = abstract_conforming[1]
-            throw(ImplementError("field `$(fns[i])` of $Tex is declared `$(fieldtype(T, i))`, which is not deeply concrete, so it cannot " *
-                                 "be the projection: declare a concrete field type, or write a projection that materializes it"))
-        end
+            if length(abstract_conforming) == 1 && all(X -> _concreteness_of(X) !== :concrete_only, Xs)
+                i
+            else
+                throw(ImplementError("field `$(fns[i])` of $Tex is declared `$(fieldtype(T, i))`, which is not concrete, and " *
+                                     "$(join(string.(Xs), ", ")) asks for concrete keys (`@concrete_only`): declare a concrete field type, " *
+                                     "or write a projection that materializes it"))
+            end
+        else
         throw(ImplementError("no field of $Tex conforms to $(join(string.(Xs), ", ")) and $Tex has no methods for its operations " *
                              "(fields: $(join(("$n::$(fieldtype(T, i))" for (i, n) in enumerate(fns)), ", "))); " *
                              "name a field `data`, write `project(t) = …`, or implement the operations"))
+        end
     else
         throw(ImplementError("several fields of $Tex conform to $(join(string.(Xs), ", ")): $(join(string.(fns[conforming]), ", ")). " *
                              "Name one `data`, or write `@implement $(traits[1]) $Tex project(t) = t.field`"))
@@ -1214,7 +1269,7 @@ function _implement_projection(mod::Module, head, rest; field::Int = 0, fmap = n
         push!(out, Expr(:function, Expr(:call, ufn, ucall.args[2:end]...), udefs[1].args[2]))
         invex = ufn
     end
-    push!(out, :(const $Rconst = $TW._rep_of($pfn, $Tex, $(Rdecl === nothing ? nothing : Rdecl))))
+    push!(out, :(const $Rconst = $TW._rep_of($pfn, $Tex, $(Rdecl === nothing ? nothing : Rdecl), ($(traits...),))))
     dynex = :nothing
     if !isempty(ops)
         length(traits) == 1 || error("@implement: operations come with a projection for one trait")

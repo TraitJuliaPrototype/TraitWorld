@@ -12,10 +12,10 @@
 # it calls on a normal path, reports each use of an abstract value, and traces
 # it to its root cause, through any number of packages: a field declared with
 # an abstract type, a boxed variable, a variable whose type changes, a
-# non-constant global, an abstract declared result. Workers see only deeply
-# concrete representations and operation results asserted to their declared
-# types, so an abstract value can only come from the module's own code or the
-# code it calls.
+# non-constant global, an abstract declared result. Workers see their bounds'
+# keys and operation results asserted to their declared types. A key may be
+# abstract unless its trait asks for concrete keys (`@concrete_only`, decision 1);
+# otherwise an abstract value comes from the module's own code or the code it calls.
 # ---------------------------------------------------------------------------
 
 struct AbstractFinding
