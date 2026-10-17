@@ -144,7 +144,9 @@ precompile(_vc_load!, ())
 precompile(viewcache_flush, ())
 precompile(_vc_atexit, ())
 precompile(_narrow_slow, (Any, TObj))
-precompile(_invoke_under_policy, (Core.MethodInstance, Any, Vararg{Any}))
+for n in 0:6                         # the trampoline specializes on its arity
+    precompile(_invoke_under_policy, (Core.MethodInstance, Any, ntuple(_ -> Any, n)...))
+end
 precompile(_conf_family_slow, (Base.RefValue{IdDict{Any,Any}}, Any, Any))
 
 """
