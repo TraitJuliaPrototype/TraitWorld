@@ -31,10 +31,30 @@ function _hooks_init!()
     end
     ok || return nothing
     get(ENV, "JULIA_TW_HOOKS", "1") == "0" && return nothing
-    ccall(:jl_set_method_definition_hook, Cvoid, (Any,), _on_method_definition)
-    ccall(:jl_set_image_methods_hook, Cvoid, (Any,), _on_image_methods)
+    ccall(:jl_set_method_definition_hook, Cvoid, (Any,), _on_method_definition_hook)
+    ccall(:jl_set_image_methods_hook, Cvoid, (Any,), _on_image_methods_hook)
     _HAS_DEF_HOOK[] = true
     return nothing
+end
+
+# The runtime calls the hooks at every load and definition. Their checks run under the facts
+# policy (`_latest_under_policy`), compiled into TraitWorld's image: native code would be
+# invalidated by the very loads it watches, and compiled again at the next one (0.82 s over a
+# load of CSV and DataFrames, session 26). If the policy's path fails, the native check runs,
+# called dynamically so that these functions' own code keeps no edge into it.
+function _on_image_methods_hook(ms::Vector{Any}, pkg::String)
+    try
+        return _latest_under_policy(_on_image_methods, ms, pkg)
+    catch
+        return Base.invokelatest(_on_image_methods, ms, pkg)
+    end
+end
+function _on_method_definition_hook(m::Method, after::Bool)
+    try
+        return _latest_under_policy(_on_method_definition, m, after)
+    catch
+        return Base.invokelatest(_on_method_definition, m, after)
+    end
 end
 
 # --- the index of operations served by defaults -----------------------------------------

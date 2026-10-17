@@ -31,8 +31,18 @@ function __init__()
     _FACTS_DEBUG[] = get(ENV, "JULIA_TW_FACTS_DEBUG", "0") == "1"
     _COMPILER_WORLD[] = Base.get_world_counter()
     _INLINER_KEEPS_CI[] = _inliner_keeps_ci() && get(ENV, "JULIA_TW_NOINLINE", "0") != "1"
-    push!(Base.package_callbacks, _on_package_load)
+    push!(Base.package_callbacks, _on_package_load_callback)
     _register_type_printers()
+end
+
+"The package callback: `_on_package_load` under the policy, for the reason the hooks run there (hooks.jl)."
+function _on_package_load_callback(id::Base.PkgId)
+    try
+        _latest_under_policy(_on_package_load, id)
+    catch
+        Base.invokelatest(_on_package_load, id)
+    end
+    return nothing
 end
 
 """
@@ -163,9 +173,18 @@ if ccall(:jl_generating_output, Cint, ()) == 1
                 Tuple{typeof(_builder_for), Vector{Any}, DataType},
                 Tuple{typeof(worker_problems), DataType},
                 Tuple{typeof(_check_concrete), DataType},
-                Tuple{typeof(_finish_module), Module})
+                Tuple{typeof(_finish_module), Module},
+                Tuple{typeof(_on_image_methods), Vector{Any}, String},          # what the runtime calls at loads
+                Tuple{typeof(_on_method_definition), Method, Bool},
+                Tuple{typeof(_on_package_load), Base.PkgId})
         facts_codeinstance(sig)
     end
+    precompile(_facts_call, (typeof(_on_image_methods), Vector{Any}, String))
+    precompile(_facts_call, (typeof(_on_method_definition), Method, Bool))
+    precompile(_facts_call, (typeof(_on_package_load), Base.PkgId))
+    precompile(_on_image_methods_hook, (Vector{Any}, String))
+    precompile(_on_method_definition_hook, (Method, Bool))
+    precompile(_on_package_load_callback, (Base.PkgId,))
 end
 
 end
