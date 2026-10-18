@@ -499,16 +499,30 @@ end
 _sig_reps(@nospecialize(sig)) = join([string(nameof(v.parameters[1]), " at ", v.parameters[3])
                                       for T in sig.parameters if _istobj(T) for v in T.parameters[2].parameters], ", ")
 
-"Run concrete mode for a worker signature, per its function's level: warn once, or throw."
+"""
+Run concrete mode for a worker signature, per its function's level: warn once, or throw. Two checks:
+abstract values on normal paths, traced to their root causes, and the fully-typed certificate (no
+run-time site on a normal path, in the worker and in what it reaches).
+"""
 function _check_concrete(@nospecialize(sig))
     F = _worker_ftype(sig)
     f = F.instance
     lv = Base.invokelatest(concrete_level, f)::Symbol
     lv === :off && return nothing
     fs = concrete_findings(sig)
-    isempty(fs) && return nothing
-    lv === :error && throw(AbstractTypeError(nameof(f), _sig_reps(sig), fs))
-    @warn "@warn_on_abstract: " * sprint(_print_findings, nameof(f), _sig_reps(sig), fs)
+    if !isempty(fs)
+        lv === :error && throw(AbstractTypeError(nameof(f), _sig_reps(sig), fs))
+        @warn "@warn_on_abstract: " * sprint(_print_findings, nameof(f), _sig_reps(sig), fs)
+    end
+    F === typeof(Core.kwcall) && return nothing          # keyword workers: certified through their entry
+    cert = try
+        _worker_certificate(sig)
+    catch
+        nothing                                         # the walk cannot follow this code: no certificate
+    end
+    (cert === nothing || isfullytyped(cert)) && return nothing
+    lv === :error && throw(NotFullyTypedError(cert))
+    @warn "@warn_on_abstract: " * sprint(show, MIME"text/plain"(), cert)
     return nothing
 end
 

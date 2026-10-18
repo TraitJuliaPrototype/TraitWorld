@@ -15,7 +15,8 @@ using Serialization: Serialization
 export Trait, Callable, CallMode, DynamicCall, CompiledCall, compiled_call, dynamic_call, TObj, Dynamic, DynamicFn, dynamic_fn,
        @trait, @implement, @trait_module, @workload,
        TraitBoundError, TraitUseError, ImplementError, OwnershipError, verify_main, isclosed,
-       @warn_on_abstract, @error_on_abstract, AbstractTypeError, check_concrete, check_definitions, conforms, withfields
+       @warn_on_abstract, @error_on_abstract, AbstractTypeError, check_concrete, check_definitions, conforms, withfields,
+       fully_typed, isfullytyped, FullyTypedReport, NotFullyTypedError
 
 function __init__()
     empty!(_NOT_EXTENSIONS)
@@ -59,6 +60,7 @@ include("trait_module.jl")
 include("checks.jl")
 include("verify.jl")
 include("concrete.jl")
+include("certificate.jl")
 include("defcheck.jl")
 include("hooks.jl")
 include("strict.jl")
