@@ -314,8 +314,8 @@ mutable struct _Witness           # held by reference: a dynamic value is two wo
 end
 "This process's token for witness tables (set when TraitWorld is initialized)."
 const _WIT_SESSION = Ref{UInt}(0)
-"Whether dynamic values call through witness tables (`JULIA_TW_WITNESS=0`: always the dispatching path, for comparison)."
-const _WIT_ON = Ref(true)
+"Whether dynamic values call through witness tables (`JULIA_TW_WITNESS=1`; off by default, since a witness pointer runs in the latest world, not the caller's)."
+const _WIT_ON = Ref(false)
 const _WIT_TABLES = IdDict{Any,_Witness}()
 "An operation's declarations for witness tables: `(f, argument types, result type)` per declaration, or `nothing` where the dispatching path stays (constructor operations); `@trait` defines it."
 _wit_decls(@nospecialize(F)) = ()
