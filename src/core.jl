@@ -308,9 +308,9 @@ call for that type, shared by all dynamic values of the pair. The pointers are t
 `session` keeps a table stored in an image (a dynamic value made at precompile time) from being
 used in another process; such a value takes the dispatching path.
 """
-struct _Witness
-    session::UInt
-    ptrs::Memory{Ptr{Cvoid}}
+mutable struct _Witness           # held by reference: a dynamic value is two words, the object and its table
+    const session::UInt
+    const ptrs::Memory{Ptr{Cvoid}}
 end
 "This process's token for witness tables (set when TraitWorld is initialized)."
 const _WIT_SESSION = Ref{UInt}(0)
