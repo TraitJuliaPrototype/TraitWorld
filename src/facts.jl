@@ -13,9 +13,6 @@
 
 const CC = Base.Compiler
 
-"Declared here, defined with dynamic values (core.jl): the compiler's code compares against it."
-function _dyn_keys_now end
-
 "The cache owner of code compiled under the trait world's policy."
 struct FactsOwner end
 
@@ -182,9 +179,6 @@ function CC.concrete_eval_eligible(interp::FactsInterp, @nospecialize(f), result
                                           arginfo::CC.ArgInfo, sv::CC.AbsIntState)
     _policy_on(interp) || return r
     (r === :concrete_eval || r === :semi_concrete_eval) || return r
-    # the keys of dynamic values known at the caller's compile time: read deliberately without an
-    # edge (a later key only reaches the witness call), so its run-time sites do not matter
-    f === _dyn_keys_now && return r
     edge = result.edge
     edge isa Core.CodeInstance && _has_runtime_sites(edge) && !_julia_asserted_foldable(edge) && return :none
     return r

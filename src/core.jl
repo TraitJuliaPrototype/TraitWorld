@@ -95,9 +95,8 @@ View{X}(w::W, r) where {X,W} = View{X,W,typeof(r),0,Tuple{typeof(r)}}(w, ismutab
 
 "The implementing value a view stands for: the user's object, or its forwarding field, read now (held for an immutable type)."
 @inline function _rep(v::View{X,W,K}) where {X,W,K}
-    o = getfield(v, :o)
-    o === nothing && return getfield(getfield(v, :parts), 1)
-    return _loadpart(_impl(K), o, getfield(v, :r))
+    getfield(v, :o) === nothing && return getfield(getfield(v, :parts), 1)
+    return _loadpart(_impl(K), v, getfield(v, :r))
 end
 "The key of a view type."
 _reptype(::Type{<:AbstractView{X,W,K}}) where {X,W,K} = K
@@ -140,37 +139,41 @@ function _storage(@nospecialize(T))
     return :ref
 end
 "A part of the user's object, of exactly the type `T` in the key: the object itself, or its field at slot `s`."
-@inline function _loadpart(::Type{T}, o, s::Slot) where {T}
-    getfield(s, :off) < 0 && return o::T
-    return _loadfield(T, o, s)
+# The view is passed, not the user's object it holds (`o::Any`): every call on this path then has
+# concrete argument types, a fact, and the object is read only by builtins and intrinsics.
+@inline function _loadpart(::Type{T}, v::View, s::Slot) where {T}
+    getfield(s, :off) < 0 && return getfield(v, :o)::T
+    return _loadfield(T, v, s)
 end
 "No implementing type (every operation served by a default): there is no implementing value."
-@inline _loadpart(::Type{Nothing}, o, s::Slot) = nothing
+@inline _loadpart(::Type{Nothing}, v::View, s::Slot) = nothing
 "Whether the runtime has the field-offset intrinsics (patched Julia, julia-support.md piece 3)."
 const _HAS_FIELD_INTRINSICS = isdefined(Core.Intrinsics, :getfield_at_offset)
 
-@generated function _loadfield(::Type{T}, o, s::Slot) where {T}
+@generated function _loadfield(::Type{T}, v::View, s::Slot) where {T}
     k = _storage(T)
     k === :singleton && return :($(T.instance))
     # the runtime's intrinsic: a load at the offset with Julia's alias metadata, and the null check
     _HAS_FIELD_INTRINSICS && k in (:bits, :ref) &&
-        return :(Core.Intrinsics.getfield_at_offset(o, $T, getfield(s, :off))::$T)
+        return :(Core.Intrinsics.getfield_at_offset(getfield(v, :o), $T, getfield(s, :off))::$T)
+    o = :(getfield(v, :o))
     # no GC.@preserve: the trait object holding `o` is live for the call, and no safepoint lies
     # between computing the address and the load (a preserve region boxes values in loops)
-    k === :bits && return :(_tbaa_load(Ptr{$T}(_objptr(o) + getfield(s, :off))))
-    k === :other && return :(getfield(o, getfield(s, :idx))::$T)
+    k === :bits && return :(_tbaa_load(Ptr{$T}(_objptr($o) + getfield(s, :off))))
+    k === :other && return :(getfield($o, getfield(s, :idx))::$T)
     return quote
-        p = _tbaa_load(Ptr{Ptr{Cvoid}}(_objptr(o) + getfield(s, :off)))
+        p = _tbaa_load(Ptr{Ptr{Cvoid}}(_objptr($o) + getfield(s, :off)))
         p == C_NULL && throw(UndefRefError())
         unsafe_pointer_to_objref(p)::$T
     end
 end
 "Write a field of the user's (mutable) object: an isbits field at its offset, any other through `setfield!` and its write barrier."
-@generated function _storefield(::Type{T}, o, s::Slot, x) where {T}
+@generated function _storefield(::Type{T}, v::View, s::Slot, x) where {T}
+    o = :(getfield(v, :o))
     _HAS_FIELD_INTRINSICS && _storage(T) in (:bits, :ref) &&
-        return :(Core.Intrinsics.setfield_at_offset(o, $T, getfield(s, :off), x::$T); nothing)
-    _storage(T) === :bits && return :(_tbaa_store(Ptr{$T}(_objptr(o) + getfield(s, :off)), x::$T); nothing)
-    return :(setfield!(o, getfield(s, :idx), x::$T); nothing)
+        return :(Core.Intrinsics.setfield_at_offset($o, $T, getfield(s, :off), x::$T); nothing)
+    _storage(T) === :bits && return :(_tbaa_store(Ptr{$T}(_objptr($o) + getfield(s, :off)), x::$T); nothing)
+    return :(setfield!($o, getfield(s, :idx), x::$T); nothing)
 end
 
 """
@@ -298,81 +301,6 @@ code that computes it (whose native code a load may invalidate).
 
 # --- dynamic values ----------------------------------------------------------
 
-# --- witness tables: a dynamic value's operations as pointers ------------------
-
-"""
-A dynamic value's witness table: for each operation of its trait (in declaration order), a pointer
-to code compiled for the operation at the value's trait-object type, with the declared argument
-and result types (Swift's witness tables; `Erased`'s technique). Filled on an operation's first
-call for that type, shared by all dynamic values of the pair. The pointers are this process's:
-`session` keeps a table stored in an image (a dynamic value made at precompile time) from being
-used in another process; such a value takes the dispatching path.
-"""
-mutable struct _Witness           # held by reference: a dynamic value is two words, the object and its table
-    const session::UInt
-    const ptrs::Memory{Ptr{Cvoid}}
-end
-"This process's token for witness tables (set when TraitWorld is initialized)."
-const _WIT_SESSION = Ref{UInt}(0)
-"Whether dynamic values call through witness tables (`JULIA_TW_WITNESS=1`; off by default, since a witness pointer runs in the latest world, not the caller's)."
-const _WIT_ON = Ref(false)
-const _WIT_TABLES = IdDict{Any,_Witness}()
-"An operation's declarations for witness tables: `(f, argument types, result type)` per declaration, or `nothing` where the dispatching path stays (constructor operations); `@trait` defines it."
-_wit_decls(@nospecialize(F)) = ()
-"The witness table of trait `X` for trait objects of type `typeof(t)` (empty pointers, filled on first calls)."
-@noinline function _wit_table(@nospecialize(X), @nospecialize(t))
-    key = (X, typeof(t))
-    w = @lock _LOCK get(_WIT_TABLES, key, nothing)
-    w === nothing || return w
-    n = length(_wit_decls(_family(X)))
-    ptrs = Memory{Ptr{Cvoid}}(undef, n::Int)
-    fill!(ptrs, C_NULL)
-    w = _Witness(_WIT_SESSION[], ptrs)
-    w = @lock _LOCK get!(_WIT_TABLES, key, w)
-    @lock _DYN_KEYS_LOCK begin
-        ks = get!(Vector{Any}, _DYN_KEYS, X)
-        any(K -> K === typeof(t), ks) || push!(ks, typeof(t))
-    end
-    return w
-end
-"""
-The trait-object types dynamic values of each trait have been made with, in order of first
-appearance: the keys a call site on a dynamic value branches on when it is compiled (`_dyn_call`).
-Only grows; never cleared (it holds types, no pointers).
-"""
-const _DYN_KEYS = IdDict{Any,Vector{Any}}()
-const _DYN_KEYS_LOCK = ReentrantLock()    # its own: generators read it, and must see it defined
-"The most keys a call site on a dynamic value branches on (Julia's own bound on union splitting)."
-const _DYN_MAX_BRANCHES = 4
-_dyn_keys(@nospecialize(X)) = @lock _DYN_KEYS_LOCK copy(get(_DYN_KEYS, X, Any[]))
-"The callee behind a witness pointer: the operation at the trait object's own type, its result asserted."
-struct _WitOp{F,RT} end
-# fixed arities: a varargs callee would not be specialized behind the pointer (as `_CallWrap`)
-(::_WitOp{F,RT})(o) where {F,RT} = F.instance(o)::RT
-(::_WitOp{F,RT})(o, a) where {F,RT} = F.instance(o, a)::RT
-(::_WitOp{F,RT})(o, a, b) where {F,RT} = F.instance(o, a, b)::RT
-(::_WitOp{F,RT})(o, a, b, c) where {F,RT} = F.instance(o, a, b, c)::RT
-(::_WitOp{F,RT})(o, a, b, c, d) where {F,RT} = F.instance(o, a, b, c, d)::RT
-(::_WitOp{F,RT})(o, a, b, c, d, e) where {F,RT} = F.instance(o, a, b, c, d, e)::RT
-(::_WitOp{F,RT})(o, a, b, c, d, e, g) where {F,RT} = F.instance(o, a, b, c, d, e, g)::RT
-_wdecl(@nospecialize(T)) = isconcretetype(T) ? _cdecl(T) : Any        # callee side
-_wctype(@nospecialize(T)) = isconcretetype(T) ? _ctype(T) : Any       # caller side
-_wret(@nospecialize(T)) = isconcretetype(T) ? _ctype(T) : Any
-@generated function _wptr(::Type{W}, ::Type{TO}, ::Type{AT}) where {W,TO,AT}
-    RT = W.parameters[2]
-    return :(@cfunction($(W()), $(_wret(RT)), (Ref{$TO}, $(map(_wdecl, AT.parameters)...))))
-end
-"Fill pointer `k` of witness table `w` for trait object `t` (the first call of that operation for its type)."
-@noinline function _wit_fill!(w::_Witness, k::Int, @nospecialize(f), @nospecialize(AT), @nospecialize(RT), @nospecialize(t))
-    p = try
-        _wptr(_WitOp{typeof(f), RT}, typeof(t), AT)
-    catch
-        C_NULL
-    end
-    p = p isa Ptr{Cvoid} ? p : C_NULL
-    @inbounds w.ptrs[k] = p
-    return p::Ptr{Cvoid}
-end
 """
     Dynamic{X}
 
@@ -386,11 +314,9 @@ its representation runs.
 """
 struct Dynamic{X}
     t::Any
-    w::_Witness          # X's operations compiled for the trait object's type: one indirect call each
     function Dynamic{X}(t::TObj{T}) where {X,T}
         _carries_static(T, X) || Base.inferencebarrier(_dyn_refuse)(X, T)
-        tn = _narrow(X, t)               # the trait object is the user's object: a kept value follows its fields
-        return new{X}(tn, _wit_table(X, tn))
+        return new{X}(_narrow(X, t))     # the trait object is the user's object: a kept value follows its fields
     end
 end
 """
@@ -429,127 +355,13 @@ Base.convert(::Type{Dynamic{X}}, t::TObj) where {X} = Dynamic{X}(t)
 @inline opened(d::Dynamic) = getfield(d, :t)
 
 """
-Operation `k` of a dynamic value's trait, declared with argument types `AT` and result type `RT`.
-Re-inferred at every call site (`@constprop :aggressive`), so that the keys dynamic values of `X`
-have been made with *when the caller is compiled* (`_dyn_keys_now`, evaluated at compile time) select
-the expansion of `_dyn_call_keyed`: an exact type test per key, each calling the operation at that
-type (its worker inlines), then the witness call. A key that appears later only reaches the witness
-call: no compiled code depends on the registry (it is read without an edge).
+Operation `k` of a dynamic value's trait, declared with argument types `AT` and result type `RT`:
+one call at the trait object's run-time type, its result asserted to the declared type. In code
+compiled by facts, Julia dispatches it to code compiled by facts (part (C)); splitting it over the
+declared conformances at the call site is part (D), in Julia's compiler.
 """
-Base.@constprop :aggressive @inline function _dyn_call(dyn::Dynamic{X}, valk::Val, f::F, ::Type{AT}, ::Type{RT}, args::Vararg{Any,N}) where {X,F,AT,RT,N}
-    return _dyn_call_keyed(dyn, valk, f, AT, RT, _dyn_keys_now(X), args...)
-end
-"""
-The keys of `X` known now, as a tuple type (at most `_DYN_MAX_BRANCHES`): the trait-object types of
-the conformances declared so far (`_note_conformances!`), then those dynamic values were made with.
-Read at the caller's compile time, deliberately without an edge: a later conformance only reaches
-the witness call. Reads registries only, and never throws (a compile-time evaluation that throws
-would make inference take the call as throwing).
-"""
-Base.@assume_effects :foldable function _dyn_keys_now(::Type{X}) where {X}
-    ks = Any[]
-    try
-        decl = @lock _DYN_KEYS_LOCK copy(get(_DECL_KEYS, _family(X), Any[]))
-        for K in decl
-            any(k -> k === K, ks) || push!(ks, K)
-        end
-        for K in _dyn_keys(X)
-            any(k -> k === K, ks) || push!(ks, K)
-        end
-    catch
-        empty!(ks)
-    end
-    return Tuple{ks[1:min(length(ks), _DYN_MAX_BRANCHES)]...}
-end
-"Per trait family, the trait-object types of its declared conformances at concrete types (filled at declarations and package loads)."
-const _DECL_KEYS = IdDict{Any,Vector{Any}}()
-const _DECL_SEEN = Base.IdSet{Any}()
-"""
-Note the conformances declared since the last call (methods of `implementation` at a concrete type):
-the trait-object type a `Dynamic` of the trait keeps for that type, inferred along the path
-`Dynamic{X}(x)` takes (in the checks' own cache), at top level, where inference may run. A type
-whose trait object is not inferred concretely is left out. Called after each declaration
-(`_bump!`) and when a package is loaded (images do not run top-level code again).
-"""
-function _note_conformances!()
-    try
-        for m in methods(implementation)
-            (@lock _DYN_KEYS_LOCK m in _DECL_SEEN) && continue
-            @lock _DYN_KEYS_LOCK push!(_DECL_SEEN, m)
-            sig = Base.unwrap_unionall(m.sig)
-            (sig isa DataType && length(sig.parameters) == 3) || continue
-            A, B = sig.parameters[2], sig.parameters[3]
-            (A isa DataType && A <: Type && B isa DataType && B <: Type) || continue
-            XA, T = A.parameters[1], B.parameters[1]
-            (T isa DataType && isconcretetype(T)) || continue
-            F = _family(XA)
-            TO = try
-                Base.infer_return_type(_dyn_tobj, Tuple{Type{F}, T}; _check_kw()...)
-            catch
-                Any
-            end
-            (TO isa DataType && isconcretetype(TO) && TO <: TObj) || continue
-            @lock _DYN_KEYS_LOCK begin
-                ks = get!(Vector{Any}, _DECL_KEYS, F)
-                any(k -> k === TO, ks) || push!(ks, TO)
-            end
-        end
-    catch
-    end
-    return nothing
-end
-"The trait object `Dynamic{X}(x)` keeps, for inference of its type (the same steps)."
-function _dyn_tobj(::Type{X}, x) where {X}
-    v = _assemble(TraitList{Tuple{_family(X)}}(), x)
-    ismutable(x) || (v = _with_object(v, x))
-    return _narrow(X, v)
-end
-# A branch's call of the operation at a known key: a call of fixed arity, never inlined, so that a
-# recursion through dynamic values (a scene graph, a tree) closes its cycle here, with Julia's
-# specialized calling convention, and not at a varargs call inside, which boxes its arguments
-@noinline _dyn_hop(f::F, t) where {F} = f(t)
-@noinline _dyn_hop(f::F, t, a) where {F} = f(t, a)
-@noinline _dyn_hop(f::F, t, a, b) where {F} = f(t, a, b)
-@noinline _dyn_hop(f::F, t, a, b, c) where {F} = f(t, a, b, c)
-@noinline _dyn_hop(f::F, t, a, b, c, d) where {F} = f(t, a, b, c, d)
-@noinline _dyn_hop(f::F, t, a, b, c, d, e) where {F} = f(t, a, b, c, d, e)
-@noinline _dyn_hop(f::F, t, a, b, c, d, e, g) where {F} = f(t, a, b, c, d, e, g)
-@generated function _dyn_call_keyed(dyn::Dynamic{X}, ::Val{k}, f::F, ::Type{AT}, ::Type{RT}, ::Type{K}, args::Vararg{Any,N}) where {X,k,F,AT,RT,K,N}
-    slow = :(_dyn_assert(f(opened(dyn), args...), RT))
-    # a trimmed build makes no pointers at run time: it dispatches, to the targets verify_main enumerates
-    (length(AT.parameters) == N <= 6 && !_closed_build()) || return slow
-    cts = map(_wctype, AT.parameters)
-    argex = [:(args[$i]) for i in 1:N]
-    # a key whose operation is the user's own method (no default, generic or table): its
-    # representation goes straight to that method, with fixed arity, so it inlines, and a recursion
-    # through dynamic values closes its cycle at that call, not through the varargs machinery
-    # (whose splat into `_dispatch` would box every argument of every call)
-    direct = !any(T -> T === Any, AT.parameters)
-    op = QuoteNode(nameof(F.instance))
-    branches = [direct ?
-        :(if t isa $TO
-              v = viewof(t::$TO, $X)
-              return (_direct_ok(getfield(v, :w), Val($op)) ? f(_rep(v), $(argex...)) : _dyn_hop(f, t::$TO, $(argex...)))::RT
-          end) :
-        :(t isa $TO && return _dyn_hop(f, t::$TO, $(argex...))::RT) for TO in K.parameters]
-    return quote
-        Base.@_inline_meta
-        t = getfield(dyn, :t)
-        if args isa AT
-            $(branches...)
-        end
-        w = getfield(dyn, :w)
-        if args isa AT && w.session === _WIT_SESSION[] && _WIT_ON[] && $k <= length(w.ptrs)
-            p = @inbounds w.ptrs[$k]
-            p == C_NULL && (p = _wit_fill!(w, $k, f, AT, RT, t))
-            if p != C_NULL
-                x = ccall(p, $(_wret(RT)), (Any, $(cts...)), t, $(argex...))
-                return x::RT
-            end
-        end
-        return $slow
-    end
-end
+@inline _dyn_call(dyn::Dynamic, ::Val, f::F, ::Type{AT}, ::Type{RT}, args::Vararg{Any,N}) where {F,AT,RT,N} =
+    f(opened(dyn), args...)::RT          # the assertion a builtin: the declared type holds downstream
 
 # equal when they keep the same trait object: same representation type, same implementation, egal data
 Base.:(==)(a::Dynamic{X}, b::Dynamic{X}) where {X} = getfield(a, :t) === getfield(b, :t)
@@ -675,9 +487,8 @@ _fieldkeytype(::Type{X}, ::Val{f}, ::Type{K}) where {X,f,K} = K <: Key ? _keyfie
     return _fget(X, Val(f), getfield(v, :w), v, _reptype(typeof(v)))
 end
 @inline function _fget(::Type{X}, ::Val{f}, w, v, ::Type{K}) where {X,f,K}
-    o = getfield(v, :o)
-    o === nothing && return getfield(getfield(v, :parts), 1 + _fieldpos(X, Val(f)))
-    return _loadpart(_fieldkeytype(X, Val(f), K), o, getfield(v, :fs)[_fieldpos(X, Val(f))])
+    getfield(v, :o) === nothing && return getfield(getfield(v, :parts), 1 + _fieldpos(X, Val(f)))
+    return _loadpart(_fieldkeytype(X, Val(f), K), v, getfield(v, :fs)[_fieldpos(X, Val(f))])
 end
 "A field `f` of trait `X` written on a trait object: a store into the user's object, as `u.f = x` in plain Julia."
 @inline function fieldset!(::Type{X}, ::Val{f}, t::TObj, x) where {X,f}
@@ -685,9 +496,8 @@ end
     K = _reptype(typeof(v))
     T = _fieldkeytype(X, Val(f), K)
     y = x::T
-    o = getfield(v, :o)
-    o === nothing && Base.inferencebarrier(_readonly)(X, f)     # the conformance check refuses writable fields on immutable types
-    _storefield(T, o, getfield(v, :fs)[_fieldpos(X, Val(f))], y)
+    getfield(v, :o) === nothing && Base.inferencebarrier(_readonly)(X, f)     # the conformance check refuses writable fields on immutable types
+    _storefield(T, v, getfield(v, :fs)[_fieldpos(X, Val(f))], y)
     return y
 end
 

@@ -296,10 +296,7 @@ macro trait(header, block = nothing)
                              Expr(:block, :($TW.opcall($name, Val($key), $(d.fexpr), t, args...))))))
     end
     # the operations on a dynamic value: dispatch on the trait object it keeps, assert the
-    # declared result type where it does not depend on the representation
-    # an operation with a declared result type independent of the representation goes through the
-    # value's witness table (`_dyn_call`): one indirect call, typed by the declaration
-    witdecls = Any[]
+    # declared result type where it does not depend on the representation (`_dyn_call`)
     for (k, d) in enumerate(decls)
         syms = [gensym(:a) for _ in d.args]
         dep(t) = _mentions(t, Rsym) || any(p -> _mentions(t, p), pnames)
@@ -307,16 +304,13 @@ macro trait(header, block = nothing)
         # a constructor operation (result R) gives a dynamic value of the same conformance
         call = :($(d.fexpr)($TW.opened(dyn), $(syms...)))
         if d.ret === Rsym
-            push!(witdecls, :nothing)
             rhs = :($TW._dyn_like(dyn, $call))
         else
             AT = :(Tuple{$([dep(t) ? :Any : t for (_, t) in d.args]...)})
-            push!(witdecls, :(($(d.fexpr), $AT, $retx)))
             rhs = :($TW._dyn_call(dyn, Val($k), $(d.fexpr), $AT, $retx, $(syms...)))
         end
         push!(out, :(@inline $(d.fexpr)(dyn::$TW.Dynamic{<:$name}, $(syms...)) = $rhs))
     end
-    push!(out, :($TW._wit_decls(::Type{$name}) = ($(witdecls...),)))
     # fields: properties of the representation, or (type R) the projection, read through a lens when written
     if !isempty(fdecls)
         push!(out, :($TW.trait_fields(::Type{$name}) = $(Tuple((f, w) for (f, _, w) in fdecls))))

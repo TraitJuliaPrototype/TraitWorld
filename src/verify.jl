@@ -342,10 +342,16 @@ mutable struct _Walk
     dyn_made::IdDict{Any,Vector{Any}}           # trait family => trait object types kept in its dynamic values
     dyn_ops::Vector{Any}                        # (site, family, operation, other argument types): resolved after the walk
     dyn_calls::Vector{Any}                      # (site, f, choices; a family where an argument is an opened dynamic value, caller)
+    facts::Base.IdSet{Core.MethodInstance}      # reached from code compiled by facts: scanned as facts code (Julia's part (B))
 end
 _Walk(world::UInt) = _Walk(world, IdDict{Core.MethodInstance,_Scan}(), Base.IdSet{Core.MethodInstance}(), Any[],
                            Base.IdSet{Core.MethodInstance}(), Base.IdSet{Core.MethodInstance}(),
-                           IdDict{Any,Vector{Any}}(), Any[], Any[])
+                           IdDict{Any,Vector{Any}}(), Any[], Any[], Base.IdSet{Core.MethodInstance}())
+"Whether Julia compiles `m` by facts (a method of a trait module, not a boundary; Julia's part (B))."
+_facts_method(m) = m isa Method && isdefined(Base.Compiler, :FACTS_OWNER) && ccall(:jl_method_is_facts, Cint, (Any,), m) != 0
+"The interpreter that compiles `mi` as it runs: by facts when it is a facts method or reached from facts code."
+_scan_interp(mi::Core.MethodInstance, cx) = (_facts_method(mi.def) || mi in cx.facts) ?
+    Base.Compiler.NativeInterpreter(cx.world; facts = true, owner = Base.Compiler.FACTS_OWNER) : nothing
 
 """
 A dynamic value made here (note "AOT": a `Dynamic` value adds the conformances whose types reach
@@ -457,8 +463,7 @@ end
 # closed world they are switched off and verify_main runs them at build time.
 _machinery_method(m::Method) = m.module === TraitWorld && m.name in
     (:_check_once, :_latest_under_policy, :_conformance_slow, :_needed_slow, :_builder_for, :worker_problems, :_rule3_error,
-     :_closed_miss, :_witness, :witness, :proj_lookup, :_no_worker_error, :_refuse_overrides, :_merge_dyn,
-     :_wit_table, :_wit_fill!)     # witness tables: a session's pointers; a trimmed build dispatches (`_dyn_call`)
+     :_closed_miss, :_witness, :witness, :proj_lookup, :_no_worker_error, :_refuse_overrides, :_merge_dyn)
 
 const _ENTER = Ref{Any}(nothing)
 const _ENTER_CALLABLE = Ref{Any}(nothing)
@@ -548,7 +553,7 @@ function _scan(mi::Core.MethodInstance, cx::_Walk)
     m = mi.def
     m isa Method || return _Scan(invokes, sites, false, true)
     res = try
-        Base.code_typed_by_type(mi.specTypes; optimize = true, debuginfo = :source, world)
+        Base.code_typed_by_type(mi.specTypes; optimize = true, debuginfo = :source, world, interp = _scan_interp(mi, cx))
     catch
         nothing
     end
@@ -840,6 +845,12 @@ function _scan(mi::Core.MethodInstance, cx::_Walk)
             hole(:builtin, i, :invoke_modify, nothing)
         end
     end
+    # code compiled by facts calls code compiled by facts (part (B)): its callees are scanned so
+    if _facts_method(mi.def) || mi in cx.facts
+        for (cmi, _, _) in invokes
+            push!(cx.facts, cmi)
+        end
+    end
     return _Scan(invokes, sites, throws, returns)
 end
 
@@ -849,7 +860,8 @@ function _has_native(mi::Core.MethodInstance, world::UInt)
     isdefined(mi, :cache) || return false
     ci = mi.cache
     while true
-        ci.owner === nothing && _isvalid(ci, world) && ci.invoke != C_NULL && return true
+        # plain Julia's code, or code compiled by facts (Julia's owner `:facts`, part (B)), which dispatch runs
+        (ci.owner === nothing || ci.owner === :facts) && _isvalid(ci, world) && ci.invoke != C_NULL && return true
         isdefined(ci, :next) || return false
         ci = ci.next
     end

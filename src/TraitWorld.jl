@@ -23,7 +23,7 @@ export Trait, Callable, CallMode, DynamicCall, CompiledCall, compiled_call, dyna
 
 function __init__()
     empty!(_NOT_EXTENSIONS)
-    FACTS[] = get(ENV, "JULIA_TW_FACTS", "1") != "0"
+    FACTS[] = get(ENV, "JULIA_TW_FACTS", _compiler_facts() ? "0" : "1") != "0"   # the compiler compiles trait modules by facts: TraitWorld's own policy is off
     _vc_init!()
     _hooks_init!()
     _strict_init!()
@@ -33,9 +33,6 @@ function __init__()
     _RUNTIME_POLICY[] = get(ENV, "JULIA_TW_RUNTIME_SITES", "policy") != "native"
     _COMPILER_WORLD[] = Base.get_world_counter()
     _SESSION[] = _session_token()
-    _WIT_SESSION[] = _SESSION[]
-    _WIT_ON[] = get(ENV, "JULIA_TW_WITNESS", "0") == "1"  # off by default: a witness pointer runs in the latest world (review 2026-10-18, finding 2)
-    empty!(_WIT_TABLES)
     _INLINER_KEEPS_CI[] = _inliner_keeps_ci() && get(ENV, "JULIA_TW_NOINLINE", "0") != "1"
     push!(Base.package_callbacks, _on_package_load_callback)
     _register_type_printers()

@@ -48,9 +48,9 @@ function Base.showerror(io::IO, e::PirateError)
     e.later && print(io, " (found after the definition by the safety net; the method was deleted again)")
 end
 
-"Code the mode protects: compiled under the facts policy, or a trait module's (an entry)."
+"Code the mode protects: compiled by facts (Julia's owner `:facts`, or TraitWorld's own policy), or a trait module's (an entry)."
 function _trait_world_code(ci::Core.CodeInstance)
-    ci.owner isa FactsOwner && return true
+    (ci.owner === :facts || ci.owner isa FactsOwner) && return true
     ci.owner === nothing || return false
     mi = Core.Compiler.get_ci_mi(ci)
     return mi.def isa Method && is_trait_world(mi.def.module)

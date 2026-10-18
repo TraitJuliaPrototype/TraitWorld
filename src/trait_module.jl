@@ -57,7 +57,15 @@ macro trait_module(m)
     return esc(Expr(:toplevel, _prologue()..., _transform_all(m.args)..., _epilogue()))
 end
 
-_prologue() = Any[:(const __trait_module__ = true),
+"""
+Whether Julia's compiler compiles trait modules by facts (the module option `facts`, part (B) of
+the plan for the policy in the compiler): then a trait module declares it, and TraitWorld's own
+policy (`FactsInterp`) is off. `JULIA_TW_COMPILER_FACTS=0` keeps TraitWorld's policy, for comparison.
+"""
+_compiler_facts() = isdefined(Base.Compiler, :FACTS_OWNER) && get(ENV, "JULIA_TW_COMPILER_FACTS", "1") != "0"
+
+_prologue() = Any[(_compiler_facts() ? (:(Base.Experimental.@compiler_options facts=true),) : ())...,
+                  :(const __trait_module__ = true),
                   :(const __tw_entries__ = Dict{Any,Vector{Any}}()),
                   :(const __tw_plain__ = Dict{Any,Vector{Any}}()),
                   :(const __tw_extended__ = Set{Any}()),          # other modules' functions given workers here
@@ -618,7 +626,10 @@ function _rewrite_fdef(mod::Module, ex)
         kept = Any[w for w in wheres if any(x -> x.kind in (:plain, :vararg) && x.ann !== nothing && _uses(x.ann, _wherevar(w)), args)]
         esig = haskw ? Expr(:call, fname, Expr(:parameters, Expr(:..., kwname)), eargs...) : Expr(:call, fname, eargs...)
         isempty(kept) || (esig = Expr(:where, esig, kept...))
-        # an ordinary method, inlined into a typed caller (keys-plan §6): there it runs at plain speed
+        # an ordinary method, inlined into a typed caller (keys-plan §6): there it runs at plain speed.
+        # It is the boundary (rule 2): compiled in its caller's mode, while the worker it calls is
+        # compiled by facts (`Expr(:meta, :facts, 0)`, read by Julia's compiler)
+        _compiler_facts() && pushfirst!(stmts, Expr(:meta, :facts, 0))
         push!(rest, Expr(:macrocall, GlobalRef(Base, Symbol("@inline")), LineNumberNode(0, :none),
                          Expr(:function, esig, Expr(:block, stmts...))))
         if entries !== nothing

@@ -76,7 +76,7 @@ implementation's predicate reads (`eltype` of a user type) must exist before the
 call, or be followed by `TraitWorld.refresh!()`.
 """
 const GENERATION = Ref{UInt}(1)
-_bump!() = (GENERATION[] += 1; _note_conformances!(); nothing)
+_bump!() = (GENERATION[] += 1; nothing)
 "Forget every cached conformance of the slow path: after defining methods a generic implementation's predicate reads."
 refresh!() = _bump!()
 
@@ -612,6 +612,9 @@ function (a model's right-hand side, a callback).
 """
 dynamic_fn(::Type{A}, ::Type{S}, f) where {A,S} = f isa DynamicFn{A,S} ? f : CObj{A,S}(Erased{A,S}(f isa CallAs ? f.f : f))
 
+"The trait list of `X`'s family, computed from `X` alone when the caller is specialized (a constant, so code compiled by facts needs no run-time site for it)."
+@generated _family_list(::Type{X}) where {X} = :($(TraitList{Tuple{_family(X)}}()))
+
 """
     Dynamic{X}(x)
 
@@ -620,7 +623,7 @@ library's own type (an integrator handed to callbacks as `Dynamic{IntegratorView
 """
 function Dynamic{X}(x) where {X}
     x isa TObj && return Dynamic{X}(x::TObj)
-    v = _assemble(TraitList{Tuple{_family(X)}}(), x)
+    v = _assemble(_family_list(X), x)
     v === NOTRAIT && throw(TraitBoundError("a $(typeof(x)) does not conform to $X"))
     ismutable(x) || (v = _with_object(v, x))           # kept: the whole value, also of an immutable type
     return Dynamic{X}(v)
