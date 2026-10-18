@@ -209,7 +209,7 @@ function conformance_problems(@nospecialize(X), @nospecialize(R), ops)
                 push!(problems, "`$op` has no method for $sig")
                 continue
             end
-            T = Base.infer_return_type(f, sig)
+            T = Base.infer_return_type(f, sig; _check_kw()...)
             if T === Union{}
                 push!(problems, "`$op` at $sig always throws (inferred `Union{}`): a fallback, not an implementation")
             elseif !(T <: D)
@@ -336,7 +336,7 @@ function _generic_problems(@nospecialize(X), k::Symbol, g::GenericRec, sub::Tupl
             A = _declared_args(X, op, R, N)
             all(isconcretetype, A.parameters) || continue
             D = _declared_ret(X, op, R, N)
-            T = Base.infer_return_type(generic_op, Tuple{Type{X},Val{k},Val{op},S,A.parameters...})
+            T = Base.infer_return_type(generic_op, Tuple{Type{X},Val{k},Val{op},S,A.parameters...}; _check_kw()...)
             if T === Union{}
                 push!(problems, "`$op` always throws at $R (inferred `Union{}`)")
             elseif !(T <: D)
@@ -553,7 +553,7 @@ end
 
 "The representation a projection returns: declared, or inferred (must be concrete)."
 function _rep_of(@nospecialize(f), @nospecialize(T), @nospecialize(Rdecl), Xs = ())
-    Rinf = Base.infer_return_type(f, Tuple{T})
+    Rinf = Base.infer_return_type(f, Tuple{T}; _check_kw()...)
     if Rdecl !== nothing
         Rinf <: Rdecl || throw(ImplementError("the projection of $T returns $Rinf, declared $Rdecl"))
         return Rdecl

@@ -226,7 +226,7 @@ function _keeps_sig(@nospecialize(sig), seen::Base.IdSet{Any})
     push!(seen, sig)
     world = Base.get_world_counter()
     res = try
-        Base.code_typed_by_type(sig; optimize = false, world)
+        Base.code_typed_by_type(sig; optimize = false, _check_kw(world)...)
     catch
         return true
     end

@@ -76,7 +76,7 @@ implementation's predicate reads (`eltype` of a user type) must exist before the
 call, or be followed by `TraitWorld.refresh!()`.
 """
 const GENERATION = Ref{UInt}(1)
-_bump!() = (GENERATION[] += 1; nothing)
+_bump!() = (GENERATION[] += 1; _note_conformances!(); nothing)
 "Forget every cached conformance of the slow path: after defining methods a generic implementation's predicate reads."
 refresh!() = _bump!()
 

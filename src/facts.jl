@@ -13,6 +13,9 @@
 
 const CC = Base.Compiler
 
+"Declared here, defined with dynamic values (core.jl): the compiler's code compares against it."
+function _dyn_keys_now end
+
 "The cache owner of code compiled under the trait world's policy."
 struct FactsOwner end
 
@@ -22,15 +25,38 @@ struct FactsInterp <: CC.AbstractInterpreter
     opt_params::CC.OptimizationParams
     inf_cache::Vector{CC.InferenceResult}
     codegen::IdDict{Core.CodeInstance,Core.CodeInfo}
+    owner::Any            # FactsOwner(); or the checks' own owner (`_CheckOwner`)
+    facts::Bool           # the policy's rules; off for the checks (plain inference, as before)
 end
 FactsInterp(world::UInt = Base.get_world_counter()) =
-    FactsInterp(world, CC.InferenceParams(), CC.OptimizationParams(), CC.InferenceResult[], IdDict{Core.CodeInstance,Core.CodeInfo}())
+    FactsInterp(world, CC.InferenceParams(), CC.OptimizationParams(), CC.InferenceResult[], IdDict{Core.CodeInstance,Core.CodeInfo}(), FactsOwner(), true)
+
+"The cache owner of the definition checks' inference: none of their results reaches the code that runs."
+struct _CheckOwner end
+"""
+The interpreter of the definition checks (return types, kept trait objects): plain inference rules,
+in its own cache. Native inference would cache what the checks infer, before any value exists: an
+operation on a dynamic value, compiled for running later, would then keep the keys of that moment
+(none). It is a `FactsInterp`, so the compiler's code already compiled for that type serves it.
+"""
+_check_interp(world::UInt = Base.get_world_counter()) =
+    FactsInterp(world, CC.InferenceParams(), CC.OptimizationParams(), CC.InferenceResult[], IdDict{Core.CodeInstance,Core.CodeInfo}(), _CheckOwner(), false)
+"Keywords for reflection by the definition checks: their own interpreter, unless another compiler serves reflection (`Compiler.activate!`)."
+function _check_kw(world::UInt = Base.get_world_counter())
+    R = Base.REFLECTION_COMPILER[]
+    R === CC && return (; world, interp = _check_interp(world))
+    # a compiler with the facts mode (experiments/factscompiler): its plain interpreter in its own cache
+    isdefined(R, :PlainRTInterp) && return (; world, interp = getglobal(R, :PlainRTInterp)(world))
+    return (; world)
+end
+"Whether `interp` applies the policy's rules."
+_policy_on(interp::FactsInterp) = _FACTS_POLICY[] && interp.facts
 
 CC.InferenceParams(i::FactsInterp) = i.inf_params
 CC.OptimizationParams(i::FactsInterp) = i.opt_params
 CC.get_inference_world(i::FactsInterp) = i.world
 CC.get_inference_cache(i::FactsInterp) = i.inf_cache
-CC.cache_owner(::FactsInterp) = FactsOwner()
+CC.cache_owner(i::FactsInterp) = i.owner
 CC.codegen_cache(i::FactsInterp) = i.codegen
 # keep the optimized IR in the CodeInstance: a package image then holds it (and, with piece 5 of
 # the patched runtime, machine code compiled from it); a session can compile it again
@@ -154,8 +180,11 @@ function CC.concrete_eval_eligible(interp::FactsInterp, @nospecialize(f), result
                                    arginfo::CC.ArgInfo, sv::CC.AbsIntState)
     r = @invoke CC.concrete_eval_eligible(interp::CC.AbstractInterpreter, f, result::CC.MethodCallResult,
                                           arginfo::CC.ArgInfo, sv::CC.AbsIntState)
-    _FACTS_POLICY[] || return r
+    _policy_on(interp) || return r
     (r === :concrete_eval || r === :semi_concrete_eval) || return r
+    # the keys of dynamic values known at the caller's compile time: read deliberately without an
+    # edge (a later key only reaches the witness call), so its run-time sites do not matter
+    f === _dyn_keys_now && return r
     edge = result.edge
     edge isa Core.CodeInstance && _has_runtime_sites(edge) && !_julia_asserted_foldable(edge) && return :none
     return r
@@ -282,7 +311,7 @@ function _concrete_deps(ci::Core.CodeInstance; limit::Int = 2000)
 end
 
 function CC.return_type_tfunc(interp::FactsInterp, argtypes::Vector{Any}, si::CC.StmtInfo, sv::CC.AbsIntState)
-    _FACTS_POLICY[] || return @invoke CC.return_type_tfunc(interp::CC.AbstractInterpreter, argtypes::Vector{Any}, si::CC.StmtInfo, sv::CC.AbsIntState)
+    _policy_on(interp) || return @invoke CC.return_type_tfunc(interp::CC.AbstractInterpreter, argtypes::Vector{Any}, si::CC.StmtInfo, sv::CC.AbsIntState)
     UNKNOWN = CC.CallMeta(Type, Any, CC.Effects(CC.EFFECTS_THROWS; nortcall = false), CC.NoCallInfo())
     2 <= length(argtypes) <= 3 || return CC.Future(UNKNOWN)
     tt = CC.widenslotwrapper(argtypes[end])
@@ -351,7 +380,7 @@ function CC.find_method_matches(interp::FactsInterp, argtypes::Vector{Any}, @nos
                                 max_union_splitting::Int = CC.InferenceParams(interp).max_union_splitting,
                                 max_methods::Int = CC.InferenceParams(interp).max_methods)
     𝕃 = CC.typeinf_lattice(interp)
-    if !_FACTS_POLICY[] || (!isempty(argtypes) && (_machinery_call(argtypes[1]) || _machinery_kwcall(argtypes)))
+    if !_policy_on(interp) || (!isempty(argtypes) && (_machinery_call(argtypes[1]) || _machinery_kwcall(argtypes)))
         return @invoke CC.find_method_matches(interp::CC.AbstractInterpreter, argtypes::Vector{Any}, atype::Any;
                                               max_union_splitting, max_methods)
     end
@@ -379,7 +408,7 @@ image. Edges are unchanged, so invalidation is as before (piece 9 makes bare edg
 """
 function CC.transform_result_for_cache(interp::FactsInterp, result::CC.InferenceResult, edges::Core.SimpleVector)
     src = @invoke CC.transform_result_for_cache(interp::CC.AbstractInterpreter, result::CC.InferenceResult, edges::Core.SimpleVector)
-    _FACTS_POLICY[] && src isa Core.CodeInfo && _owner_invokes!(src, CC.get_inference_world(interp))
+    _policy_on(interp) && src isa Core.CodeInfo && _owner_invokes!(src, CC.get_inference_world(interp))
     return src
 end
 function _owner_invokes!(src::Core.CodeInfo, world::UInt)

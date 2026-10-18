@@ -82,7 +82,7 @@ end
 
 function _worker_problems(@nospecialize(sig), seen, out, root::Bool)
     world = Base.get_world_counter()
-    for (src, rt) in Base.code_typed_by_type(sig; optimize = false, world)
+    for (src, rt) in Base.code_typed_by_type(sig; optimize = false, _check_kw(world)...)
         mi = src.parent
         if root && _escapes(rt) && !(mi isa Core.MethodInstance && mi.def isa Method &&
                                      Base.unwrap_unionall(mi.def.sig).parameters[1] in _LIKE_FUNCS)
