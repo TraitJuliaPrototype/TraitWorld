@@ -309,7 +309,9 @@ macro trait(header, block = nothing)
             AT = :(Tuple{$([dep(t) ? :Any : t for (_, t) in d.args]...)})
             rhs = :($TW._dyn_call(dyn, Val($k), $(d.fexpr), $AT, $retx, $(syms...)))
         end
-        push!(out, :(@inline $(d.fexpr)(dyn::$TW.Dynamic{<:$name}, $(syms...)) = $rhs))
+        # inferred again at every call site (`@constprop :aggressive`): each caller splits the call over
+        # the candidates known when it is compiled (`_dyn_call`)
+        push!(out, :(Base.@constprop :aggressive @inline $(d.fexpr)(dyn::$TW.Dynamic{<:$name}, $(syms...)) = $rhs))
     end
     # fields: properties of the representation, or (type R) the projection, read through a lens when written
     if !isempty(fdecls)

@@ -461,7 +461,8 @@ end
 
 # the machinery's slow paths: reflection and checks. Not followed: in a
 # closed world they are switched off and verify_main runs them at build time.
-_machinery_method(m::Method) = m.module === TraitWorld && m.name in
+_machinery_method(m::Method) = (m.module === Base.Compiler && m.name === :register_dynamic_candidate!) ||   # a session's candidates (part (D)); a trimmed build has none
+    m.module === TraitWorld && m.name in
     (:_check_once, :_latest, :_conformance_slow, :_needed_slow, :_builder_for, :worker_problems, :_rule3_error,
      :_closed_miss, :_witness, :witness, :proj_lookup, :_no_worker_error, :_refuse_overrides, :_merge_dyn)
 

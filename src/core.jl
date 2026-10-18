@@ -316,7 +316,9 @@ struct Dynamic{X}
     t::Any
     function Dynamic{X}(t::TObj{T}) where {X,T}
         _carries_static(T, X) || Base.inferencebarrier(_dyn_refuse)(X, T)
-        return new{X}(_narrow(X, t))     # the trait object is the user's object: a kept value follows its fields
+        tn = _narrow(X, t)               # the trait object is the user's object: a kept value follows its fields
+        CC.register_dynamic_candidate!(_family_of(X), typeof(tn))   # a candidate of the call-site splits (part (D))
+        return new{X}(tn)
     end
 end
 """
@@ -356,12 +358,58 @@ Base.convert(::Type{Dynamic{X}}, t::TObj) where {X} = Dynamic{X}(t)
 
 """
 Operation `k` of a dynamic value's trait, declared with argument types `AT` and result type `RT`:
-one call at the trait object's run-time type, its result asserted to the declared type. In code
-compiled by facts, Julia dispatches it to code compiled by facts (part (C)); splitting it over the
-declared conformances at the call site is part (D), in Julia's compiler.
+a call at the trait object's run-time type, its result asserted to the declared type (a builtin:
+the declared type holds downstream). Julia's compiler splits the call at the call site over the
+trait-object types dynamic values of `X` hold (`dynamic_call`, part (D)), with the dynamic call for
+any other type; in code compiled by facts that call runs code compiled by facts (part (C)).
 """
-@inline _dyn_call(dyn::Dynamic, ::Val, f::F, ::Type{AT}, ::Type{RT}, args::Vararg{Any,N}) where {F,AT,RT,N} =
-    f(opened(dyn), args...)::RT          # the assertion a builtin: the declared type holds downstream
+Base.@constprop :aggressive @inline _dyn_call(dyn::Dynamic{X}, ::Val, f::F, ::Type{AT}, ::Type{RT}, args::Vararg{Any,N}) where {X,F,AT,RT,N} =
+    CC.dynamic_call(_family_of(X), f, opened(dyn), args...)::RT
+# (`@constprop :aggressive`: inferred again at every call site, so that each caller splits over the
+# candidates known when it is compiled, not over those of the first caller)
+
+"The trait family of `X`, a constant of the specialized caller (the key of the call-site splits)."
+@generated _family_of(::Type{X}) where {X} = :($(_family(X)))
+
+"""
+Register the trait-object types a `Dynamic` keeps for the conformances declared since the last call
+(methods of `implementation` at a concrete type), as candidates of the call-site splits: inferred
+along the path `Dynamic{X}(x)` takes, in the checks' own cache. A type whose trait object is not
+inferred concretely is left out (its values are registered when made). Called after each
+declaration (`_bump!`) and when a package is loaded (images do not run top-level code again).
+"""
+function _note_conformances!()
+    try
+        for m in methods(implementation)
+            (@lock _CAND_LOCK m in _CAND_SEEN) && continue
+            @lock _CAND_LOCK push!(_CAND_SEEN, m)
+            sig = Base.unwrap_unionall(m.sig)
+            (sig isa DataType && length(sig.parameters) == 3) || continue
+            A, B = sig.parameters[2], sig.parameters[3]
+            (A isa DataType && A <: Type && B isa DataType && B <: Type) || continue
+            XA, T = A.parameters[1], B.parameters[1]
+            (T isa DataType && isconcretetype(T)) || continue
+            F = _family(XA)
+            TO = try
+                Base.infer_return_type(_dyn_tobj, Tuple{Type{F}, T}; _check_kw()...)
+            catch
+                Any
+            end
+            (TO isa DataType && isconcretetype(TO) && TO <: TObj) || continue
+            CC.register_dynamic_candidate!(F, TO)
+        end
+    catch
+    end
+    return nothing
+end
+const _CAND_SEEN = Base.IdSet{Any}()
+const _CAND_LOCK = ReentrantLock()
+"The trait object `Dynamic{X}(x)` keeps, for inference of its type (the same steps)."
+function _dyn_tobj(::Type{X}, x) where {X}
+    v = _assemble(TraitList{Tuple{_family(X)}}(), x)
+    ismutable(x) || (v = _with_object(v, x))
+    return _narrow(X, v)
+end
 
 # equal when they keep the same trait object: same representation type, same implementation, egal data
 Base.:(==)(a::Dynamic{X}, b::Dynamic{X}) where {X} = getfield(a, :t) === getfield(b, :t)
