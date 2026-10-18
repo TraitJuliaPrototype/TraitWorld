@@ -762,6 +762,16 @@ end
     @test AnyCode.clean(v) == 1.5 + 1.0 + 1
 end
 
+@testset "return types read from CodeInstances: a predicate's conditional is no constant" begin
+    pred(x) = x === nothing
+    mi = Base.method_instance(pred, Tuple{Union{Nothing, Bool}})
+    ci = Base.Compiler.typeinf_ext_toplevel(Base.Compiler.NativeInterpreter(), mi, Base.Compiler.SOURCE_MODE_NOT_REQUIRED)
+    @test TraitWorld._ci_return_type(ci) === Bool
+    one(x) = 1
+    ci1 = Base.Compiler.typeinf_ext_toplevel(Base.Compiler.NativeInterpreter(), Base.method_instance(one, Tuple{Int}), Base.Compiler.SOURCE_MODE_NOT_REQUIRED)
+    @test TraitWorld._ci_return_type(ci1) === Int
+end
+
 @testset "facts at tuples with unions of concrete elements (iteration with missing values)" begin
     ii = typeof(Base.indexed_iterate)
     # `item, state = iterate(v, s)` over a Vector{Union{Missing, Int}}: two concrete facts

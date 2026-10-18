@@ -334,6 +334,16 @@ function CC.return_type_tfunc(interp::FactsInterp, argtypes::Vector{Any}, si::CC
     end
 end
 
+"""
+A CodeInstance's return type as `return_type` gives it: the type of its constant, or its type.
+Decoded as the compiler decodes it (`cached_return_type`): `rettype_const` may hold a lattice element,
+an `InterConditional` for a `Bool` predicate, which taken as a constant would make an element type
+`Core.InterConditional` (found under the facts mode in the compiler, BaseBenchmarks' `union` group).
+"""
+function _ci_return_type(ci::Core.CodeInstance)
+    r = CC.cached_return_type(ci)
+    return r isa CC.Const ? Core.Typeof(r.val) : CC.widenconst(r)
+end
 "Plain Julia's `return_type` at `sig` from native inference at the match's own signature (not the compilation signature, which `@nospecialize`, `Function`, `Type` and long Vararg arguments widen), when it rests on concrete facts."
 function _native_return_type(interp::FactsInterp, @nospecialize(sig), sv::CC.AbsIntState)
     world = CC.get_inference_world(interp)
@@ -348,7 +358,7 @@ function _native_return_type(interp::FactsInterp, @nospecialize(sig), sv::CC.Abs
     _concrete_deps(nci) || return nothing
     CC.update_valid_age!(sv, CC.WorldRange(max(lo[], nci.min_world), min(hi[], nci.max_world)))
     # a constant result folds as plain compiled code folds it (`typeof` of the constant)
-    rt = isdefined(nci, :rettype_const) ? Core.Typeof(nci.rettype_const) : nci.rettype
+    rt = _ci_return_type(nci)
     return CC.CallMeta(CC.Const(rt), Union{}, CC.Effects(CC.EFFECTS_TOTAL; nortcall = false),
                        CC.MethodResultPure(_NativeRT(sig, nci)))
 end
