@@ -461,10 +461,7 @@ function main(args::Vector{String})
 end
 end
 @testset "M7: verify_main" begin
-    # a closed world (the binary verify_main checks for) compiles the workers natively, without the policy
-    facts = TraitWorld.FACTS[]; TraitWorld.FACTS[] = false
     VMain.main(String[]); VMain.main(["m"])
-    TraitWorld.FACTS[] = facts
     r = verify_main(VMain.main, (Vector{String},))
     @test isclosed(r)
     # entries are ordinary inlined methods (keys-plan §6): for types the program knows, every trait call is static
@@ -715,9 +712,7 @@ function main(args::Vector{String})
 end
 end
 @testset "poc3 M8: verify_main, keyword entries" begin
-    facts = TraitWorld.FACTS[]; TraitWorld.FACTS[] = false            # as in M7: a closed world's native workers
     VKW.main(String[])
-    TraitWorld.FACTS[] = facts
     r = verify_main(VKW.main, (Vector{String},))
     @test isclosed(r)
     @test count(p -> p.first === :worker, r.targets) == 0             # every trait call static: entries are ordinary methods
@@ -787,46 +782,6 @@ end
     @test !TraitWorld._fact_sig(Tuple{typeof(sin), Union{Int, Float64}})
 end
 
-@testset "view caches: keys and recording" begin
-    vc = TraitWorld
-    # a signature's view: the packages it names; Julia's own modules are in every view
-    @test vc._vc_packages(Tuple{typeof(sum),Vector{Int}}) == Module[]
-    v = [1.0, 2.0]
-    T = typeof(TObj((TraitWorld.View{TraitWorld._PC.PCT}(TraitWorld.Impl{(:pd,)}(), v),)))
-    @test vc._vc_packages(Tuple{typeof(TraitWorld._PC.pcsum),T}) == [TraitWorld]
-    # a type of the session (a module under Main) has no package to hold its cache
-    @test vc._vc_packages(Tuple{typeof(Columns.colmean),Measurements}) === nothing
-    # the call an entry makes for a worker
-    NT = NamedTuple{(:a,),Tuple{Int}}
-    @test vc._vc_entry_sig(Tuple{typeof(Core.kwcall),NT,typeof(sum),Int}) == Tuple{typeof(TraitWorld.checked_kwcall),NT,typeof(sum),Int}
-    @test vc._vc_entry_sig(Tuple{typeof(sum),Int}) == Tuple{typeof(TraitWorld.checked_call),typeof(sum),Int}
-    # a first call notes its worker; one a loaded view cache checked is neither checked nor noted again
-    toplevel(quote
-        struct VCNew; n::Int; end            # its own representation: workers new to the session
-        @implement Columns.ColTable{VCNew} begin
-            ncols(r) = r.n
-            col(r, i) = fill(Float64(i), 2)
-        end
-    end)
-    if vc._VC_ON[]
-        empty!(vc._VC_NEW)
-        @test Columns.colrange(Main.VCNew(2), 1) == 0.0
-        @test length(vc._VC_NEW) == 1 && vc._VC_NEW[1].parameters[1] === typeof(Columns.colrange)
-        sig = vc._VC_NEW[1]
-        empty!(vc._VC_NEW)
-        # nothing to write for types of the session
-        withenv("JULIA_TW_VIEWCACHE_DIR" => mktempdir()) do
-            @test viewcache_flush() == String[]
-            @test isempty(readdir(vc.viewcache_dir()))
-        end
-        # registered as checked, as a view cache's __init__ does: not checked, not noted
-        sig2 = Tuple{typeof(Columns.colmean),sig.parameters[2:end]...}
-        vc._vc_register(Any[sig2])
-        @test Columns.colmean(Main.VCNew(2), 2) == 2.0
-        @test isempty(vc._VC_NEW)
-        delete!(vc._VC_CHECKED, sig2)
-    end
-end
 
 @testset "definition checking at archetypes" begin
     toplevel(quote

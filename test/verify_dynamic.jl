@@ -34,7 +34,6 @@ toplevel(quote
 end)
 
 @testset "verify_main: targets of dynamic values" begin
-    facts = TraitWorld.FACTS[]; TraitWorld.FACTS[] = false      # the closed world's plain calls
     try
         @test Base.invokelatest(getglobal(Main, :vdyn_main), String[]) == 0
         r = Base.invokelatest(verify_main, getglobal(Main, :vdyn_main), (Vector{String},))
@@ -42,6 +41,5 @@ end)
         # two sites on dynamic values (an operation, and an entry called with the opened value), two types each
         @test count(p -> p.first === :dynamic, r.targets) == 4
     finally
-        TraitWorld.FACTS[] = facts
     end
 end

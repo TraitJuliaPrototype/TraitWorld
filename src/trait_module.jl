@@ -57,14 +57,7 @@ macro trait_module(m)
     return esc(Expr(:toplevel, _prologue()..., _transform_all(m.args)..., _epilogue()))
 end
 
-"""
-Whether Julia's compiler compiles trait modules by facts (the module option `facts`, part (B) of
-the plan for the policy in the compiler): then a trait module declares it, and TraitWorld's own
-policy (`FactsInterp`) is off. `JULIA_TW_COMPILER_FACTS=0` keeps TraitWorld's policy, for comparison.
-"""
-_compiler_facts() = isdefined(Base.Compiler, :FACTS_OWNER) && get(ENV, "JULIA_TW_COMPILER_FACTS", "1") != "0"
-
-_prologue() = Any[(_compiler_facts() ? (:(Base.Experimental.@compiler_options facts=true),) : ())...,
+_prologue() = Any[:(Base.Experimental.@compiler_options facts=true),     # Julia compiles the module by facts
                   :(const __trait_module__ = true),
                   :(const __tw_entries__ = Dict{Any,Vector{Any}}()),
                   :(const __tw_plain__ = Dict{Any,Vector{Any}}()),
@@ -72,7 +65,7 @@ _prologue() = Any[(_compiler_facts() ? (:(Base.Experimental.@compiler_options fa
                   :(const __tw_methods_seen__ = Base.IdSet{Method}()),
                   :(const __tw_positions__ = Any[]),          # (function, position, nargs) of the entries' trait positions
                   :(const __tw_finished__ = Ref(false))]
-_epilogue() = :($TraitWorld._latest_under_policy($TraitWorld._finish_module, @__MODULE__))
+_epilogue() = :($TraitWorld._latest($TraitWorld._finish_module, @__MODULE__))
 
 function _transform_all(stmts)
     out = Any[]
@@ -629,7 +622,7 @@ function _rewrite_fdef(mod::Module, ex)
         # an ordinary method, inlined into a typed caller (keys-plan §6): there it runs at plain speed.
         # It is the boundary (rule 2): compiled in its caller's mode, while the worker it calls is
         # compiled by facts (`Expr(:meta, :facts, 0)`, read by Julia's compiler)
-        _compiler_facts() && pushfirst!(stmts, Expr(:meta, :facts, 0))
+        pushfirst!(stmts, Expr(:meta, :facts, 0))
         push!(rest, Expr(:macrocall, GlobalRef(Base, Symbol("@inline")), LineNumberNode(0, :none),
                          Expr(:function, esig, Expr(:block, stmts...))))
         if entries !== nothing

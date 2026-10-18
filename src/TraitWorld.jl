@@ -1,14 +1,11 @@
 """
     TraitWorld
 
-A proof of concept of the design note "Traits for better Julia": trait
-modules, traits over a representation parameter, implementations and
-projections. What library code may do with a trait object (rule 2) and
-ownership of the methods a trait module defines (rule 3) are checked when
-code is defined. Code written without traits is wrapped by facts: trait-world
-code may call any Julia code, and its workers are compiled under the trait
-world's compiler policy (`facts.jl`), so that only concrete facts decide their
-compiled code and Julia's own invalidation keeps it valid.
+The trait language of the design (`writeup/design.md` in the design repository) as a package
+on Julia with the facts mode (the patched build, julia-1.13): traits, conformances, keys, trait
+modules, `Dynamic`, `Callable`, results like the input, definition checking, concrete mode,
+`verify_main` and strict mode. Julia's compiler compiles a trait module by facts (`compiler.jl`):
+its code depends on the method table only through facts at concrete signatures.
 """
 module TraitWorld
 
@@ -18,56 +15,42 @@ using Serialization: Serialization
 export Trait, Callable, CallMode, DynamicCall, CompiledCall, compiled_call, dynamic_call, TObj, Dynamic, DynamicFn, dynamic_fn,
        @trait, @implement, @trait_module, @workload,
        TraitBoundError, TraitUseError, ImplementError, OwnershipError, verify_main, isclosed,
-       viewcache_flush,
        @warn_on_abstract, @error_on_abstract, AbstractTypeError, check_concrete, check_definitions, conforms, withfields
 
 function __init__()
     empty!(_NOT_EXTENSIONS)
-    FACTS[] = get(ENV, "JULIA_TW_FACTS", _compiler_facts() ? "0" : "1") != "0"   # the compiler compiles trait modules by facts: TraitWorld's own policy is off
-    _vc_init!()
     _hooks_init!()
     _strict_init!()
-    _FACTS_POLICY[] = get(ENV, "JULIA_TW_FACTS_POLICY", "1") != "0"
     _DEFCHECK_AT_END[] = get(ENV, "JULIA_TW_DEFCHECK", "1") != "0"
-    _FACTS_DEBUG[] = get(ENV, "JULIA_TW_FACTS_DEBUG", "0") == "1"
-    _RUNTIME_POLICY[] = get(ENV, "JULIA_TW_RUNTIME_SITES", "policy") != "native"
-    _COMPILER_WORLD[] = Base.get_world_counter()
-    _SESSION[] = _session_token()
-    _INLINER_KEEPS_CI[] = _inliner_keeps_ci() && get(ENV, "JULIA_TW_NOINLINE", "0") != "1"
+    _FACTS_DEBUG[] = get(ENV, "JULIA_TW_DEBUG", "0") == "1"
     push!(Base.package_callbacks, _on_package_load_callback)
     _register_type_printers()
     _install_frame_filter!()
     _install_error_hints!()
 end
 
-"The package callback: `_on_package_load` under the policy, for the reason the hooks run there (hooks.jl)."
+"The package callback."
 function _on_package_load_callback(id::Base.PkgId)
-    try
-        _latest_under_policy(_on_package_load, id)
-    catch
-        Base.invokelatest(_on_package_load, id)
-    end
+    Base.invokelatest(_on_package_load, id)
     return nothing
 end
 
 """
-After a package load: the generation moves (a load can bring projections and
-implementations without running `@implement` here), the overrides the image hook
-left inactive are reported, and once per top-level `using` the view caches of
-what is loaded now are read.
+After a package load: the generation moves (a load can bring conformances
+without running `@implement` here), and the overrides the image hook left
+inactive are reported.
 """
 function _on_package_load(id::Base.PkgId)
     _bump!()
     m = get(Base.loaded_modules, id, nothing)
     m isa Module || return nothing
     _strict_known_delegates!()
-    _report_refused_at_load()                                                # what the image hook left inactive (patched Julia)
-    Base.toplevel_load[] && Base.inferencebarrier(_vc_load!)()               # the view caches of what is loaded now
+    _report_refused_at_load()                                                # what the image hook left inactive
     return nothing
 end
 
 include("ownership.jl")
-include("facts.jl")
+include("compiler.jl")
 include("core.jl")
 include("trait.jl")
 include("implement.jl")
@@ -76,7 +59,6 @@ include("trait_module.jl")
 include("checks.jl")
 include("verify.jl")
 include("concrete.jl")
-include("viewcache.jl")
 include("defcheck.jl")
 include("hooks.jl")
 include("strict.jl")
@@ -141,17 +123,7 @@ PrecompileTools.@compile_workload begin
     owned_method(first(methods(TraitWorld.owner)))
 end
 precompile(_on_package_load, (Base.PkgId,))
-precompile(_vc_load!, ())
-precompile(viewcache_flush, ())
-precompile(_vc_atexit, ())
 precompile(_narrow_slow, (Any, TObj))
-for n in 0:6                         # the trampoline specializes on its arity
-    precompile(_invoke_under_policy, (Core.MethodInstance, Any, ntuple(_ -> Any, n)...))
-    precompile(_call_under_policy, (Any, ntuple(_ -> Any, n)...))
-    n <= _SITE_MAXARGS && precompile(_call_site, (_CallSite, Any, ntuple(_ -> Any, n)...))
-end
-precompile(_site_miss, (_CallSite, UInt, Any, Tuple))
-precompile(_policy_ci, (UInt, Any, Tuple))
 precompile(_conf_family_slow, (Base.RefValue{IdDict{Any,Any}}, Any, Any))
 
 """
@@ -178,38 +150,7 @@ function _finish_needed(mod::Module)
 end
 
 
-# the compiler's specializations for the policy's interpreter (facts.jl), compiled into this image:
-# without them a session's first trait call compiles the compiler for `FactsInterp` (about 11 s)
-_facts_warm(x::Vector{Float64}) = sum(x) / length(x)
 if ccall(:jl_generating_output, Cint, ()) == 1
-    _facts_call(_facts_warm, [1.0, 2.0])
-    # the machinery's slow paths under the policy (`_latest_under_policy`), compiled into this
-    # image: their arguments are `@nospecialize`d, so one CodeInstance serves every signature
-    for sig in (Tuple{typeof(_check_once), Base.RefValue{Bool}, DataType},
-                Tuple{typeof(_builder_for), Vector{Any}, DataType},
-                Tuple{typeof(worker_problems), DataType},
-                Tuple{typeof(_check_concrete), DataType},
-                Tuple{typeof(_finish_module), Module},
-                Tuple{typeof(_on_image_methods), Vector{Any}, String},          # what the runtime calls at loads
-                Tuple{typeof(_on_method_definition), Method, Bool},
-                Tuple{typeof(_on_package_load), Base.PkgId},
-                Tuple{typeof(_implement_expand), Module, Symbol, Vector{Any}},  # `@implement` and its checks
-                Tuple{typeof(_declare_conformance_now), DataType, DataType},
-                Tuple{typeof(_check_projection_now), Module, DataType, DataType},
-                Tuple{typeof(_check_implementation_now), Module, DataType, DataType, Tuple{Symbol}},
-                Tuple{typeof(_check_own_fields_now), DataType, DataType},
-                Tuple{typeof(_analyze_keeps), Any},
-                Tuple{typeof(_vc_flush_detached)},                              # the view caches' exit hook
-                Tuple{typeof(_family_builder), DataType, DataType})
-        facts_codeinstance(sig)
-    end
-    precompile(_facts_call, (typeof(_on_image_methods), Vector{Any}, String))
-    precompile(_facts_call, (typeof(_on_method_definition), Method, Bool))
-    precompile(_facts_call, (typeof(_on_package_load), Base.PkgId))
-    precompile(_facts_call, (typeof(_vc_flush_detached),))
-    precompile(_facts_call, (typeof(_implement_expand), Module, Symbol, Vector{Any}))
-    precompile(_facts_call, (typeof(_declare_conformance_now), DataType, DataType))
-    precompile(_facts_call, (typeof(_check_projection_now), Module, DataType, DataType))
     precompile(_on_image_methods_hook, (Vector{Any}, String))
     precompile(_on_method_definition_hook, (Method, Bool))
     precompile(_on_package_load_callback, (Base.PkgId,))

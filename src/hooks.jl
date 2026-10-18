@@ -38,20 +38,20 @@ function _hooks_init!()
 end
 
 # The runtime calls the hooks at every load and definition. Their checks run under the facts
-# policy (`_latest_under_policy`), compiled into TraitWorld's image: native code would be
+# policy (`_latest`), compiled into TraitWorld's image: native code would be
 # invalidated by the very loads it watches, and compiled again at the next one (0.82 s over a
 # load of CSV and DataFrames, session 26). If the policy's path fails, the native check runs,
 # called dynamically so that these functions' own code keeps no edge into it.
 function _on_image_methods_hook(ms::Vector{Any}, pkg::String)
     try
-        return _latest_under_policy(_on_image_methods, ms, pkg)
+        return _latest(_on_image_methods, ms, pkg)
     catch
         return Base.invokelatest(_on_image_methods, ms, pkg)
     end
 end
 function _on_method_definition_hook(m::Method, after::Bool)
     try
-        return _latest_under_policy(_on_method_definition, m, after)
+        return _latest(_on_method_definition, m, after)
     catch
         return Base.invokelatest(_on_method_definition, m, after)
     end

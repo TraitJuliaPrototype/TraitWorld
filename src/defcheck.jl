@@ -135,7 +135,7 @@ function definition_problems(@nospecialize(f))
         asig = try archetype_sig(m) catch; nothing end
         asig === nothing && continue
         ps = try
-            _latest_under_policy(worker_problems, asig)::Vector{String}
+            _latest(worker_problems, asig)::Vector{String}
         catch
             continue
         end
@@ -291,7 +291,7 @@ end
 
 "Define `keeps(KeepOf{typeof(f)}())` in `mod`, once its methods are known; redefined only when the answer changes."
 function _fix_keeps!(mod::Module, @nospecialize(f))
-    K = _latest_under_policy(_analyze_keeps, f)::Bool
+    K = _latest(_analyze_keeps, f)::Bool
     P = KeepOf{typeof(f)}
     m = Base._which(Tuple{typeof(keeps),P}; raise = false)
     if m !== nothing && Base.unwrap_unionall(m.method.sig).parameters[2] === P

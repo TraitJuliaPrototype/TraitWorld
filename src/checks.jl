@@ -251,26 +251,15 @@ function _checked_call_body(@nospecialize(f), argtypes, argsyms)
     return quote
         Base.@_inline_meta
         # a dynamic call: the check's reflection stays out of compiled code (and out of trimmed binaries)
-        $(flag)[] || CLOSED_WORLD[] || Base.inferencebarrier(_latest_under_policy)(_check_once, $flag, $sig)
+        $(flag)[] || CLOSED_WORLD[] || Base.inferencebarrier(_latest)(_check_once, $flag, $sig)
         # a result like the input goes on to the entry, which inverts it
         $(_worker_call(:f, argsyms))
     end
 end
-"""
-The entry's call of the worker, chosen when the code is generated. In a session, the worker and its
-static callees compiled under rule R (facts.jl). The plain call is not in the code at all: inferring
-it would compile the worker natively and make the entry depend on that code's abstract edges.
-A trimmed build (`--trim`) compiles the plain call (its world is closed), and so does code
-generated while `FACTS[]` is off (diagnosis: `JULIA_TW_FACTS=0`; an image keeps the code it was
-built with).
-"""
-function _worker_call(f, argsyms)
-    _policy_path() || return :(return _checked_out($f($(argsyms...))))
-    return :(return _checked_out(_facts_call($f, $(argsyms...))))
-end
+"The entry's call of the worker: an ordinary call; Julia compiles the worker by facts (a trait module's method)."
+_worker_call(f, argsyms) = :(return _checked_out($f($(argsyms...))))
+"Whether this process builds a closed world (`--trim`)."
 _closed_build() = Base.JLOptions().trim != 0
-"Whether generated entry code calls workers under the policy (rule R)."
-_policy_path() = FACTS[] && !_closed_build()
 @generated checked_call(f, args...) = _checked_call_body(f, args, [:(args[$i]) for i in 1:length(args)])
 # fixed arities: a call from an untyped entry dispatches on these through Julia's fast cache
 # (a varargs method makes every dynamic call build its argument tuple type)
@@ -290,7 +279,7 @@ fills the defaults inside the trait world.
     flag = Ref(false)
     sig = Tuple{typeof(Core.kwcall),nt,f,args...}
     return quote
-        $(flag)[] || CLOSED_WORLD[] || Base.inferencebarrier(_latest_under_policy)(_check_once, $flag, $sig)
+        $(flag)[] || CLOSED_WORLD[] || Base.inferencebarrier(_latest)(_check_once, $flag, $sig)
         $(_worker_call(:(Core.kwcall), [:nt, :f, :(args...)]))
     end
 end
@@ -308,18 +297,16 @@ _noescape(::Union{TObj,AbstractView,CObj,CMulti,LikeResult}) = throw(TraitUseErr
 
 @noinline function _check_once(flag::Base.RefValue{Bool}, @nospecialize(sig))
     CLOSED_WORLD[] && (flag[] = true; return nothing)      # checked by verify_main at build time
-    sig in _VC_CHECKED && (flag[] = true; return nothing)   # checked when its view cache was built
     _FACTS_DEBUG[] && Core.println("TraitWorld: first-call check of ", sig, ccall(:jl_generating_output, Cint, ()) == 1 ? " (while generating an image)" : "")
     # a value conforming at parameters no bound accepts: no worker for the signature
     ms = Base._methods_by_ftype(_worker_sig(sig), -1, Base.get_world_counter())::Vector
     any(m -> !_is_entry(m.method), ms) || _no_worker_error(_worker_sig(sig))
     _refuse_overrides()
     if !_def_checked(sig)                                  # checked once at its definition, at archetypes
-        ps = _latest_under_policy(worker_problems, sig)::Vector{String}
+        ps = _latest(worker_problems, sig)::Vector{String}
         isempty(ps) || throw(TraitUseError(unique(ps)))
     end
-    _latest_under_policy(_check_concrete, sig)
+    _latest(_check_concrete, sig)
     flag[] = true
-    _vc_note_worker(sig)                                   # compiled in this session: for a view cache
     return nothing
 end

@@ -439,7 +439,7 @@ function _check_delegate(mod::Module, @nospecialize(types...))
 end
 
 _check_implementation(mod::Module, @nospecialize(X), @nospecialize(R), given::Tuple) =
-    _latest_under_policy(_check_implementation_now, mod, X, R, given)
+    _latest(_check_implementation_now, mod, X, R, given)
 function _check_implementation_now(mod::Module, @nospecialize(X), @nospecialize(R), given::Tuple)
     _check_delegate(mod, X, R)
     definer = owner(mod)
@@ -469,7 +469,7 @@ function _check_implementation_now(mod::Module, @nospecialize(X), @nospecialize(
     return nothing
 end
 
-_check_projection(mod::Module, @nospecialize(X), @nospecialize(T)) = _latest_under_policy(_check_projection_now, mod, X, T)
+_check_projection(mod::Module, @nospecialize(X), @nospecialize(T)) = _latest(_check_projection_now, mod, X, T)
 function _check_projection_now(mod::Module, @nospecialize(X), @nospecialize(T))
     _check_delegate(mod, X, T)
     p = _proj(X, T)::ProjRec
@@ -489,7 +489,7 @@ function _check_projection_now(mod::Module, @nospecialize(X), @nospecialize(T))
 end
 
 "A type declared to conform by its own methods has the fields the trait and its supertraits declare."
-_check_own_fields(@nospecialize(X), @nospecialize(T)) = _latest_under_policy(_check_own_fields_now, X, T)
+_check_own_fields(@nospecialize(X), @nospecialize(T)) = _latest(_check_own_fields_now, X, T)
 function _check_own_fields_now(@nospecialize(X), @nospecialize(T))
     for Y in trait_closure(X)
         ps = _field_problems(Y, T, nothing, isempty(_ops(Y)) ? Nothing : T)
@@ -583,7 +583,7 @@ What a conformance declaration fixes, after its checks: the builder of its views
 (`nothing` when it must be built per session) and the operations its defaults serve,
 without those the implementing type already had a method for.
 """
-_declare_conformance(@nospecialize(X), @nospecialize(T)) = _latest_under_policy(_declare_conformance_now, X, T)
+_declare_conformance(@nospecialize(X), @nospecialize(T)) = _latest(_declare_conformance_now, X, T)
 function _declare_conformance_now(@nospecialize(X), @nospecialize(T))
     recs = Any[]
     (T isa DataType && isconcretetype(T)) || return (b = nothing, recs = ())
@@ -645,10 +645,10 @@ end
 @noinline function _conf_family_slow(reg::Base.RefValue{IdDict{Any,Any}}, @nospecialize(X), @nospecialize(u))
     U = typeof(u)
     # a member at an abstract parameter (`S{Any}`) is refused at the entry where X asks for concrete keys
-    _latest_under_policy(_concreteness_of, X) === :concrete_only && !key_concrete(U) &&
+    _latest(_concreteness_of, X) === :concrete_only && !key_concrete(U) &&
         throw(TraitBoundError("a $U has an abstract type parameter, and $X asks for concrete keys (`@concrete_only`)"))
     r = _conformance_slow(X, u)                         # warns once for a member that does not conform
-    b = r === NOTRAIT ? nothing : _latest_under_policy(_family_builder, X, U)
+    b = r === NOTRAIT ? nothing : _latest(_family_builder, X, U)
     if b isa Builder
         @lock _LOCK begin
             d = copy(reg[])
@@ -857,11 +857,11 @@ function _keys_implement(mod::Module, args)
 end
 
 macro implement(args...)
-    return _latest_under_policy(_implement_expand, __module__, __source__.file, Any[args...])
+    return _latest(_implement_expand, __module__, __source__.file, Any[args...])
 end
 
 # The expansion of `@implement`, and the checks its expansion runs, are compiled under the facts
-# policy (`_latest_under_policy`) and kept in TraitWorld's image: they reflect over expressions
+# policy (`_latest`) and kept in TraitWorld's image: they reflect over expressions
 # and types at abstract argument types, so their native code was invalidated by large loads and
 # compiled again at the next `@implement` (0.6 s, 1.4-1.7 s after CSV, DataFrames and CairoMakie;
 # session 26). Under the policy those calls dispatch at run time instead.

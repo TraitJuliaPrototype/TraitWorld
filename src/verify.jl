@@ -462,7 +462,7 @@ end
 # the machinery's slow paths: reflection and checks. Not followed: in a
 # closed world they are switched off and verify_main runs them at build time.
 _machinery_method(m::Method) = m.module === TraitWorld && m.name in
-    (:_check_once, :_latest_under_policy, :_conformance_slow, :_needed_slow, :_builder_for, :worker_problems, :_rule3_error,
+    (:_check_once, :_latest, :_conformance_slow, :_needed_slow, :_builder_for, :worker_problems, :_rule3_error,
      :_closed_miss, :_witness, :witness, :proj_lookup, :_no_worker_error, :_refuse_overrides, :_merge_dyn)
 
 const _ENTER = Ref{Any}(nothing)
@@ -601,9 +601,6 @@ function _scan(mi::Core.MethodInstance, cx::_Walk)
         end
         if Meta.isexpr(st, :invoke)
             c = st.args[1]
-            # the policy's call of the worker (facts.jl, inlined from `_facts_call`): a session's path
-            # to the targets the entry's plain call enumerates; a closed world takes the plain call
-            c isa Core.CodeInstance && c.owner isa FactsOwner && continue
             cmi = c isa Core.CodeInstance ? c.def : c
             isdefined(Core, :ABIOverride) && cmi isa Core.ABIOverride && (cmi = cmi.def)
             cmi isa Core.MethodInstance || continue
@@ -713,10 +710,6 @@ function _scan(mi::Core.MethodInstance, cx::_Walk)
             elseif cm isa Method && _machinery_method(cm)
                 site(:guard, i, cm.name, Any[])
                 continue
-            elseif cm isa Method && cm.module === TraitWorld && cm.name === :_facts_call
-                # the policy's call of the worker (facts.jl): a session's path to the targets the
-                # entry's plain call enumerates; a closed world takes the plain call
-                continue
             elseif cm isa Method && cm.module === TraitWorld && (cm.name === :fallback || cm.name === :kwfallback)
                 # reached only by a user type with none of the entry's traits
                 notrait ? hole(:fallback, i, cm.name, Any[]) : site(:trait, i, cm.name, Any[])
@@ -751,10 +744,6 @@ function _scan(mi::Core.MethodInstance, cx::_Walk)
                     # the entry's way out: the identity, unless the worker returns a result like
                     # the input, whose inverse runs per user type (not listed for AOT yet)
                     _like_result(src, sptypes, st.args[2]) && hole(:inverse, i, f, ats)
-                elseif f === _facts_call
-                    # the policy's call of the worker (facts.jl): a session's path to the targets the
-                    # entry's plain call enumerates; a closed world takes the plain call
-                    continue
                 elseif f === checked_call || f === checked_kwcall
                     # the entry's call of the worker: one target per combination of what the entry built
                     choices = Vector{Any}[]
@@ -890,7 +879,7 @@ and reflection are switched off in the binary.
 """
 function verify_main(@nospecialize(f), @nospecialize(argtypes::Tuple = ()); compile::Bool = false, entrypoints::Bool = false,
                      close::Bool = entrypoints && Base.JLOptions().trim != 0)
-    close && _close_policy!()             # entries from session images: inferred again, plainly (the walk reads the latest world)
+    # (a closed build compiles plainly: `--trim` turns Julia's facts mode off, design.md §6)
     world = Base.get_world_counter()
     cx = _Walk(world)
     entry = Base.signature_type(f, argtypes)
