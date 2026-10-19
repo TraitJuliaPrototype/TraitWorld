@@ -120,7 +120,8 @@ function _worker_problems(@nospecialize(sig), seen, out, root::Bool)
                 fname = nm isa _CC.Const ? nm.val : nothing
                 fname isa Symbol && _declares_field(ats[2], fname, f === Base.setproperty!) && continue
                 push!(out, "$line: `t.$(something(fname, "field"))`" * (f === Base.setproperty! ? " = …" : "") *
-                           ": the user's data is reached only through the operations and the writable fields its traits declare")
+                           ": the user's data is reached only through the operations and the writable fields its traits declare (" *
+                           _declared_text(ats[2]) * ")")
                 continue
             end
             # keeping a trait object where a Dynamic is declared (note "Dynamic values")
@@ -286,6 +287,37 @@ end
 
 "The worker's own signature: a keyword worker's without `Core.kwcall` and the keywords."
 _worker_sig(@nospecialize(sig)) = sig.parameters[1] === typeof(Core.kwcall) ? Tuple{sig.parameters[3:end]...} : sig
+"What the traits a trait object of type `T` carries declare: operations and fields, for a rule-2 message."
+function _declared_text(@nospecialize(T))
+    parts = String[]
+    try
+        U = Base.unwrap_unionall(T)
+        Xs = Any[]
+        if U isa DataType && U <: TObj
+            V = U.parameters[2]
+            if V isa DataType
+                for v in V.parameters
+                    v isa DataType && !isempty(v.parameters) && push!(Xs, _family(v.parameters[1]))
+                end
+            end
+            if isempty(Xs)
+                P = U.parameters[1]
+                lb = P isa TypeVar ? P.lb : P
+                append!(Xs, Base.uniontypes(_decode_traits(lb)))
+            end
+        end
+        for X in unique!(Xs)
+            X isa Type && is_trait(X) || continue
+            ops = String[string(op) for op in _ops(X)]
+            fs = String[string(f) for (f, _) in trait_fields(X)]
+            push!(parts, "`$(nameof(X))` declares " * (isempty(ops) ? "no operations" : join(ops, ", ")) *
+                         (isempty(fs) ? "" : "; fields " * join(fs, ", ")))
+        end
+    catch
+    end
+    return isempty(parts) ? "see its trait's declaration" : join(parts, "; ")
+end
+
 "The function a worker signature belongs to: through `Core.kwcall` for a keyword worker."
 _worker_ftype(@nospecialize(sig)) = sig.parameters[1] === typeof(Core.kwcall) ? sig.parameters[3] : sig.parameters[1]
 

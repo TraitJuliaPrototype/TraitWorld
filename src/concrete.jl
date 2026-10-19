@@ -290,7 +290,7 @@ function _trace!(out::Vector{String}, tr::_Tracer, src, sptypes, mi, @nospeciali
     elseif x isa GlobalRef
         push!(out, isdefined(x.mod, x.name) && isconst(x.mod, x.name) ?
               "global `$(x.mod).$(x.name)` has type $(_tstr(T))" :
-              "`$(x.mod).$(x.name)` is a non-constant global")
+              "`$(x.mod).$(x.name)` is a non-constant global: declare it `const` (or pass it as an argument)")
         return true
     elseif !(x isa Core.SSAValue)
         push!(out, "a value of type $(_tstr(T))")
@@ -311,7 +311,13 @@ function _trace!(out::Vector{String}, tr::_Tracer, src, sptypes, mi, @nospeciali
         end
         return false
     end
-    if d isa Core.PiNode
+    if d isa GlobalRef
+        # a global read as a statement of its own (optimized code)
+        return _trace!(out, tr, src, sptypes, mi, d, depth, seen)
+    elseif Meta.isexpr(d, :call) && length(d.args) == 3 && (d.args[1] == GlobalRef(Core, :getglobal) || d.args[1] === Core.getglobal) &&
+           d.args[2] isa Module && d.args[3] isa QuoteNode
+        return _trace!(out, tr, src, sptypes, mi, GlobalRef(d.args[2], d.args[3].value), depth, seen)
+    elseif d isa Core.PiNode
         return _trace!(out, tr, src, sptypes, mi, d.val, depth, seen)
     elseif d isa Core.PhiNode
         vals = Any[d.values[k] for k in eachindex(d.values) if isassigned(d.values, k)]

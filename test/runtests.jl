@@ -776,7 +776,7 @@ end
     @test TraitWorld._fact_splits(Tuple{ii, Tuple{Int, Int}, Int}) == [Tuple{ii, Tuple{Int, Int}, Int}]
     # not finite sets of concrete signatures: abstract elements, varargs, more splits than union splitting allows
     @test !TraitWorld._fact_sig(Tuple{ii, Tuple{Integer, Int}, Int})
-    @test !TraitWorld._fact_sig(Tuple{ii, Tuple{Vararg{Int}}, Int})
+    @test TraitWorld._fact_sig(Tuple{ii, Tuple{Vararg{Int}}, Int})          # only concrete tuples: a fact (the user, session 29)
     @test !TraitWorld._fact_sig(Tuple{ii, Tuple{Union{Missing, Int}, Union{Missing, Float64}, Union{Nothing, Int}}, Int})
     # top-level unions are left to union splitting
     @test !TraitWorld._fact_sig(Tuple{typeof(sin), Union{Int, Float64}})

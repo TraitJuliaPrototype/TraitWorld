@@ -40,7 +40,7 @@ struct PirateError <: Exception
     later::Bool                  # found only after the definition (the method was deleted again)
 end
 "A type or signature for a message: printed by bound and key, cut at `n` characters."
-function _short(@nospecialize(x), n::Int = 140)
+function _short(@nospecialize(x), n::Int = 80)
     t = sprint(show, x; context = :compact => true)
     return length(t) <= n ? t : first(t, n - 1) * "…"
 end
@@ -55,7 +55,7 @@ function _trait_root(@nospecialize(ci))
         mi in seen && continue
         push!(seen, mi)
         m = mi.def
-        m isa Method && is_trait_world(m.module) && return mi
+        m isa Method && _facts_method(m) && return mi      # trait-module code (compiled by facts), not Base under it
         isdefined(mi, :backedges) || continue
         for x in mi.backedges
             x isa Core.CodeInstance && push!(todo, x.def isa Core.MethodInstance ? x.def : x.def.def)
@@ -74,10 +74,10 @@ end
 function Base.showerror(io::IO, e::PirateError)
     m = e.method
     root = _trait_root(e.caller)
-    print(io, "PirateError: strict mode refuses `", m.name, "` for ", _short(Base.unwrap_unionall(m.sig).parameters[2:end]),
-          ", defined by ", e.definer, ".\n  It would change what trait-world code computes",
-          root === nothing ? "" : " in `$(root.def isa Method ? root.def.name : root)` ($(_short(root.specTypes)))",
-          ", through the call at ", _short(e.sig), ".\n  ", e.definer, " owns neither the function nor a type in that signature (a pirate).\n  ",
+    print(io, "PirateError: strict mode refuses `", m.name, "(", join((_short(t, 40) for t in Base.unwrap_unionall(m.sig).parameters[2:end]), ", "),
+          ")`, defined by ", e.definer, ".\n  It would change what trait-world code computes",
+          root === nothing ? "" : " in `$(root.def isa Method ? "$(root.def.module).$(root.def.name)" : root)`",
+          ", at the call `", _short(e.sig), "`.\n  ", e.definer, " owns neither the function nor a type in that signature (a pirate).\n  ",
           _split_core_function(m) ? "If the package implements the core that owns the function, declare it a delegate (`TraitWorld.delegate!(Core => Impl)`); otherwise t" : "T",
           "urn strict mode off (`TraitWorld.strict!(false)`) to follow the method as plain Julia does, or define it where a type it is for is owned.")
     e.later && print(io, "\n  (found after the definition by the safety net; the method was deleted again)")

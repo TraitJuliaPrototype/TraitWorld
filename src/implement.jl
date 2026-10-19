@@ -911,6 +911,17 @@ function _implement_expand(mod::Module, @nospecialize(file), argv::Vector{Any})
     rest = collect(args[2:end])
     # --- projections: @implement X T …, @implement (X, Y) T …, @implement X{R} T …
     if !isempty(rest) && !(rest[1] isa Expr && rest[1].head === :block)
+        # a conformance declared again in the session, with an implementation block: refused with
+        # the reason (design.md §4.4), not with what the block lacks
+        if length(rest) >= 2 && rest[end] isa Expr && rest[end].head === :block
+            X = try Core.eval(mod, head) catch; nothing end
+            T = try Core.eval(mod, rest[1]) catch; nothing end
+            if X isa Type && T isa Type && is_trait(X) && _has_conformance_method(X, T)
+                throw(ImplementError("$T already conforms to $X: a conformance is not redeclared in a session. " *
+                                     "An override of a default belongs to the conformance (the key and kept values depend on it); " *
+                                     "to change it, change the declaration and restart Julia (redeclaration is not built yet)"))
+            end
+        end
         return _implement_projection(mod, head, rest; fmap)
     end
     fmap === nothing || error("@implement: a field mapping belongs to a conformance, `@implement X T name => stored`")
