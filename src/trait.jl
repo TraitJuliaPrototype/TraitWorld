@@ -303,15 +303,18 @@ macro trait(header, block = nothing)
         retx = dep(d.ret) ? :Any : d.ret
         # a constructor operation (result R) gives a dynamic value of the same conformance
         call = :($(d.fexpr)($TW.opened(dyn), $(syms...)))
+        X__ = gensym(:X)
         if d.ret === Rsym
             rhs = :($TW._dyn_like(dyn, $call))
         else
-            AT = :(Tuple{$([dep(t) ? :Any : t for (_, t) in d.args]...)})
-            rhs = :($TW._dyn_call(dyn, Val($k), $(d.fexpr), $AT, $retx, $(syms...)))
+            # Julia's call-site split (`Compiler.dynamic_call`, part D), called with the operation's own
+            # arguments: a fixed arity, so a recursion through dynamic values (a scene graph, a tree),
+            # where Julia does not inline the cycle's members, passes no varargs tuple (boxed per call)
+            rhs = :($TW.CC.dynamic_call($TW._family_of($X__), $retx, $(d.fexpr), $TW.opened(dyn), $(syms...))::$retx)
         end
         # inferred again at every call site (`@constprop :aggressive`): each caller splits the call over
-        # the candidates known when it is compiled (`_dyn_call`)
-        push!(out, :(Base.@constprop :aggressive @inline $(d.fexpr)(dyn::$TW.Dynamic{<:$name}, $(syms...)) = $rhs))
+        # the candidates known when it is compiled
+        push!(out, :(Base.@constprop :aggressive @inline $(d.fexpr)(dyn::$TW.Dynamic{$X__}, $(syms...)) where {$X__<:$name} = $rhs))
     end
     # fields: properties of the representation, or (type R) the projection, read through a lens when written
     if !isempty(fdecls)
