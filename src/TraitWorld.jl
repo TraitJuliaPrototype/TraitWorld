@@ -2,7 +2,7 @@
     TraitWorld
 
 The trait language of the design (`writeup/design.md` in the design repository) as a package
-on Julia with the facts mode (the patched build, julia-1.13): traits, conformances, keys, trait
+on Julia with the facts mode (the patched build, julia-1.13): traits, implementations, keys, trait
 modules, `Dynamic`, `Callable`, results like the input, definition checking, concrete mode,
 `verify_main` and strict mode. Julia's compiler compiles a trait module by facts (`compiler.jl`):
 its code depends on the method table only through facts at concrete signatures.
@@ -37,7 +37,7 @@ function _on_package_load_callback(id::Base.PkgId)
 end
 
 """
-After a package load: the generation moves (a load can bring conformances
+After a package load: the generation moves (a load can bring implementations
 without running `@implement` here), and the overrides the image hook left
 inactive are reported.
 """

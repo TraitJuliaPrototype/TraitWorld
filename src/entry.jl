@@ -3,7 +3,7 @@
 # is ordinary methods, so Julia's own dispatch does the lookups
 # (explorations/keys-plan.md §6):
 #
-#   - a conformance is a method, `conformance(X, u::U)`, defined by
+#   - an implementation is a method, `conformance(X, u::U)`, defined by
 #     `@implement`: it builds the trait object's views of `X` (and its
 #     supertraits) for a `U`, from constants;
 #   - an entry is an ordinary `@inline` method, `@nospecialize` on its trait
@@ -12,11 +12,11 @@
 #     `checked_call` calls the worker for its keys. A typed caller inlines the
 #     entry and runs at plain-Julia speed; an untyped caller pays a dispatch;
 #   - generic implementations and families have no method per type: their
-#     conformance is found by the fallback, `_conformance_slow`, and cached.
+#     implementation is found by the fallback, `_conformance_slow`, and cached.
 #
 # `conformance` is declared with `@max_methods 1` and has a fallback, so code
 # compiled at `conformance(X, ::Any)` infers nothing from its methods, holds
-# no edge to them, and a new conformance invalidates nothing (a new type's
+# no edge to them, and a new implementation invalidates nothing (a new type's
 # method would otherwise change what such code inferred, and invalidate it).
 # ---------------------------------------------------------------------------
 
@@ -34,10 +34,10 @@ Base.showerror(io::IO, e::TraitBoundError) = print(io, "TraitBoundError: ", e.ms
 
 """
 How a builder makes one trait's view for a user type: the witness, the slot of the
-implementing value (the object itself, or its forwarding field), and the slots of the
+receiver (the object itself, or its forwarding field), and the slots of the
 declared fields. The view's type is `View{X, W, K, N, P}`, the same for every user type of key `K`.
 """
-struct VSpec{X,W,K,N,P,S}    # S: the user's type is the key's implementing type (`r` is `SELF`)
+struct VSpec{X,W,K,N,P,S}    # S: the user's type is the key's receiver type (`r` is `SELF`)
     w::W
     r::Slot
     fs::NTuple{N,Slot}
@@ -51,7 +51,7 @@ end
 @inline _build(t) = ()
 @inline _build(t, s::VSpec{X,W,K,N,P,S}, rest...) where {X,W,K,N,P,S} =
     (_buildview(t, s, Val(S && !ismutable(t))), _build(t, rest...)...)
-# an immutable value that is its own implementing value is held whole; any other is read through
+# an immutable value that is its own receiver is held whole; any other is read through
 # (mutable) or held as parts (an immutable value forwarding to a field)
 @inline _buildview(t, s::VSpec{X,W,K,N,P}, ::Val{true}) where {X,W,K,N,P} =
     Held{X,W,K,N,P}(getfield(s, :w), getfield(s, :fs), _parts(P, t, getfield(s, :r), getfield(s, :fs)))
@@ -60,7 +60,7 @@ end
                     _parts(P, t, getfield(s, :r), getfield(s, :fs)))
 
 """
-The parts a view holds, typed by the key: the implementing value (`nothing` when there
+The parts a view holds, typed by the key: the receiver (`nothing` when there
 is none) and the declared fields' values, read from the user's object. For a mutable
 object they are what the object holds now; reads go through the object.
 """
@@ -83,7 +83,7 @@ call, or be followed by `TraitWorld.refresh!()`.
 """
 const GENERATION = Ref{UInt}(1)
 _bump!() = (GENERATION[] += 1; _note_conformances!(); nothing)
-"Forget every cached conformance of the slow path: after defining methods a generic implementation's predicate reads."
+"Forget every cached implementation of the slow path: after defining methods a generic implementation's predicate reads."
 refresh!() = _bump!()
 
 "One lock for the machinery's slow paths: concurrent first calls must not race on its caches."
@@ -106,7 +106,7 @@ end
 "Set by `verify_main(…; entrypoints = true)` in a trimmed build: the slow path's cache is complete and nothing may be loaded."
 const CLOSED_WORLD = Ref(false)
 
-# --- conformances as methods -----------------------------------------------------
+# --- implementations as methods -----------------------------------------------------
 
 "A trait as a value to dispatch on: `As{ColTable}()`. Dispatch on a singleton is cached by its type; on a type value (`::Type{ColTable}`) it is several times slower."
 struct As{X} end
@@ -122,14 +122,14 @@ families, and caches what it finds.
 conformance(::As{X}, @nospecialize(u)) where {X} = Base.inferencebarrier(_conformance_slow)(X, u)
 
 """
-The conformance a declaration makes, as a method body: the views from a builder fixed when
-the conformance was declared, or the slow path for a conformance whose witness holds
+The implementation a declaration makes, as a method body: the views from a builder fixed when
+the implementation was declared, or the slow path for an implementation whose witness holds
 pointers of a session (a type's own operations called dynamically).
 """
 @inline _conf_call(b::Builder, ::Type{X}, u) where {X} = b(u)
 @inline _conf_call(::Nothing, ::Type{X}, u) where {X} = Base.inferencebarrier(_conformance_slow)(X, u)
 
-"The builder a conformance of `T` to `X` is fixed to when declared, or `nothing` when it must be built in each session."
+"The builder an implementation of `X` for `T` is fixed to when declared, or `nothing` when it must be built in each session."
 function _conformance_builder(@nospecialize(X), @nospecialize(T))
     p = proj_lookup(X, T)
     p === nothing && return nothing
@@ -140,7 +140,7 @@ end
 
 const _SLOW = Ref(IdDict{Any,Any}())                  # Pair(X, U) => Builder or NOTRAIT; copy-on-write
 const _SLOW_WORLD = Ref{UInt}(0)                  # the world `_SLOW` was decided in: any definition makes it stale
-"The conformance of a type with no method of its own: a generic implementation, a family, a dynamic one."
+"The implementation of a type with no method of its own: a generic implementation, a family, a dynamic one."
 @machinery @noinline function _conformance_slow(@nospecialize(X), @nospecialize(u))
     U = typeof(u)
     key = Pair{Any,Any}(X, U)
@@ -150,7 +150,7 @@ const _SLOW_WORLD = Ref{UInt}(0)                  # the world `_SLOW` was decide
         b === nothing || return b === NOTRAIT ? NOTRAIT : (b::Builder)(u)
         CLOSED_WORLD[] && Base.inferencebarrier(_closed_miss)(X, u)
     end
-    _FACTS_DEBUG[] && Core.println("TraitWorld: conformance slow path: ", X, " for ", U)
+    _FACTS_DEBUG[] && Core.println("TraitWorld: implementation slow path: ", X, " for ", U)
     b = _in_world(w, _builder_for, Any[X], U)
     @lock _LOCK begin
         d = _SLOW_WORLD[] == w ? copy(_SLOW[]) : IdDict{Any,Any}()
@@ -225,11 +225,11 @@ keeps(::KeepOf) = true
 @generated function _assemble(::TraitList{L}, t) where {L}
     Xs = L.parameters
     isempty(Xs) && return :NOTRAIT
-    length(Xs) == 1 && return :(conformance($(As{Xs[1]}()), t))     # one trait: its conformance is the trait object
+    length(Xs) == 1 && return :(conformance($(As{Xs[1]}()), t))     # one trait: its implementation gives the trait object
     calls = [:(conformance($(As{X}()), t)) for X in Xs]
     return :(_merge($(calls...)))
 end
-"The views of several conformances in one trait object, each trait once; `NOTRAIT` if there are none."
+"The views of several implementations in one trait object, each trait once; `NOTRAIT` if there are none."
 @generated function _merge(cs...)
     seen = Any[]
     parts = Any[]
@@ -421,7 +421,7 @@ end
         w === nothing && throw(TraitBoundError("$(U) forwards $X to $(p.R), which does not implement $Y"))
         K, fs = _key_and_slots(Y, p, U, w)
         r = p.field == 0 ? SELF : _slot(U, p.field)
-        # held whole when the user's type is its own implementing value (not a key without one,
+        # held whole when the user's type is its own receiver (not a key without one,
         # whose parts are its declared fields only)
         push!(specs, VSpec{_instance(Y, K),typeof(w),K,length(fs),_partstype(K),p.field == 0 && _impl(K) !== Nothing}(w, r, fs))
     end
@@ -430,12 +430,12 @@ end
 
 "The slot of field `i` of type `U`: its byte offset and index."
 _slot(@nospecialize(U), i::Int) = Slot(Int(fieldoffset(U, i)), i)
-"The stored field of `U` that declared field `f` maps to: written in the conformance, else the same name."
+"The stored field of `U` that declared field `f` maps to: written in the implementation, else the same name."
 _mapped(p::ProjRec, f::Symbol) = (m = p.fmap; m === nothing ? f : get(m, f, f))
 """
 The key of trait `Y` for user type `U` conforming through `p` with witness `w`, and the
-slots of `Y`'s declared fields: the implementing type alone for a trait without fields;
-else a `Key` with the declared fields' types in `U`. The implementing type is `Nothing`
+slots of `Y`'s declared fields: the receiver type alone for a trait without fields;
+else a `Key` with the declared fields' types in `U`. The receiver type is `Nothing`
 when there is none (note "Terms"): every operation served by a default, as in a trait with
 fields only.
 """
@@ -449,7 +449,7 @@ function _key_and_slots(@nospecialize(Y), p::ProjRec, @nospecialize(U), @nospeci
     return Key{I,F}, Tuple(_slot(U, i) for i in idx)
 end
 """
-Whether a conformance of trait `Y` with witness `w` has no implementing type: every
+Whether an implementation of trait `Y` with witness `w` has no receiver type: every
 operation is served by a default (or there are none), the trait's declarations do not name
 `Self`, and every parameter is defined by a field, so nothing depends on the type.
 """
@@ -642,12 +642,12 @@ end
 const _LIKE_FUNCS = Base.IdSet{Any}()
 _like!(@nospecialize(f)) = (push!(_LIKE_FUNCS, typeof(f)); nothing)
 
-"No new implementing value: a result like the input with only fields replaced."
+"No new receiver: a result like the input with only fields replaced."
 struct KeepSelf end
 
 """
 A result like the input (note "Results like the input"): the input's trait object, a new
-implementing value or `KeepSelf()`, and new values of declared fields. Nothing operates on
+receiver or `KeepSelf()`, and new values of declared fields. Nothing operates on
 it; only the entry inverts it, rebuilding the user's type.
 """
 struct LikeResult{T<:TObj,S,F<:NamedTuple}
@@ -659,7 +659,7 @@ end
 """
     like(t, x)
 
-A result like `t` holding the new implementing value `x`: what a function declared
+A result like `t` holding the new receiver `x`: what a function declared
 `::Like{t}` returns inside the trait world.
 """
 @inline like(t::TObj, x) = LikeResult(t, x, NamedTuple())
@@ -697,7 +697,7 @@ A result like `t` with declared fields replaced; also on a result of `like`.
 end
 
 """
-The conformance's inverse: a value of the user's type `typeof(u)` with the new parts of `res`.
+The implementation's inverse: a value of the user's type `typeof(u)` with the new parts of `res`.
 A type that implements the operations itself is replaced by the new value (of the same type);
 otherwise the user's object is rebuilt by its constructor with the forwarding field and the
 declared fields replaced, so its parameters follow the new fields.
@@ -736,7 +736,7 @@ end
 function _dyn_like(d::Dynamic{X}, x) where {X}
     t = opened(d)
     v = getfield(t, :views)[1]
-    isempty(getfield(v, :fs)) || throw(TraitBoundError("$X declares fields, so a new value of its implementing type alone does not conform"))
+    isempty(getfield(v, :fs)) || throw(TraitBoundError("$X declares fields, so a new value of its receiver type alone does not conform"))
     return Dynamic{X}(TObj(map(w -> _selfview(typeof(w).parameters[1], getfield(w, :w), x), getfield(t, :views))))
 end
 

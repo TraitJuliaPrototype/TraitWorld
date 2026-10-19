@@ -2,8 +2,8 @@
 # Definition checking (session 22): library code checked once, against its
 # bounds alone. A trait object has no methods but its traits' operations, and
 # every operation declares its result type, so a worker's code is the same for
-# every representation except the operations' implementations, which are
-# checked at their conformance. Inferring a worker once at an archetype, a
+# every representation except the methods that serve the operations, which
+# are checked at their implementation. Inferring a worker once at an archetype, a
 # stand-in representation whose operations return values of their declared
 # types and nothing more, therefore checks it for every representation: the
 # archetypes of C++0x concepts, the definition checking of Rust and Swift.

@@ -52,7 +52,7 @@ interpreter with plain inference rules, in a cache of its own, so that checking 
 value exists compiles nothing the program runs. Being Julia's own interpreter, its compiler code
 runs in the compiler's world (Base reflection does so for a `NativeInterpreter`): loading packages
 never invalidates it. A custom interpreter's compiler code was compiled again after big loads
-(3.7 s for a forwarding conformance after CSV, DataFrames and CairoMakie).
+(3.7 s for a forwarding implementation after CSV, DataFrames and CairoMakie).
 """
 _check_interp(world::UInt = Base.get_world_counter()) = CC.NativeInterpreter(world; facts = false, owner = _CheckOwner())
 "Keywords for reflection by the definition checks: their own interpreter."
@@ -70,15 +70,15 @@ const _FACTS_DEBUG = Ref(false)
 """
     _latest(f, args...)
 
-A slow path of the machinery (finding a conformance's builder, the checks at a signature's first
+A slow path of the machinery (finding an implementation's builder, the checks at a signature's first
 call), run in the latest world: TraitWorld's own code is plain Julia.
 """
 _latest(f, args...) = Base.invokelatest(f, args...)
 
 """
-The world the machinery decides conformances in: the caller's (`tls_world_age()` where an entry's
+The world the machinery decides implementations in: the caller's (`tls_world_age()` where an entry's
 slow path starts), as plain Julia dispatches in the caller's world. A task pinned to an older world
-then sees the conformances of its world, not of the latest. Outside a decision, the latest world.
+then sees the implementations of its world, not of the latest. Outside a decision, the latest world.
 """
 const _DECISION_WORLD = Base.ScopedValues.ScopedValue{UInt}(UInt(0))
 _decision_world() = (w = _DECISION_WORLD[]; w == 0 ? Base.get_world_counter() : w)

@@ -336,7 +336,7 @@ mutable struct _Walk
     world::UInt
     scans::IdDict{Core.MethodInstance,_Scan}
     active::Base.IdSet{Core.MethodInstance}
-    plans::Vector{Any}                          # ((X, U), builder): slow-path conformances to cache for a closed world
+    plans::Vector{Any}                          # ((X, U), builder): slow-path implementations to cache for a closed world
     views::Base.IdSet{Core.MethodInstance}      # entries analyzed at a call site's types (never compiled as such)
     native_only::Base.IdSet{Core.MethodInstance}   # the entries' real instances: checked for native code only
     dyn_made::IdDict{Any,Vector{Any}}           # trait family => trait object types kept in its dynamic values
@@ -354,7 +354,7 @@ _scan_interp(mi::Core.MethodInstance, cx) = (_facts_method(mi.def) || mi in cx.f
     Base.Compiler.NativeInterpreter(cx.world; facts = true, owner = Base.Compiler.FACTS_OWNER) : nothing
 
 """
-A dynamic value made here (note "AOT": a `Dynamic` value adds the conformances whose types reach
+A dynamic value made here (note "AOT": a `Dynamic` value adds the implementations whose types reach
 the place it is made): record the trait object type it keeps, for the operations on dynamic values
 of its trait, which dispatch on it.
 """
@@ -499,8 +499,8 @@ end
 
 """
 The targets of an entry step for the traits `L` at an argument of type `T`: the entry's own
-specialization per user type, the conformance methods it calls (by dispatch, when `T` is not
-concrete), and the builders of slow-path conformances, which a closed world caches.
+specialization per user type, the methods of `conformance` it calls (by dispatch, when `T` is not
+concrete), and the builders of slow-path implementations, which a closed world caches.
 Returns the targets, the result types, and whether some type has none of the traits.
 """
 function _entry_targets(cx, @nospecialize(L), @nospecialize(T), world::UInt, outtype, selfsig)
@@ -610,7 +610,7 @@ function _scan(mi::Core.MethodInstance, cx::_Walk)
                 length(ps) == 2 && ps[1] isa DataType && ps[1] <: Type && _note_dyn_made!(cx, ps[1].parameters[1], ps[2])
             end
             if cm === _enter_method()
-                # enter(EntryPos{F, pos, nargs}(), t): the conformances per user type
+                # enter(EntryPos{F, pos, nargs}(), t): the implementations per user type
                 a = st.args[3:end]
                 Pv = _constval(src, sptypes, a[1])
                 T = _argT(src, sptypes, a[2])
@@ -653,7 +653,7 @@ function _scan(mi::Core.MethodInstance, cx::_Walk)
                 site(:trait, i, :callable, Any[Ft], ts)
                 continue
             elseif cm === _enter_kw_method()
-                # enter_kw(L, f, k, nt): the conformances per user type of a bounded keyword
+                # enter_kw(L, f, k, nt): the implementations per user type of a bounded keyword
                 a = st.args[3:end]
                 lv = _constval(src, sptypes, a[1]); kv = _constval(src, sptypes, a[3])
                 NT = _argT(src, sptypes, a[4])
@@ -814,7 +814,7 @@ function _scan(mi::Core.MethodInstance, cx::_Walk)
                     # whose inverses are not listed for AOT yet
                     mi.def isa Method && Base.unwrap_unionall(mi.def.sig).parameters[1] in _LIKE_FUNCS && hole(:inverse, i, f, ats)
                 elseif rc === nothing && !isempty(ats) && !_isleaf(ats[1]) && (X = _dyn_op_family(src, sptypes, st.args[2])) !== nothing
-                    # an operation on a dynamic value: its targets are the conformances of X whose trait
+                    # an operation on a dynamic value: its targets are the implementations of X whose trait
                     # objects the program keeps in dynamic values, resolved after the walk
                     site(:trait, i, :dynamic, ats)
                     push!(cx.dyn_ops, (sites[end], X, f, ats[2:end], mi))

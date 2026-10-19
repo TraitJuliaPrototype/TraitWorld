@@ -63,12 +63,12 @@ const SELF = Slot(-1, 0)
     Key{I, F}
 
 The key of a trait that declares fields (note "Terms": what a bound can see): the
-implementing type `I` (`Nothing` for a trait with fields only) and `F`, a named-tuple
+receiver type `I` (`Nothing` for a trait with fields only) and `F`, a named-tuple
 type of the declared fields' types in the conforming type. A trait without fields is
-keyed by its implementing type alone.
+keyed by its receiver type alone.
 """
 struct Key{I,F} end
-"The implementing type of a key."
+"The receiver type of a key."
 _impl(::Type{K}) where {K} = K
 _impl(::Type{Key{I,F}}) where {I,F} = I
 "The type of declared field `f` in a key."
@@ -76,7 +76,7 @@ _keyfield(::Type{Key{I,F}}, f::Symbol) where {I,F} = fieldtype(F, f)
 
 """
 A view: the witness, the user's object `o` when its type is mutable (`nothing` otherwise),
-the slots of the implementing value and of the declared fields, and `parts`, those values
+the slots of the receiver and of the declared fields, and `parts`, those values
 held, typed by the key (note "Declaring a trait": a mutable object is read through, an
 immutable one held, which is equivalent because none of its fields can be rebound). Its
 type depends on the trait and the key, never on the user's type, so one worker compiled
@@ -91,7 +91,7 @@ struct View{X,W,K,N,P} <: AbstractView{X,W,K}
     parts::P
 end
 """
-A held view: the view of an immutable value that is its own implementing value, holding the whole
+A held view: the view of an immutable value that is its own receiver, holding the whole
 value (`parts[1]`) and its declared fields' values, with no read-through object or slot (the
 user's decision, session 29). Reading it is a field load, and a trait object of an immutable value
 is as large as the value: a `Dynamic` of it is one box, as a plain abstractly typed value is. A key
@@ -103,7 +103,7 @@ struct Held{X,W,K,N,P} <: AbstractView{X,W,K}
     fs::NTuple{N,Slot}
     parts::P
 end
-"The view of `r` as its own implementing value, with no declared fields (generic implementations' constraints, `Like` results): held when immutable."
+"The view of `r` as its own receiver, with no declared fields (generic implementations' constraints, `Like` results): held when immutable."
 @inline _selfview(::Type{X}, w::W, r) where {X,W} = ismutable(r) ?
     View{X,W,typeof(r),0,Tuple{typeof(r)}}(w, r, SELF, (), (r,)) :
     Held{X,W,typeof(r),0,Tuple{typeof(r)}}(w, (), (r,))
@@ -111,7 +111,7 @@ end
 _selfview_type(@nospecialize(X), @nospecialize(W), @nospecialize(R)) =
     isconcretetype(R) && !ismutabletype(R) ? Held{X,W,R,0,Tuple{R}} : View{X,W,R,0,Tuple{R}}
 
-"The implementing value a view stands for: the user's object, or its forwarding field, read now (held for an immutable type)."
+"The receiver a view stands for: the user's object, or its forwarding field, read now (held for an immutable type)."
 @inline function _rep(v::View{X,W,K}) where {X,W,K}
     getfield(v, :o) === nothing && return getfield(getfield(v, :parts), 1)
     return _loadpart(_impl(K), v, getfield(v, :r))
@@ -120,7 +120,7 @@ end
 "Whether a view holds its parts (an immutable value): its fields cannot be written."
 @inline _isheld(v::View) = getfield(v, :o) === nothing
 @inline _isheld(::Held) = true
-"The slot of a view's implementing value in the user's object (`SELF`: the object itself)."
+"The slot of a view's receiver in the user's object (`SELF`: the object itself)."
 @inline _viewslot(v::View) = getfield(v, :r)
 @inline _viewslot(::Held) = SELF
 "The user's object a view reads, or `nothing` when it holds only parts (a held view holds the whole value)."
@@ -173,7 +173,7 @@ end
     getfield(s, :off) < 0 && return getfield(v, :o)::T
     return _loadfield(T, v, s)
 end
-"No implementing type (every operation served by a default): there is no implementing value."
+"No receiver type (every operation served by a default): there is no receiver."
 @inline _loadpart(::Type{Nothing}, v::View, s::Slot) = nothing
 "Whether the runtime has the field-offset intrinsics (patched Julia, julia-support.md piece 3)."
 const _HAS_FIELD_INTRINSICS = isdefined(Core.Intrinsics, :getfield_at_offset)
@@ -229,7 +229,7 @@ Julia cannot specialize the call and passes the trait object boxed.)
 struct PTag{F,i,v} end
 _isptag(@nospecialize(X)) = X isa DataType && X <: PTag
 
-"The trait set of trait instances: their families, and a tag per parameter they fix (the implementing type excluded)."
+"The trait set of trait instances: their families, and a tag per parameter they fix (the receiver type excluded)."
 function _encode_traits(insts)
     ms = Any[]
     for X in insts
@@ -250,7 +250,7 @@ end
 
 """
 A trait set or a worker's lower bound decoded into trait patterns: each family applied to the
-parameters its tags fix and a type variable for each other one, the implementing type last
+parameters its tags fix and a type variable for each other one, the receiver type last
 (`StateVector{Float64, R} where R`). What the machinery reasons about.
 """
 function _decode_traits(@nospecialize(lb))
@@ -306,8 +306,8 @@ trait_params(@nospecialize(X)) = ()
 Base.Experimental.@max_methods 1 function param end
 """
 `param(X, Val(p), R)`: parameter `p` of trait `X` at representation `R`, an
-associated type: one value per conformance, defined by the trait's equation
-(`T = eltype(R)`) or by the conformance (`@implement ArrayLike{Float64, 1} MyVector`).
+associated type: one value per implementation, defined by the trait's equation
+(`T = eltype(R)`) or by the implementation (`@implement ArrayLike{Float64, 1} MyVector`).
 """
 param
 Base.Experimental.@max_methods 1 function param_bound end
@@ -388,7 +388,7 @@ Base.convert(::Type{Dynamic{X}}, t::TObj) where {X} = Dynamic{X}(t)
 @generated _family_of(::Type{X}) where {X} = :($(_family(X)))
 
 """
-Register the trait-object types a `Dynamic` keeps for the conformances declared since the last call
+Register the trait-object types a `Dynamic` keeps for the implementations declared since the last call
 (methods of `implementation` at a concrete type), as candidates of the call-site splits: inferred
 along the path `Dynamic{X}(x)` takes, in the checks' own cache. A type whose trait object is not
 inferred concretely is left out (its values are registered when made). Called after each
@@ -497,7 +497,7 @@ function _register_type_printers()
     return nothing
 end
 Base.show(io::IO, t::TObj) = (print(io, "trait object "); _show_tobj(io, typeof(t)))
-"A key as a reader wants it: the implementing type, then the declared fields' types, `Vector{Float64}; u::Vector{Float64}, p::Params`."
+"A key as a reader wants it: the receiver type, then the declared fields' types, `Vector{Float64}; u::Vector{Float64}, p::Params`."
 function _show_key(io::IO, @nospecialize(K))
     if K isa DataType && K <: Key && length(K.parameters) == 2
         I, F = K.parameters
@@ -518,7 +518,7 @@ trait_fields(@nospecialize(X)) = ()
 Base.Experimental.@max_methods 1 function field_type end
 @doc "`field_type(X, Val(f), R)`: the declared type of field `f` at representation `R`." field_type
 Base.Experimental.@max_methods 1 function trait_uses_self end
-"`trait_uses_self(X)`: whether trait `X`'s declarations name the implementing type (`Self` in an operation's types, or a defining equation)."
+"`trait_uses_self(X)`: whether trait `X`'s declarations name the receiver type (`Self` in an operation's types, or a defining equation)."
 trait_uses_self(@nospecialize(X)) = false
 Base.Experimental.@max_methods 1 function _fieldmatch end
 @doc "`_fieldmatch(X, Val(f), FT)`: the parameters field `f` of trait `X` defines, matched against its type `FT` in a conforming type (methods added by @trait)." _fieldmatch
@@ -526,7 +526,7 @@ Base.Experimental.@max_methods 1 function trait_field_params end
 "`trait_field_params(X)`: the parameters of `X` that its declared fields define (`u::U`, `data::Vector{T}`)."
 trait_field_params(@nospecialize(X)) = ()
 Base.Experimental.@max_methods 1 function field_isrep end
-"`field_isrep(X, Val(f))`: whether field `f` is declared with the implementing type: it names the forwarding field of a one-line conformance."
+"`field_isrep(X, Val(f))`: whether field `f` is declared with the receiver type: it names the forwarding field of a one-line implementation."
 field_isrep(@nospecialize(X), @nospecialize(f)) = false
 
 # `t.f` on a trait object: a field one of its traits declares (methods added by @trait), else an error
@@ -560,7 +560,7 @@ end
     K = _reptype(typeof(v))
     T = _fieldkeytype(X, Val(f), K)
     y = x::T
-    _isheld(v) && Base.inferencebarrier(_readonly)(X, f)     # the conformance check refuses writable fields on immutable types
+    _isheld(v) && Base.inferencebarrier(_readonly)(X, f)     # the check at `@implement` refuses writable fields on immutable types
     _storefield(T, v, getfield(v, :fs)[_fieldpos(X, Val(f))], y)
     return y
 end
@@ -569,7 +569,7 @@ end
 
 "The representation's own methods implement the trait; `D` lists the operations served by the trait's defaults."
 struct Impl{D} end
-# whether operation `op` is the implementing type's own method, called with the representation
+# whether operation `op` is the receiver type's own method, called with the representation
 @inline _direct_ok(::Impl{D}, ::Val{op}) where {D,op} = !Base.sym_in(op, D)
 @inline _direct_ok(::Any, ::Val) = false
 "A constraint trait's witness inside a generic implementation."
@@ -614,8 +614,8 @@ is_mutating(@nospecialize(X), @nospecialize(op)) = false
 Base.Experimental.@max_methods 1 function trait_concreteness end
 """
 `trait_concreteness(X)`: what trait `X` asks of its keys (decision 1, session 27): `:none` (the
-default: a key may be abstract, silently), `:warn` (`@warn_on_abstract` in the trait's body: a
-conformance with an abstract key warns) or `:concrete_only` (`@concrete_only`: such a conformance,
+default: a key may be abstract, silently), `:warn` (`@warn_on_abstract` in the trait's body: an
+implementation with an abstract key warns) or `:concrete_only` (`@concrete_only`: such an implementation,
 or a family member at an abstract parameter, is refused).
 """
 trait_concreteness(@nospecialize(X)) = :none

@@ -94,8 +94,8 @@ end
 
 """
 The trait syntax of the design (note "Declaring a trait"): operations declared at the trait,
-`ncols(t::ColTable)::Int`, `Self` for the implementing type, every header parameter an
-associated type. Lowered to the internal form, whose last parameter is the implementing
+`ncols(t::ColTable)::Int`, `Self` for the receiver type, every header parameter an
+associated type. Lowered to the internal form, whose last parameter is the receiver
 type, named `Self`. A trait whose operations take `r::R`, `R` the header's last parameter,
 is the earlier spelling and passes unchanged. Returns the header, the block, and the
 (parameter, field) pairs where a field's type is a parameter.
@@ -256,7 +256,7 @@ macro trait(header, block = nothing)
         end
     end
     isempty(fieldparams) || push!(out, :($TW.trait_field_params(::Type{$name}) = $(Tuple(p for (p, _, _) in fieldparams))))
-    # whether the declarations name the implementing type: then a conformance always has one (note "Terms")
+    # whether the declarations name the receiver type: then an implementation always has one (note "Terms")
     uses_self = any(d -> any(a -> _mentions(a[2], Rsym), d.args) || _mentions(d.ret, Rsym), decls) ||
                 any(ex -> ex isa Expr && ex.head === :(=) && ex.args[1] isa Symbol && ex.args[1] in pnames, block.args) ||
                 any(x -> _mentions(x[2], Rsym), fdecls)
@@ -302,7 +302,7 @@ macro trait(header, block = nothing)
         syms = [gensym(:a) for _ in d.args]
         dep(t) = _mentions(t, Rsym) || any(p -> _mentions(t, p), pnames)
         retx = dep(d.ret) ? :Any : d.ret
-        # a constructor operation (result R) gives a dynamic value of the same conformance
+        # a constructor operation (result R) gives a dynamic value of the same implementation
         call = :($(d.fexpr)($TW.opened(dyn), $(syms...)))
         X__ = gensym(:X)
         if d.ret === Rsym

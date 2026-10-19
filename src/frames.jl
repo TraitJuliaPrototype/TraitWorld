@@ -71,7 +71,7 @@ function _bound_hint(io::IO, e::MethodError, @nospecialize(argtypes), @nospecial
         a = args[pos]
         any(X -> try conforms(typeof(a), X) catch; false end, Xs) && continue
         print(io, "\nArgument ", pos, " of `", f, "` is bounded by ", join(string.(Xs), " or "),
-              "; a ", typeof(a), " conforms to none of them (declare a conformance with `@implement`, or convert it).")
+              "; a ", typeof(a), " conforms to none of them (declare an implementation with `@implement`, or convert it).")
     end
     return nothing
 end

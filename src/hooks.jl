@@ -2,7 +2,7 @@
 # The method-definition hooks of the patched Julia (writeup/explorations/julia-support.md,
 # piece 1). Where the runtime offers them, the trait world's rules about definitions are
 # enforced when a method is defined, before it becomes visible, instead of at checkpoints:
-#   - an override after a conformance (note "Declaring a trait") is refused at its definition,
+#   - an override after an implementation (note "Declaring a trait") is refused at its definition,
 #     and a package image's overrides are left inactive at its load;
 #   - a method added to a trait module after it is complete refreshes the module's keep flags.
 # On stock Julia the hooks do not exist; the checkpoint (`check_overrides`) remains, and is kept
@@ -78,7 +78,7 @@ function _index_declared!(m::Method)
     return nothing
 end
 """
-The conformances' default-served operations by operation function: built once from the methods of
+The implementations' default-served operations by operation function: built once from the methods of
 `_declared_defaults`, then kept current by the hooks, which see every new such method.
 """
 function _override_index()
@@ -134,7 +134,7 @@ function _family_records()
 end
 _is_declared_defaults(m::Method) = (sig = Base.unwrap_unionall(m.sig); sig isa DataType && !isempty(sig.parameters) && sig.parameters[1] === typeof(_declared_defaults))
 
-"An override that method `m` would make after a conformance whose default serves the operation, or `nothing`."
+"An override that method `m` would make after an implementation whose default serves the operation, or `nothing`."
 function _override_violation(m::Method)
     sig = Base.unwrap_unionall(m.sig)
     sig isa DataType && !isempty(sig.parameters) || return nothing
@@ -146,8 +146,8 @@ function _override_violation(m::Method)
         for N in _arities(Y, op)
             A = _declared_args(Y, op, R, N)
             Tuple{FT,R,A.parameters...} <: m.sig || continue
-            return "`$op` of $Y gets a method for $R ($m), but the conformance of $T to $X serves it by the trait's default. " *
-                   "An override belongs to the conformance, and a declared conformance cannot change (compiled code and kept values depend on it): " *
+            return "`$op` of $Y gets a method for $R ($m), but the implementation of $X for $T serves it by the trait's default. " *
+                   "An override belongs to the implementation, and a declared implementation cannot change (compiled code and kept values depend on it): " *
                    "define the method before `@implement`, or in its block, and restart the session"
         end
     end
@@ -234,7 +234,7 @@ end
             m isa Method || continue
             _is_declared_defaults(m) && (_OVR_BUILT[] = false)   # not active yet: the index is rebuilt at its next use
         end
-        # overrides are checked against the conformances already active; an image's own are its package's business
+        # overrides are checked against the implementations already active; an image's own are its package's business
         idx = _override_index()
         for m in ms
             m isa Method || continue
@@ -257,7 +257,7 @@ end
 function _report_refused_at_load()
     if !isempty(_REFUSED_OVERRIDES)
         ms = copy(_REFUSED_OVERRIDES); empty!(_REFUSED_OVERRIDES)
-        @error "ImplementError: overrides after a conformance were left inactive at load:\n  " * join(string.(ms), "\n  ")
+        @error "ImplementError: overrides after an implementation were left inactive at load:\n  " * join(string.(ms), "\n  ")
     end
     if !isempty(_REFUSED_PIRATES)
         es = copy(_REFUSED_PIRATES); empty!(_REFUSED_PIRATES)

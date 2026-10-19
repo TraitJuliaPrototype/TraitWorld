@@ -1,4 +1,4 @@
-# `@implement` and the conformance checks are cold code that works on expressions and types held
+# `@implement` and the implementation checks are cold code that works on expressions and types held
 # as `Any`: its methods do not specialize on their arguments (`@nospecialize` for the whole file,
 # undone at its end). Under the facts policy a call of one of them at abstract argument types is
 # then a fact at a non-public function and compiles to an `:invoke` of the policy's code, instead
@@ -37,7 +37,7 @@ struct GenericRec
 end
 
 """
-A conformance (note "How a type conforms to a trait"): the implementing type `R`, the
+An implementation (note "How a type conforms to a trait"): the receiver type `R`, the
 forwarding field (`field`, or 0 when the type implements the operations itself), a
 type's own operations called indirectly (`dyn`) if any, and the mapping of declared
 fields to stored fields (`fmap`, `nothing` for the same names).
@@ -133,7 +133,7 @@ _mutating(@nospecialize(X), op::Symbol) = _in_decision_world(is_mutating, X, Val
 
 """
 The operations of `X` that `T` must implement (no default), one line each: the declared signature at
-`T` and what `T` has of it, for a conformance error that says what is required.
+`T` and what `T` has of it, for an implementation error that says what is required.
 """
 function _required_ops_text(@nospecialize(X), @nospecialize(T))
     lines = String[]
@@ -214,7 +214,7 @@ function _generic_keys(@nospecialize(X))
     return out
 end
 
-# --- conformance --------------------------------------------------------------
+# --- the implementation check ---------------------------------------------------
 
 """
 Check that the operations `ops` of `X` have methods at `R` whose inferred
@@ -316,7 +316,7 @@ _existing_defaults(@nospecialize(X), @nospecialize(R)) =
 end
 
 function _witness(@nospecialize(X), @nospecialize(R))
-    # a trait without operations (only fields) is implemented by every representation; its fields are checked at the conformance
+    # a trait without operations (only fields) is implemented by every representation; its fields are checked at the implementation
     isempty(_ops(X)) && isempty(_generic_keys(X)) && return Impl{()}()
     rec = _impl(X, R)
     if rec isa ImplRec
@@ -388,9 +388,9 @@ end
 _hasfirst(v::Vector{Any}, @nospecialize(y)) = (for s in v; (s::Tuple)[1] === y && return true; end; false)
 
 """
-The conformance of `T` to `X`: a declared one, or `T` itself when it implements `X` and has
+The implementation of `X` for `T`: a declared one, or `T` itself when it implements `X` and has
 the fields `X` and its supertraits declare, under their own names. A type that implements
-the operations but lacks the fields is an implementing type, not a member.
+the operations but lacks the fields is a receiver type, not a member.
 """
 function proj_lookup(@nospecialize(X), @nospecialize(T))
     p = _proj(X, T)
@@ -491,8 +491,8 @@ _check_implementation(mod::Module, @nospecialize(X), @nospecialize(R), given::Tu
         end
     end
     isconcretetype(R) || return nothing          # families and generic implementations are checked per type
-    _concreteness_check(X, R, "the implementing type")
-    ps = conformance_problems(X, R, given)       # fields belong to a conformance, not to an implementation
+    _concreteness_check(X, R, "the receiver type")
+    ps = conformance_problems(X, R, given)       # the operations only: declared fields are checked with the declaration
     isempty(ps) || throw(ImplementError("the implementation of $X for $R does not conform:\n  " * join(ps, "\n  ")))
     for S in trait_closure(X)[2:end]
         witness(S, R) === nothing &&
@@ -599,21 +599,21 @@ function _rep_of(@nospecialize(f), @nospecialize(T), @nospecialize(Rdecl), Xs = 
 end
 
 
-# --- conformances as methods (keys-plan §6) -----------------------------------------
+# --- implementations as methods (keys-plan §6) -----------------------------------------
 
 Base.Experimental.@max_methods 1 function _declared_defaults end
 """
-`_declared_defaults(X, T)`: the operations a declared conformance of `T` to `X` serves by
-defaults, as `(trait, implementing type, operations)` records, one method per conformance,
+`_declared_defaults(X, T)`: the operations a declared implementation of `X` for `T` serves by
+defaults, as `(trait, receiver type, operations)` records, one method per implementation,
 defined with it so that it is saved with the declaring package (note "Declaring a trait":
-an override belongs to the conformance).
+an override belongs to the implementation).
 """
 _declared_defaults
 
 """
-What a conformance declaration fixes, after its checks: the builder of its views
+What an implementation's declaration fixes, after its checks: the builder of its views
 (`nothing` when it must be built per session) and the operations its defaults serve,
-without those the implementing type already had a method for.
+without those the receiver type already had a method for.
 """
 _declare_conformance(@nospecialize(X), @nospecialize(T)) = _latest(_declare_conformance_now, X, T)
 @machinery function _declare_conformance_now(@nospecialize(X), @nospecialize(T))
@@ -640,7 +640,7 @@ function _has_conformance_method(@nospecialize(X), @nospecialize(T))
 end
 
 """
-The statements that make a conformance a method: `conformance(X, u::T)` from a builder fixed now.
+The statements that make an implementation a method: `conformance(X, u::T)` from a builder fixed now.
 The method is part of the entry that calls it (a value crossing by its bound): a boundary, compiled
 in its caller's mode and inlined there, so a typed call from plain code builds the trait object in
 place.
@@ -656,7 +656,7 @@ function _conformance_methods(Xex, Tex)
 end
 
 """
-The statements that make a family's conformance a method: `conformance(X, u::T) where {…}` for
+The statements that make a family's implementation a method: `conformance(X, u::T) where {…}` for
 the whole family, with a registry of builders per member type in the declaring module. A member's
 builder is found once on the slow path and kept there; builders found by the declaring package's
 workload are saved with its image, so a session does not find them again (34 ms for the solver's
@@ -673,9 +673,9 @@ function _family_conformance_methods(@nospecialize(Xex), Tpat, wheres)
         Expr(:(=), Expr(:where, :($TW.conformance(::$TW.As{$Xex}, u::$Tpat)), wheres...),
              :($TW._conf_family($reg, $Xex, u)))]
 end
-"`_family_registry(Val(name))`: a family conformance's builder registry, for the index of default-served operations."
+"`_family_registry(Val(name))`: a family implementation's builder registry, for the index of default-served operations."
 function _family_registry end
-"A family member's conformance: its kept builder, or the slow path, which keeps it."
+"A family member's implementation: its kept builder, or the slow path, which keeps it."
 @inline function _conf_family(reg::Base.RefValue{IdDict{Any,Any}}, ::Type{X}, u) where {X}
     b = get(reg[], typeof(u), nothing)
     b === nothing && return Base.inferencebarrier(_conf_family_slow)(reg, X, u)
@@ -694,13 +694,13 @@ end
             d[U] = b
             reg[] = d                                   # readers see the old table or the new one
         end
-        # the member's conformance is now fixed: a later override of an operation its defaults
+        # the member's implementation is now fixed: a later override of an operation its defaults
         # serve is refused, as for a single type's declaration (note "Declaring a trait")
         _OVR_BUILT[] && _index_builder!(X, U, b)
     end
     return r
 end
-"The builder of a family member's conformance, fixed when first compiled: `nothing` if it cannot be."
+"The builder of a family member's implementation, fixed when first compiled: `nothing` if it cannot be."
 @machinery function _family_builder(@nospecialize(X), @nospecialize(U))
     (U isa DataType && isconcretetype(U)) || return nothing
     try
@@ -721,8 +721,8 @@ end
 """
     check_overrides() -> Vector{String}
 
-Methods of a trait's operation defined after a conformance whose default serves that
-operation for the type (note "Declaring a trait": an override belongs to the conformance;
+Methods of a trait's operation defined after an implementation whose default serves that
+operation for the type (note "Declaring a trait": an override belongs to the implementation;
 plain Julia would call the later method, so accepting it would break "identical or error").
 Checked at every declaration, at the end of a trait module, after package loads and at a
 worker signature's first call; refusing at the definition needs the runtime.
@@ -739,20 +739,20 @@ function check_overrides()
         for (Y, R, D) in recs
             for op in D
                 _has_op_method(Y, op, R) || continue
-                push!(out, "`$op` of $Y now has a method for $R, but the conformance of $T to $X serves it by the trait's default. " *
-                           "An override belongs to the conformance, and a declared conformance cannot change (compiled code and kept values depend on it): " *
+                push!(out, "`$op` of $Y now has a method for $R, but the implementation of $X for $T serves it by the trait's default. " *
+                           "An override belongs to the implementation, and a declared implementation cannot change (compiled code and kept values depend on it): " *
                    "define the method before `@implement`, or in its block, and restart the session")
             end
         end
     end
     for (Y, op, R, X, T) in _family_records()
         _has_op_method(Y, op, R) || continue
-        push!(out, "`$op` of $Y now has a method for $R, but $R's conformance to $X, fixed at its first use, serves it by the trait's default. " *
-                   "An override belongs to the conformance, and a fixed conformance cannot change: define the method before the type's first use, and restart the session")
+        push!(out, "`$op` of $Y now has a method for $R, but $R's implementation of $X, fixed at its first use, serves it by the trait's default. " *
+                   "An override belongs to the implementation, and a fixed implementation cannot change: define the method before the type's first use, and restart the session")
     end
     return out
 end
-"Refuse overrides made after a conformance (see `check_overrides`)."
+"Refuse overrides made after an implementation (see `check_overrides`)."
 function _refuse_overrides()
     ps = check_overrides()
     isempty(ps) || throw(ImplementError(join(unique(ps), "\n  ")))
@@ -824,7 +824,7 @@ end
 _flag(x) = x isa Symbol && x in (:dynamic, :copies)
 
 """
-The conformance syntax of the design (note "How a type conforms to a trait"), lowered to the
+The implementation syntax of the design (note "How a type conforms to a trait"), lowered to the
 forms below:
 - `@implement X T begin ops end`: an implementation for `T` and its declaration, `X{P…, T}`;
 - `@implement X A where {A <: …} [begin … end]`: a family or generic implementation;
@@ -918,20 +918,20 @@ end
     rest = collect(args[2:end])
     # --- projections: @implement X T …, @implement (X, Y) T …, @implement X{R} T …
     if !isempty(rest) && !(rest[1] isa Expr && rest[1].head === :block)
-        # a conformance declared again in the session, with an implementation block: refused with
+        # an implementation declared again in the session, with a block of methods: refused with
         # the reason (design.md §4.4), not with what the block lacks
         if length(rest) >= 2 && rest[end] isa Expr && rest[end].head === :block
             X = try Core.eval(mod, head) catch; nothing end
             T = try Core.eval(mod, rest[1]) catch; nothing end
             if X isa Type && T isa Type && is_trait(X) && _has_conformance_method(X, T)
-                throw(ImplementError("$T already conforms to $X: a conformance is not redeclared in a session. " *
-                                     "An override of a default belongs to the conformance (the key and kept values depend on it); " *
+                throw(ImplementError("$T already conforms to $X: an implementation is not redeclared in a session. " *
+                                     "An override of a default belongs to the implementation (the key and kept values depend on it); " *
                                      "to change it, change the declaration and restart Julia (redeclaration is not built yet)"))
             end
         end
         return _implement_projection(mod, head, rest; fmap)
     end
-    fmap === nothing || error("@implement: a field mapping belongs to a conformance, `@implement X T name => stored`")
+    fmap === nothing || error("@implement: a field mapping belongs to an implementation for a type, `@implement X T name => stored`")
     block = isempty(rest) ? nothing : rest[1]
     # --- generic and family implementations: X{R} where {...}
     if head isa Expr && head.head === :where
@@ -947,8 +947,8 @@ end
     if block !== nothing
         Rv = _tryeval(mod, Rex)
         Rv isa Type && _has_conformance_method(X, Rv) &&
-            throw(ImplementError("$Rv already conforms to $X: a conformance is not redeclared in a session. " *
-                                 "An override of a default belongs to the conformance (the key and kept values depend on it); " *
+            throw(ImplementError("$Rv already conforms to $X: an implementation is not redeclared in a session. " *
+                                 "An override of a default belongs to the implementation (the key and kept values depend on it); " *
                                  "to change it, change the declaration and restart Julia (redeclaration is not built yet)"))
     end
     pdefs = _param_methods(X, head.args[2:end-1], Rex, Any[])
@@ -981,7 +981,7 @@ end
     return esc(Expr(:block, out...))
 end
 
-"The methods of `param` a conformance declares: parameter values at the representation `Rex`, under `wheres`."
+"The methods of `param` an implementation declares: parameter values at the representation `Rex`, under `wheres`."
 function _param_methods(@nospecialize(X), pexs, Rex, wheres::Vector{Any})
     TW = TraitWorld
     ps = trait_params(X)
@@ -991,7 +991,7 @@ function _param_methods(@nospecialize(X), pexs, Rex, wheres::Vector{Any})
         pex === :_ && continue              # defined by the trait's equation or field
         sig = :($TW.param(::Type{$X}, ::Val{$(QuoteNode(p))}, ::Type{$Rex}))
         push!(out, Expr(:(=), isempty(wheres) ? sig : Expr(:where, sig, wheres...), pex))
-        # the same parameter at a key with declared fields, whose implementing type is Rex
+        # the same parameter at a key with declared fields, whose receiver type is Rex
         ksig = :($TW.param(::Type{$X}, ::Val{$(QuoteNode(p))}, ::Type{$TW.Key{$Rex,F__}}))
         push!(out, Expr(:(=), Expr(:where, ksig, wheres..., :F__), pex))
     end
@@ -999,7 +999,7 @@ function _param_methods(@nospecialize(X), pexs, Rex, wheres::Vector{Any})
 end
 
 """
-A family conformance: `@implement StateVector{T, Vector{T}} where {T <: Real} begin … end`
+A family implementation: `@implement StateVector{T, Vector{T}} where {T <: Real} begin … end`
 (the trait's parameters and the representation, a family of types), or without
 a block the family's existing methods, as in the joint form
 `@implement ArrayLike{T, 1} Series{T} where {T}`. Each member conforms at one
@@ -1130,7 +1130,7 @@ function _implement_oneline(mod::Module, traits::Vector{Any}, Tex, Rdecl; pexs =
         error("@implement: the one-line form needs a concrete type, got `$Tex` (the prototype does not declare parametric families this way)")
     Xs = Any[Core.eval(mod, x) for x in traits]
     all(is_trait, Xs) || error("@implement: `$(traits[findfirst(!is_trait, Xs)])` is not a trait")
-    # parameters the conformance states (`@implement ODEModel{Float64} Lorenz`): defined now, because
+    # parameters the implementation states (`@implement ODEModel{Float64} Lorenz`): defined now, because
     # the checks below read the operations' declared types, which name them
     if pexs !== nothing
         for ex in _param_methods(Xs[1], pexs, Tex, Any[])
@@ -1151,7 +1151,7 @@ function _implement_oneline(mod::Module, traits::Vector{Any}, Tex, Rdecl; pexs =
         # the type implements the operations itself: its existing methods, checked as an implementation
         out = Any[]
         if fmap !== nothing || any(X -> isempty(_ops(X)) && !isempty(trait_fields(X)), Xs)
-            # a declared conformance with its field mapping (a trait with fields only conforms this way too)
+            # a declared implementation with its field mapping (a trait with fields only conforms this way too)
             for (xex, X) in zip(traits, Xs)
                 prec = gensym(:conformance)
                 Iex = isempty(_ops(X)) ? :Nothing : Tex

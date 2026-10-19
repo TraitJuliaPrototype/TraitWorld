@@ -427,7 +427,7 @@ function _rewrite_fdef(mod::Module, ex)
     likearg = nothing
     if ret isa Expr && ret.head === :curly && ret.args[1] in (:Like, :(TraitWorld.Like)) && length(ret.args) == 2
         # a result like the input: the body's value is a representation; the worker makes it a
-        # trait object of the argument's conformance, the entry a value of the caller's type
+        # trait object of the argument's implementation, the entry a value of the caller's type
         likearg = ret.args[2]
         ret = nothing
         body = :($TraitWorld.like($likearg, $(_like_returns(body, likearg))))
