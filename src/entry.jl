@@ -505,9 +505,11 @@ end
 
 """
 An entry: a method of a trait module compiled in its caller's mode (the boundary meta,
-`Method.facts == 1`); the only other such methods are the implementations, of `conformance`.
+`Method.facts == 1`), or one for a type compiled ahead, in that type's package; the only other
+such methods are the implementations, of `conformance`.
 """
-_is_entry(m::Method) = m.facts == 1 && m.name !== :conformance && isdefined(m.module, :__tw_entries__)
+_is_entry(m::Method) = m.facts == 1 && m.name !== :conformance &&
+    (isdefined(m.module, :__tw_entries__) || isdefined(m.module, :__tw_ahead_entries__))   # or an entry for a type compiled ahead (ahead.jl)
 
 function _plain_method(@nospecialize(f), @nospecialize(sig))
     # all applicable methods: a method lookup would drop those the entry covers

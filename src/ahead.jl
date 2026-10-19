@@ -137,6 +137,9 @@ end
                     all(isconcretetype, (cps[i] for i in 3:length(cps) if i - 2 != pos)) || continue
                     precompile(Tuple{cps...}) && (n += 1)
                 end
+                # and an entry method for `T` itself, in this package: a caller that does not know the
+                # type reaches it by one dispatch, as plain Julia's code for a type
+                n += _ahead_entry!(mod, T, f, pos, nargs)
             end
             # an entry not served by the table: the entry for `T` itself
             if !tabled
@@ -152,4 +155,40 @@ end
     end
     _FACTS_DEBUG[] && Core.println("TraitWorld: compiled ahead for ", X, " ", T, ": ", n, " signatures")
     return nothing
+end
+
+"""
+The entry method for type `T` at position `pos` of `f`'s tabled entry, defined in this package (the
+module of `T`, else the declaring module) and compiled into its image: `f(x::T, …)` invokes the
+generic entry at `T`, so it is the generic entry's folded path. Dispatch picks it for a `T`, and
+the generic entry (the table, untyped.jl) for every type not compiled ahead. The package owns
+`T`: a stakeholder's method, no pirate. Returns the number of signatures compiled.
+"""
+function _ahead_entry!(mod::Module, @nospecialize(T), @nospecialize(f), pos::Int, nargs::Int)
+    (f isa Function && isdefined(parentmodule(f), nameof(f)) && getglobal(parentmodule(f), nameof(f)) === f) || return 0
+    for m in methods(f)
+        _is_entry(m) || continue
+        m.sig isa DataType || continue                      # a `where` entry: not specialized ahead
+        ps = m.sig.parameters
+        length(ps) - 1 == nargs && ps[pos + 1] === Any || continue
+        argt = Any[i == pos ? T : ps[i + 1] for i in 1:nargs]
+        all(isconcretetype, argt) || continue
+        Base.hasmethod(f, Tuple{argt...}) && which(f, Tuple{argt...}) !== m && return 0   # defined already
+        as = [Symbol(:a, i) for i in 1:nargs]
+        name = Expr(:., parentmodule(f), QuoteNode(nameof(f)))
+        def = Expr(:macrocall, GlobalRef(Base, Symbol("@inline")), LineNumberNode(0, :none),
+                   Expr(:function, Expr(:call, name, [:($(as[i])::$(argt[i])) for i in 1:nargs]...),
+                        Expr(:block, Expr(:meta, :facts, 0), :(return invoke($f, $(Tuple{ps[2:end]...}), $(as...))))))
+        for dm in (T isa DataType ? parentmodule(T) : mod, mod)
+            try
+                isdefined(dm, :__tw_ahead_entries__) || Core.eval(dm, :(const __tw_ahead_entries__ = true))
+                Core.eval(dm, def)
+            catch
+                continue                                     # a closed module: another image's
+            end
+            return precompile(f, Tuple(argt)) ? 1 : 0
+        end
+        return 0
+    end
+    return 0
 end
