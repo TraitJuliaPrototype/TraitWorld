@@ -667,38 +667,45 @@ userdbl(x) = 2x
     end))
 end
 
-# --- poc3 M4: the one-line conformance -----------------------------------------------------------
-@testset "poc3 M4: the one-line conformance" begin
+# --- poc3 M4: the one-line conformance, and forwarding with `by` -------------------------------
+# No field is special: the one-line form means the type implements the operations itself;
+# forwarding to a field is always written with `by`.
+@testset "poc3 M4: the one-line conformance, and forwarding with by" begin
     toplevel(quote
-        struct Meas1; data::Vector{Vector{Float64}}; end          # the field named data
-        @implement ColTable Meas1
-        struct Meas2; n::Int; cols::Vector{Vector{Float64}}; end  # the one conforming field
-        @implement ColTable Meas2
-        struct Ramp1; base::Vector{Float64}; n::Int; end         # methods: its own representation
+        struct Meas1; data::Vector{Vector{Float64}}; end
+        @implement ColTable Meas1 by data
+        struct Meas2; n::Int; cols::Vector{Vector{Float64}}; end
+        @implement ColTable Meas2 by cols
+        struct Ramp1; base::Vector{Float64}; n::Int; end         # methods: it implements the operations itself
         Columns.ncols(r::Ramp1) = r.n
         Columns.col(r::Ramp1, i::Int) = r.base .* i
         @implement ColTable Ramp1
-        struct Grid1; data::Matrix{Float64}; end                  # one projection for two traits
-        @implement (ColTable, Main.Rows.RowTable) Grid1
+        struct Grid1; data::Matrix{Float64}; end                  # one field forwarded for two traits
+        @implement (ColTable, Main.Rows.RowTable) Grid1 by data
     end)
     @test colmean(Main.Meas1([[1.0, 3.0]]), 1) == 2.0
     @test colmean(Main.Meas2(1, [[1.0, 3.0]]), 1) == 2.0
     @test colmean(Main.Ramp1([1.0, 3.0], 2), 2) == 4.0
     @test TraitWorld.implementation(ColTable, Main.Ramp1) isa TraitWorld.ImplRec
-    # forwarding does not chain: a field whose type itself forwards is not an implementing type
-    e = thrown(quote struct Nested; data::Meas1; end; @implement ColTable Nested end)
-    @test e isa ImplementError
     @test overview(Main.Grid1([1.0 2.0; 3.0 4.0])) == (2.0, [1.0, 2.0])
+    # without `by`, a field is never chosen: not one named `data`, not the only conforming one
+    e = thrown(quote struct Meas3; data::Vector{Vector{Float64}}; end; @implement ColTable Meas3 end)
+    @test e isa ImplementError && occursin("does not implement the operations", e.msg) && occursin("by data", e.msg)
+    e = thrown(quote struct Meas4; n::Int; cols::Vector{Vector{Float64}}; end; @implement ColTable Meas4 end)
+    @test e isa ImplementError && occursin("by cols", e.msg)
     e = thrown(quote struct TwoF; a::Vector{Vector{Float64}}; b::Vector{Vector{Float64}}; end; @implement ColTable TwoF end)
-    @test e isa ImplementError && occursin("several fields", e.msg) && occursin("a, b", e.msg)
-    e = thrown(quote struct Abs1; data::AbstractVector{Vector{Float64}}; end; @implement GTable Abs1 end)   # an abstract key: allowed (decision 1)
+    @test e isa ImplementError && occursin("by a", e.msg) && occursin("by b", e.msg)
+    # forwarding does not chain: a field whose type itself forwards is not an implementing type
+    e = thrown(quote struct Nested; data::Meas1; end; @implement ColTable Nested by data end)
+    @test e isa ImplementError
+    e = thrown(quote struct Abs1; data::AbstractVector{Vector{Float64}}; end; @implement GTable Abs1 by data end)   # an abstract key: allowed (decision 1)
     @test e === nothing && gmean(Main.Abs1([[1.0, 3.0]])) == 2.0
     e = thrown(quote struct Abs2; data::AbstractVector; end; @implement ColTable Abs2 end)                   # conforms to nothing
-    @test e isa ImplementError && occursin("no field of", e.msg)
+    @test e isa ImplementError && occursin("does not implement the operations", e.msg) && !occursin("by data", e.msg)
     e = thrown(quote struct Part1; n::Int; end; Columns.ncols(r::Part1) = r.n; @implement ColTable Part1 end)
     @test e isa ImplementError && occursin("not for col", e.msg)
     e = thrown(quote struct NoF; x::Int; end; @implement ColTable NoF end)
-    @test e isa ImplementError && occursin("no field of", e.msg)
+    @test e isa ImplementError && occursin("does not implement the operations", e.msg)
 end
 
 # --- poc3 M8: verify_main with keyword entries ------------------------------------------------

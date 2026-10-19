@@ -113,7 +113,7 @@ struct _PCOwn; n::Int; end
     pv(r, i) = Float64(i)
 end
 struct _PCOne; data::Vector{Float64}; end
-@implement _PC.PCT _PCOne
+@implement _PC.PCT _PCOne by data
 
 # a trait of declared fields only, and an implementation by forwarding: the paths of `@implement`
 # that `_PC` does not reach (generic keys, ownership, field slots), so their code is in this image
@@ -136,7 +136,7 @@ PrecompileTools.@compile_workload begin
     _PC.pcsum(v); _PC.pcsum(_PCProj(v)); _PC.pcsum(_PCDyn(v)); _PC.pcsum(_PCOwn(2)); _PC.pcsum(_PCOne(v))
     # untyped calls: the table of declared implementations (untyped.jl), its slow path included
     for x in Any[v, _PCProj(v), _PCOwn(2), _PCOne(v)]; _PC.pcsum(x); end
-    macroexpand(TraitWorld, :(@implement _PC.PCT _PCOne))
+    macroexpand(TraitWorld, :(@implement _PC.PCT _PCOne by data))
     _PC.pcboth(v, _PCProj(v))
     _PC.pcmap(abs, v); _PC.pcmap(x -> 2x, _PCProj(v))
     macroexpand(_PC, :(@implement PCT{Vector{Int}} begin pn(r) = 1; pv(r, i) = 1.0 end))

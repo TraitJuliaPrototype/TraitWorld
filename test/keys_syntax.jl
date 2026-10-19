@@ -48,7 +48,7 @@ end)
 toplevel(quote
     import .KCols: kncols, kcol, kwith, klen, kget
     struct KMeas; label::String; data::Vector{Vector{Float64}}; end
-    @implement KCols.KTable KMeas                              # forwards to `data`, the one conforming field
+    @implement KCols.KTable KMeas by data                      # forwards to `data`
     struct KHalves; left::Vector{Vector{Float64}}; right::Vector{Vector{Float64}}; end
     @implement KCols.KTable KHalves by right                   # forwarding written out
     struct KRamp; base::Vector{Float64}; n::Int; end
@@ -174,13 +174,13 @@ end)
 @testset "Concreteness: opt-in per trait" begin
     P = Main.Pol
     @test TraitWorld.trait_concreteness(P.CO) === :concrete_only && TraitWorld.trait_concreteness(P.NP) === :none
-    e = thrown(quote struct CAbs; data::AbstractVector{Float64}; end; @implement Pol.CO CAbs end)
+    e = thrown(quote struct CAbs; data::AbstractVector{Float64}; end; @implement Pol.CO CAbs by data end)
     @test e isa ImplementError && occursin("@concrete_only", e.msg)
-    @test thrown(quote struct CCon; data::Vector{Float64}; end; @implement Pol.CO CCon end) === nothing
+    @test thrown(quote struct CCon; data::Vector{Float64}; end; @implement Pol.CO CCon by data end) === nothing
     @test P.cuse(Main.CCon([1.0, 2.0])) == 2
-    @test_logs (:warn, r"asks for concrete keys") match_mode = :any toplevel(quote struct WAbs; data::AbstractVector{Float64}; end; @implement Pol.WA WAbs end)
+    @test_logs (:warn, r"asks for concrete keys") match_mode = :any toplevel(quote struct WAbs; data::AbstractVector{Float64}; end; @implement Pol.WA WAbs by data end)
     @test P.wuse(Main.WAbs([1.0])) == 1
-    @test thrown(quote struct NAbs; data::AbstractVector{Float64}; end; @implement Pol.NP NAbs end) === nothing   # silent
+    @test thrown(quote struct NAbs; data::AbstractVector{Float64}; end; @implement Pol.NP NAbs by data end) === nothing   # silent
     @test P.npuse(Main.NAbs([1.0, 2.0, 3.0])) == 3 && P.npuse(Main.NAbs(view([1.0, 2.0, 3.0], 1:2))) == 2
     # a family member at an abstract parameter: refused at the entry where the trait asks for concrete keys
     @test P.cuse(P.SP{Int}(1)) == 1

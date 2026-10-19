@@ -1138,16 +1138,15 @@ _methods_cover(@nospecialize(X), @nospecialize(T)) =
 _methods_some(@nospecialize(X), @nospecialize(T)) = any(op -> _has_op_method(X, op, T), _ops(X))
 
 """
-The one-line form, `@implement Trait T`: methods of the trait's operations for
-`T` make it its own representation, checked as an implementation; otherwise
-the field named `data`, or the one field whose type conforms, is the
-projection, composed with that type's own projection if it has one. Methods
-win over a field; partial methods, several conforming fields without `data`,
-or no conforming field are errors naming the operation or the fields.
+The one-line form, `@implement Trait T`: the type implements the trait's operations itself, with
+methods of its own (or the trait's defaults), checked as an implementation. No field is special:
+forwarding to a field is written with `by` (`@implement Trait T by f`), also when the trait
+declares a field with its receiver type. Partial methods, or none, are errors naming the
+operations, and the fields that could be forwarded to.
 """
 function _implement_oneline(mod::Module, traits::Vector{Any}, Tex, Rdecl; pexs = nothing, fmap = nothing)
     TW = TraitWorld
-    Rdecl === nothing || error("@implement: the one-line form takes no representation; write `@implement $(traits[1]){$Rdecl} $Tex project(t) = …`")
+    Rdecl === nothing || error("@implement: the one-line form takes no receiver type; write `@implement $(traits[1]) $Tex by field`")
     T = Core.eval(mod, Tex)
     T isa DataType && isconcretetype(T) ||
         error("@implement: the one-line form needs a concrete type, got `$Tex` (the prototype does not declare parametric families this way)")
@@ -1161,14 +1160,12 @@ function _implement_oneline(mod::Module, traits::Vector{Any}, Tex, Rdecl; pexs =
         end
         pexs = nothing
     end
-    # a trait that declares its projection field (`data::R`) names the field
+    # a trait that declares a field with its receiver type (`data::R`) is served through a field: `by`
     pfs = _rep_fields(Xs)
     if !isempty(pfs)
-        length(pfs) == 1 || throw(ImplementError("$(join(string.(Xs), ", ")) declare different projection fields: $(join(string.(pfs), ", "))"))
-        f = pfs[1]
-        hasfield(T, f) || throw(ImplementError("$Tex has no field `$f`, which $(join(string.(Xs), ", ")) declares as its projection"))
-        headex = length(traits) == 1 ? traits[1] : Expr(:tuple, traits...)
-        return _implement_projection(mod, headex, Any[Tex, :(project(t) = getfield(t, $(QuoteNode(f))))]; field = Base.fieldindex(T, f), fmap)
+        throw(ImplementError("$(join(string.(Xs), ", ")) declare$(length(Xs) == 1 ? "s" : "") the field " *
+                             "$(join(("`$f`" for f in pfs), ", ")) with the receiver type: name the field $Tex forwards to, " *
+                             "`@implement $(traits[1]) $Tex by $(hasfield(T, pfs[1]) ? pfs[1] : :field)`"))
     end
     if _allwith(_methods_cover, Xs, T)
         # the type implements the operations itself: its existing methods, checked as an implementation
@@ -1198,57 +1195,25 @@ function _implement_oneline(mod::Module, traits::Vector{Any}, Tex, Rdecl; pexs =
         push!(out, :nothing)
         return esc(Expr(:block, out...))
     end
+    # the fields `by` could name: those whose type conforms
+    fns = fieldnames(T)
+    conforming = Symbol[]
+    for i in 1:fieldcount(T)
+        FT = fieldtype(T, i)
+        FT isa Type && _allwith(_has_witness, Xs, FT) && push!(conforming, fns[i])
+    end
+    hint = isempty(conforming) ? "" :
+        "\nOr forward to a field whose type conforms: " * join(("`@implement $(traits[1]) $Tex by $f`" for f in conforming), ", ")
     for X in Xs
         if _methods_some(X, T)
             missing_ops = _missing_ops(X, T)
             throw(ImplementError("$Tex has methods for some operations of $X but not for $(join(string.(missing_ops), ", ")): " *
-                                 "define them, so that $Tex is its own representation, or remove them and conform through a field"))
+                                 "define them" * (isempty(conforming) ? "" : ", or remove them and forward to a field with `by`") * hint))
         end
     end
-    fns = fieldnames(T)
-    conforming = Int[]
-    abstract_conforming = Int[]
-    for i in 1:fieldcount(T)
-        FT = fieldtype(T, i)
-        FT isa Type || continue
-        _allwith(_has_witness, Xs, FT) || continue
-        # a concrete field first; an abstract one where the traits allow abstract keys
-        key_concrete(FT) ? push!(conforming, i) : push!(abstract_conforming, i)
-    end
-    idata = Base.fieldindex(T, :data, false)          # (no tuple of the field names: Base's code per field count)
-    idata == 0 && (idata = nothing)
-    fld = if idata !== nothing && idata in conforming
-        idata
-    elseif length(conforming) == 1
-        conforming[1]
-    elseif isempty(conforming)
-        if !isempty(abstract_conforming)
-            i = abstract_conforming[1]
-            if length(abstract_conforming) == 1 && all(X -> _concreteness_of(X) !== :concrete_only, Xs)
-                i
-            else
-                throw(ImplementError("field `$(fns[i])` of $Tex is declared `$(fieldtype(T, i))`, which is not concrete, and " *
-                                     "$(join(string.(Xs), ", ")) asks for concrete keys (`@concrete_only`): declare a concrete field type, " *
-                                     "or write a projection that materializes it"))
-            end
-        else
-        throw(ImplementError("$Tex does not conform to $(join(string.(Xs), ", ")): it does not implement " *
-                             "the operations, and no field of it conforms " *
-                             "(fields: $(join(("$n::$(fieldtype(T, i))" for (i, n) in enumerate(fns)), ", "))). Required:\n  " *
-                             join((_required_ops_text(X, T) for X in Xs), "\n  ") *
-                             "\nImplement these for $Tex, or forward to a field whose type conforms (`@implement $(traits[1]) $Tex by field`)"))
-        end
-    else
-        throw(ImplementError("several fields of $Tex conform to $(join(string.(Xs), ", ")): $(join(string.(fns[conforming]), ", ")). " *
-                             "Name one `data`, or choose one: `@implement $(traits[1]) $Tex by field`"))
-    end
-    FT = fieldtype(T, fld)
-    fsym = QuoteNode(fns[fld])
-    # the field's type must implement the trait itself: forwarding does not chain
-    _anywith(_has_proj, Xs, FT) && throw(ImplementError(
-        "field `$(fns[fld])` of $Tex forwards $(join(string.(Xs), ", ")) to a field of its own; forward to a field whose type implements the operations"))
-    headex = length(traits) == 1 ? traits[1] : Expr(:tuple, traits...)
-    return _implement_projection(mod, headex, Any[Tex, :(project(t) = getfield(t, $fsym))]; field = fld, fmap)
+    throw(ImplementError("$Tex does not conform to $(join(string.(Xs), ", ")): it does not implement the operations. Required:\n  " *
+                         join((_required_ops_text(X, T) for X in Xs), "\n  ") *
+                         "\nImplement these for $Tex" * (isempty(conforming) ? ", or forward to a field whose type conforms (`@implement $(traits[1]) $Tex by field`)" : "") * hint))
 end
 
 "The field a projection body reads from its argument as is (`t.cols`, `getfield(t, :cols)`), or nothing."
@@ -1338,6 +1303,17 @@ function _implement_projection(mod::Module, head, rest; field::Int = 0, fmap = n
     field == 0 && throw(ImplementError("`$(pdef.args[1]) = …` computes a value: a type conforms by implementing the operations or by " *
                         "forwarding them to a field (`@implement X T by field`); a library that needs another layout converts explicitly " *
                         "(note \"Types that only convert\")"))
+    # a trait that asks for concrete keys refuses an abstract field to forward to, naming it
+    let T = Core.eval(mod, Tex), FT = fieldtype(T, field)
+        if !key_concrete(FT)
+            for x in traits
+                X = Core.eval(mod, x)
+                _concreteness_of(X) === :concrete_only && throw(ImplementError(
+                    "field `$(fieldname(T, field))` of $Tex is declared `$FT`, which is not concrete, and $X asks for concrete keys " *
+                    "(`@concrete_only`): declare a concrete field type"))
+            end
+        end
+    end
     pfn = gensym(:project)
     rec = gensym(:projection)
     Rconst = gensym(:R)

@@ -42,9 +42,9 @@ end)
 toplevel(quote
     import .RT: rncols, rcol, mean_data
     struct RMeas; label::String; data::Vector{Vector{Float64}}; end          # immutable, forwarding
-    @implement RT.RTable RMeas
+    @implement RT.RTable RMeas by data
     mutable struct RMeasM; label::String; data::Vector{Vector{Float64}}; end  # mutable, forwarding
-    @implement RT.RTable RMeasM
+    @implement RT.RTable RMeasM by data
     struct ROwn; base::Vector{Float64}; n::Int; end                          # implements the operations
     rncols(r::ROwn) = r.n
     rcol(r::ROwn, i::Int) = r.base .* i
@@ -108,9 +108,9 @@ end
     @test valid(mi_u)
     toplevel(quote
         struct RNew; data::Vector{Vector{Float64}}; end
-        @implement RT.RTable RNew
+        @implement RT.RTable RNew by data
         struct RNew2; z::Int; data::Vector{Vector{Float64}}; end
-        @implement RT.RTable RNew2
+        @implement RT.RTable RNew2 by data
     end)
     @test [valid(mi) for mi in mis] == before
     @test valid(mi_u)

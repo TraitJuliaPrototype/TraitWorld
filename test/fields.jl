@@ -54,12 +54,12 @@ toplevel(quote
     @implement Stepper Clock                       # its own representation: fields are its own
 
     mutable struct Box; data::Vector{Float64}; tag::String; end
-    @implement Buffer Box                          # Buffer names `data`: a lens on Box's field
+    @implement Buffer Box by data                  # Buffer declares `data` with its receiver type: a lens on Box's field
 
     mutable struct MBox; data::Vector{Float64}; end
-    @implement Series3 MBox                        # a field projection of a mutable type
+    @implement Series3 MBox by data                # forwarding to a field of a mutable type
     struct IBox; data::Vector{Float64}; end
-    @implement Series3 IBox                        # immutable: its field cannot be rebound
+    @implement Series3 IBox by data                # immutable: its field cannot be rebound
 end)
 
 @testset "Trait fields and lenses" begin
@@ -103,10 +103,17 @@ end)
     @test e2 isa ImplementError && occursin("`t`", sprint(showerror, e2))
     e3 = try toplevel(quote
         struct IBuf; data::Vector{Float64}; end
-        @implement Buffer IBuf
+        @implement Buffer IBuf by data
     end); nothing catch err; err end
     while e3 isa LoadError; e3 = e3.error; end
     @test e3 isa ImplementError && occursin("mutable", sprint(showerror, e3))
+    # a trait that declares a field with its receiver type is implemented with `by` too: no field is special
+    e4 = try toplevel(quote
+        struct NoBy; data::Vector{Float64}; tag::String; end
+        @implement Buffer NoBy
+    end); nothing catch err; err end
+    while e4 isa LoadError; e4 = e4.error; end
+    @test e4 isa ImplementError && occursin("by data", sprint(showerror, e4))
 
     @test isempty(check_definitions(Main.FieldSolv))
 end
