@@ -700,9 +700,13 @@ struct _CallWrap{S} end
 # (a zero-size type, `Nothing`, is no C type: it goes as a reference too)
 _ctype(@nospecialize(T)) = isbitstype(T) && sizeof(T) > 0 ? T : Any
 _cdecl(@nospecialize(T)) = isbitstype(T) && sizeof(T) > 0 ? T : Ref{T}
+# The calling convention `:caller_world` (a patch of the compiler): the call runs in the caller's
+# world, as a direct call does; the pointer's thunk is a world-checked call-site cache. (A plain
+# `@cfunction` runs in the latest world, as a callback from C must.)
 @generated function _fptr(::Type{A}, ::Type{S}, ::Type{F}) where {A,S,F}
     ats = map(_cdecl, A.parameters)
-    return :(@cfunction($(_CallWrap{S}()), $(_ctype(S)), ($(Ref{F}), $(ats...))))
+    return Expr(:cfunction, Ptr{Cvoid}, QuoteNode(_CallWrap{S}()), _ctype(S),
+                :(Core.svec($(Ref{F}), $(ats...))), QuoteNode(:caller_world))
 end
 Erased{A,S}(f::F) where {A,S,F} = Erased{A,S}(_fptr(A, S, F), f)
 @generated function (e::Erased{A,S})(args...) where {A,S}
