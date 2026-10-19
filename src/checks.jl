@@ -82,7 +82,11 @@ end
 
 function _worker_problems(@nospecialize(sig), seen, out, root::Bool)
     world = Base.get_world_counter()
-    for (src, rt) in Base.code_typed_by_type(sig; optimize = false, _check_kw(world)...)
+    # the default interpreter: a worker (a facts method) is reflected by facts inference, the code
+    # that runs, typed at facts only and cached where the worker's own compilation finds it (and its
+    # package image keeps it). The checks' interpreter inferred the whole call graph again under
+    # plain rules (3,100 CodeInstances for the forks' first `stringtype = String15` read: 1.6 s).
+    for (src, rt) in Base.code_typed_by_type(sig; optimize = false, world)
         mi = src.parent
         if root && _escapes(rt) && !(mi isa Core.MethodInstance && mi.def isa Method &&
                                      Base.unwrap_unionall(mi.def.sig).parameters[1] in _LIKE_FUNCS)
