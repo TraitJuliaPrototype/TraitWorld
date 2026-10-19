@@ -241,7 +241,7 @@ function conformance_problems(@nospecialize(X), @nospecialize(R), ops)
                 push!(problems, "`$op` has no method for $sig")
                 continue
             end
-            T = Base.infer_return_type(f, sig; _check_kw()...)
+            T = Base.infer_return_type(f, sig; _check_kw_at(sig)...)
             if T === Union{}
                 push!(problems, "`$op` at $sig always throws (inferred `Union{}`): a fallback, not an implementation")
             elseif !(T <: D)
@@ -258,7 +258,12 @@ const _FAMILY_WARNED = Set{Pair{Any,Any}}()
 
 # --- witnesses -------------------------------------------------------------------
 
-const _WITNESS = Dict{Pair{Any,Any},Any}()
+# values in a concrete holder: stored as themselves, each witness type (`Nothing`, `Impl{…}`,
+# `Generic{…}`) would compile the dictionary's `setindex!` again, per trait, in every session
+struct _WHeld
+    w::Any
+end
+const _WITNESS = Dict{Pair{Any,Any},_WHeld}()
 const _WITNESS_WORLD = Ref{UInt}(0)
 
 function _flush_if_stale!(cache::Dict, worldref::Ref{UInt})
@@ -280,9 +285,9 @@ function witness(@nospecialize(X), @nospecialize(R))
     @lock _LOCK begin
         _flush_if_stale!(_WITNESS, _WITNESS_WORLD)
         key = Pair{Any,Any}(X, R)
-        haskey(_WITNESS, key) && return _WITNESS[key]
+        haskey(_WITNESS, key) && return getfield(_WITNESS[key], :w)
         w = _witness(X, R)
-        _WITNESS[key] = w
+        _WITNESS[key] = _WHeld(w)
         return w
     end
 end
@@ -304,8 +309,22 @@ function _has_op_method(@nospecialize(X), op::Symbol, @nospecialize(R))
 end
 
 "For existing methods (a family, or `@implement X{R}` without a block): the operations `R` has no method for and the trait has a default for."
-_existing_defaults(@nospecialize(X), @nospecialize(R)) =
-    Tuple(op for op in _ops(X) if _hasdefault(X, op) && !_has_op_method(X, op, R))
+function _existing_defaults(@nospecialize(X), @nospecialize(R))
+    out = Symbol[]                                      # a loop: a generator capturing `X` was compiled per trait
+    for op in _ops(X)
+        (_hasdefault(X, op) && !_has_op_method(X, op, R)) && push!(out, op)
+    end
+    return Tuple(out)
+end
+"The operations of `X` not served by a default that `R` keeps: `_ops(X)` without `_existing_defaults(X, R)`."
+function _remaining_ops(@nospecialize(X), @nospecialize(R))
+    D = _existing_defaults(X, R)
+    out = Symbol[]
+    for op in _ops(X)
+        op in D || push!(out, op)
+    end
+    return Tuple(out)
+end
 
 # behind an inference barrier: `first.(found)` over a `Vector{Any}` gave the
 # builder's code an edge to `first(::Any)`, which DataStructures extends, so
@@ -404,7 +423,7 @@ function proj_lookup(@nospecialize(X), @nospecialize(T))
     return ProjRec(identity, T, false, nothing)
 end
 
-const _PWITNESS = Dict{Pair{Any,Any},Any}()
+const _PWITNESS = Dict{Pair{Any,Any},_WHeld}()
 const _PWITNESS_WORLD = Ref{UInt}(0)
 
 "The witness a projection gives trait `X`: the representation's, or a dynamic table in front of it."
@@ -412,9 +431,11 @@ function proj_witness(@nospecialize(X), @nospecialize(T), p::ProjRec)
     p.dyn === nothing && return witness(X, p.R)
     @lock _LOCK begin
         _flush_if_stale!(_PWITNESS, _PWITNESS_WORLD)
-        get!(_PWITNESS, Pair{Any,Any}(X, T)) do
-            _dyn_witness(X, p)
-        end
+        key = Pair{Any,Any}(X, T)
+        haskey(_PWITNESS, key) && return getfield(_PWITNESS[key], :w)
+        w = _dyn_witness(X, p)
+        _PWITNESS[key] = _WHeld(w)
+        w
     end
 end
 
@@ -585,7 +606,7 @@ end
 
 "The representation a projection returns: declared, or inferred (must be concrete)."
 function _rep_of(@nospecialize(f), @nospecialize(T), @nospecialize(Rdecl), Xs = ())
-    Rinf = Base.infer_return_type(f, Tuple{T}; _check_kw()...)
+    Rinf = Base.infer_return_type(f, Tuple{T}; _check_kw_at(Tuple{T})...)
     if Rdecl !== nothing
         Rinf <: Rdecl || throw(ImplementError("the projection of $T returns $Rinf, declared $Rdecl"))
         return Rdecl
@@ -962,7 +983,7 @@ end
             const $rec = $TW.ImplRec(:existing, ())
             $TW.implementation(::Type{$X}, ::Type{$Rex}) = $rec
             $TW._check_implementation(@__MODULE__, $X, $Rex,
-                Tuple(op for op in $TW._ops($X) if !(op in $TW._existing_defaults($X, $Rex))))
+                $TW._remaining_ops($X, $Rex))     # a call, not a generator: a closure in the user's module was compiled per declaration
             $(_has_conformance_method(X, _tryeval(mod, Rex)) ? nothing : Expr(:block, _conformance_methods(X, Rex)...))
             $TW._bump!()
             nothing
@@ -1141,7 +1162,7 @@ function _implement_oneline(mod::Module, traits::Vector{Any}, Tex, Rdecl; pexs =
         pexs = nothing
     end
     # a trait that declares its projection field (`data::R`) names the field
-    pfs = unique(Symbol[f for X in Xs for (f, _) in trait_fields(X) if field_isrep(X, Val(f))])
+    pfs = _rep_fields(Xs)
     if !isempty(pfs)
         length(pfs) == 1 || throw(ImplementError("$(join(string.(Xs), ", ")) declare different projection fields: $(join(string.(pfs), ", "))"))
         f = pfs[1]
@@ -1149,7 +1170,7 @@ function _implement_oneline(mod::Module, traits::Vector{Any}, Tex, Rdecl; pexs =
         headex = length(traits) == 1 ? traits[1] : Expr(:tuple, traits...)
         return _implement_projection(mod, headex, Any[Tex, :(project(t) = getfield(t, $(QuoteNode(f))))]; field = Base.fieldindex(T, f), fmap)
     end
-    if all(X -> _methods_cover(X, T), Xs)
+    if _allwith(_methods_cover, Xs, T)
         # the type implements the operations itself: its existing methods, checked as an implementation
         out = Any[]
         if fmap !== nothing || any(X -> isempty(_ops(X)) && !isempty(trait_fields(X)), Xs)
@@ -1168,7 +1189,7 @@ function _implement_oneline(mod::Module, traits::Vector{Any}, Tex, Rdecl; pexs =
             push!(out, :(const $rec = $TW.ImplRec(:existing, ())))
             push!(out, :($TW.implementation(::Type{$xex}, ::Type{$Tex}) = $rec))
             push!(out, :($TW._check_implementation(@__MODULE__, $xex, $Tex,
-                           Tuple(op for op in $TW._ops($xex) if !(op in $TW._existing_defaults($xex, $Tex))))))
+                           $TW._remaining_ops($xex, $Tex))))     # a call, not a generator (compiled per declaration)
             # the one-line form declares that the type conforms: it must have the declared fields
             fmap === nothing && push!(out, :($TW._check_own_fields($xex, $Tex)))
             _has_conformance_method(X, T) || append!(out, _conformance_methods(xex, Tex))
@@ -1179,7 +1200,7 @@ function _implement_oneline(mod::Module, traits::Vector{Any}, Tex, Rdecl; pexs =
     end
     for X in Xs
         if _methods_some(X, T)
-            missing_ops = [op for op in _ops(X) if !_hasdefault(X, op) && !_has_op_method(X, op, T)]
+            missing_ops = _missing_ops(X, T)
             throw(ImplementError("$Tex has methods for some operations of $X but not for $(join(string.(missing_ops), ", ")): " *
                                  "define them, so that $Tex is its own representation, or remove them and conform through a field"))
         end
@@ -1190,11 +1211,12 @@ function _implement_oneline(mod::Module, traits::Vector{Any}, Tex, Rdecl; pexs =
     for i in 1:fieldcount(T)
         FT = fieldtype(T, i)
         FT isa Type || continue
-        all(X -> witness(X, FT) !== nothing, Xs) || continue
+        _allwith(_has_witness, Xs, FT) || continue
         # a concrete field first; an abstract one where the traits allow abstract keys
         key_concrete(FT) ? push!(conforming, i) : push!(abstract_conforming, i)
     end
-    idata = findfirst(==(:data), fns)
+    idata = Base.fieldindex(T, :data, false)          # (no tuple of the field names: Base's code per field count)
+    idata == 0 && (idata = nothing)
     fld = if idata !== nothing && idata in conforming
         idata
     elseif length(conforming) == 1
@@ -1223,7 +1245,7 @@ function _implement_oneline(mod::Module, traits::Vector{Any}, Tex, Rdecl; pexs =
     FT = fieldtype(T, fld)
     fsym = QuoteNode(fns[fld])
     # the field's type must implement the trait itself: forwarding does not chain
-    any(X -> _proj(X, FT) !== nothing, Xs) && throw(ImplementError(
+    _anywith(_has_proj, Xs, FT) && throw(ImplementError(
         "field `$(fns[fld])` of $Tex forwards $(join(string.(Xs), ", ")) to a field of its own; forward to a field whose type implements the operations"))
     headex = length(traits) == 1 ? traits[1] : Expr(:tuple, traits...)
     return _implement_projection(mod, headex, Any[Tex, :(project(t) = getfield(t, $fsym))]; field = fld, fmap)
@@ -1378,3 +1400,39 @@ function _implement_projection(mod::Module, head, rest; field::Int = 0, fmap = n
 end
 
 @specialize
+
+# The machinery's loops over traits and types, written without closures that capture a type: a
+# closure capturing `T` has a type per `T`, so it and the Base code it is passed to were compiled
+# again for every user type and trait in every session (step 5: about 25 ms per `@implement`).
+"Whether `f(X, a)` holds for every `X` in `Xs`."
+function _allwith(f::F, Xs::Vector{Any}, @nospecialize(a)) where {F}
+    for X in Xs
+        f(X, a) || return false
+    end
+    return true
+end
+"Whether `f(X, a)` holds for some `X` in `Xs`."
+function _anywith(f::F, Xs::Vector{Any}, @nospecialize(a)) where {F}
+    for X in Xs
+        f(X, a) && return true
+    end
+    return false
+end
+_has_witness(@nospecialize(X), @nospecialize(FT)) = witness(X, FT) !== nothing
+_has_proj(@nospecialize(X), @nospecialize(FT)) = _proj(X, FT) !== nothing
+"The declared fields of `Xs` that are representations (each once)."
+function _rep_fields(Xs::Vector{Any})
+    pfs = Symbol[]
+    for X in Xs, (f, _) in trait_fields(X)
+        field_isrep(X, Val(f)) && !(f in pfs) && push!(pfs, f)
+    end
+    return pfs
+end
+"The operations of `X` that `T` must provide: neither a default nor a method of `T`'s own."
+function _missing_ops(@nospecialize(X), @nospecialize(T))
+    out = Symbol[]
+    for op in _ops(X)
+        (!_hasdefault(X, op) && !_has_op_method(X, op, T)) && push!(out, op)
+    end
+    return out
+end

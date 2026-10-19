@@ -58,14 +58,15 @@ implementation with operations is expanded in its trait's module, which belongs 
 function _check_ahead!(mod::Module, @nospecialize(T), @nospecialize(sig))
     _check_once(Ref(false), sig)                       # throws as a first call would: the build fails
     for m in (T isa DataType ? parentmodule(T) : mod, mod)
-        if !isdefined(m, :__tw_checked__)
+        # bindings defined by `eval` here are read in the latest world
+        if !Base.invokelatest(isdefined, m, :__tw_checked__)
             try
                 Core.eval(m, :(const __tw_checked__ = Any[]))
             catch
                 continue                               # a closed module: another image's
             end
         end
-        push!(getglobal(m, :__tw_checked__), sig)
+        push!(Base.invokelatest(getglobal, m, :__tw_checked__), sig)
         return nothing
     end
     return nothing                                     # no open module: checked at the first call
@@ -181,7 +182,7 @@ function _ahead_entry!(mod::Module, @nospecialize(T), @nospecialize(f), pos::Int
                         Expr(:block, Expr(:meta, :facts, 0), :(return invoke($f, $(Tuple{ps[2:end]...}), $(as...))))))
         for dm in (T isa DataType ? parentmodule(T) : mod, mod)
             try
-                isdefined(dm, :__tw_ahead_entries__) || Core.eval(dm, :(const __tw_ahead_entries__ = true))
+                Base.invokelatest(isdefined, dm, :__tw_ahead_entries__) || Core.eval(dm, :(const __tw_ahead_entries__ = true))
                 Core.eval(dm, def)
             catch
                 continue                                     # a closed module: another image's

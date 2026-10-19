@@ -67,6 +67,13 @@ include("concrete.jl")
 include("certificate.jl")
 include("defcheck.jl")
 include("hooks.jl")
+# piece 5 for TraitWorld's own image: its workload compiles, by facts, the Base code its machinery's
+# run-time sites reach (no backedge leads there): kept, else every session compiles it again (about
+# 200 ms at the first `@implement`). `__init__` switches this on for the packages built after it.
+if ccall(:jl_generating_output, Cint, ()) == 1 && get(ENV, "JULIA_TW_KEEP_COMPILED", "1") != "0" &&
+        (try; cglobal(:jl_set_image_keep_compiled) != C_NULL; catch; false; end)
+    ccall(:jl_set_image_keep_compiled, Cvoid, (Cint,), 1)
+end
 include("strict.jl")
 include("frames.jl")
 
@@ -108,8 +115,24 @@ end
 struct _PCOne; data::Vector{Float64}; end
 @implement _PC.PCT _PCOne
 
+# a trait of declared fields only, and an implementation by forwarding: the paths of `@implement`
+# that `_PC` does not reach (generic keys, ownership, field slots), so their code is in this image
+@trait_module module _PCF
+using ..TraitWorld
+@trait PFT begin
+    @const data::Vector{Float64}
+end
+pfsum(t::PFT) = sum(t.data)
+end
+struct _PCFA; label::String; data::Vector{Float64}; end
+@implement _PCF.PFT _PCFA
+mutable struct _PCFB; n::Int; data::Vector{Float64}; end
+@implement _PCF.PFT _PCFB
+
 PrecompileTools.@compile_workload begin
     v = [1.0, 2.0]
+    _PCF.pfsum(_PCFA("a", v)); _PCF.pfsum(_PCFB(1, v))
+    for x in Any[_PCFA("a", v), _PCFB(1, v)]; _PCF.pfsum(x); end
     _PC.pcsum(v); _PC.pcsum(_PCProj(v)); _PC.pcsum(_PCDyn(v)); _PC.pcsum(_PCOwn(2)); _PC.pcsum(_PCOne(v))
     # untyped calls: the table of declared implementations (untyped.jl), its slow path included
     for x in Any[v, _PCProj(v), _PCOwn(2), _PCOne(v)]; _PC.pcsum(x); end

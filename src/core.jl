@@ -407,7 +407,7 @@ declaration (`_bump!`) and when a package is loaded (images do not run top-level
             (T isa DataType && isconcretetype(T)) || continue
             F = _family(XA)
             TO = try
-                Base.infer_return_type(_dyn_tobj, Tuple{Type{F}, T}; _check_kw()...)
+                Base.infer_return_type(_dyn_tobj, Tuple{Type{F}, T}; _check_kw_at(Tuple{T})...)
             catch
                 Any
             end

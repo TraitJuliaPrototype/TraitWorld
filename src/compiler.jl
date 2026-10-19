@@ -57,6 +57,27 @@ never invalidates it. A custom interpreter's compiler code was compiled again af
 _check_interp(world::UInt = Base.get_world_counter()) = CC.NativeInterpreter(world; facts = false, owner = _CheckOwner())
 "Keywords for reflection by the definition checks: their own interpreter."
 _check_kw(world::UInt = Base.get_world_counter()) = (; world, interp = _check_interp(world))
+"""
+Keywords for reflection at a signature `sig`: the checks' own cache where it names an archetype (a
+worker checked before any value exists, never run); else plain inference in the plain cache, so the
+result serves the program's later compilation and reuses what the system image inferred (an
+operation's check at a real type inferred Base's broadcasting from scratch: 186 ms per session).
+"""
+function _check_kw_at(@nospecialize(sig), world::UInt = Base.get_world_counter())
+    _names_archetype(sig) && return _check_kw(world)
+    return (; world, interp = CC.NativeInterpreter(world; facts = false))
+end
+"Whether a type mentions an `Archetype` anywhere in its parameters."
+function _names_archetype(@nospecialize(T))
+    T isa Type || return false
+    T = Base.unwrap_unionall(T)
+    T isa DataType || return true                       # a union or a variable: undecided, so the checks' own cache
+    (T.name === Base.typename(Archetype) || T.name === Base.typename(ParamArchetype)) && return true
+    for p in T.parameters
+        _names_archetype(p) && return true
+    end
+    return false
+end
 
 "A `CodeInstance`'s inferred result type (as the compiler decodes it: a lattice element may be stored)."
 function _ci_return_type(ci::Core.CodeInstance)
