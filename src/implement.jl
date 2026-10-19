@@ -639,12 +639,19 @@ function _has_conformance_method(@nospecialize(X), @nospecialize(T))
     return Base.unwrap_unionall(m.method.sig).parameters[3] !== Any
 end
 
-"The statements that make a conformance a method: `conformance(X, u::T)` from a builder fixed now."
+"""
+The statements that make a conformance a method: `conformance(X, u::T)` from a builder fixed now.
+The method is part of the entry that calls it (a value crossing by its bound): a boundary, compiled
+in its caller's mode and inlined there, so a typed call from plain code builds the trait object in
+place.
+"""
 function _conformance_methods(Xex, Tex)
     TW = TraitWorld
     c = gensym(:conformance)
     return Any[:(const $c = $TW._declare_conformance($Xex, $Tex)),
-               :($TW.conformance(::$TW.As{$Xex}, u::$Tex) = $TW._conf_call($c.b, $Xex, u)),
+               Expr(:macrocall, GlobalRef(Base, Symbol("@inline")), LineNumberNode(0, :none),
+                    Expr(:function, :($TW.conformance(::$TW.As{$Xex}, u::$Tex)),
+                         Expr(:block, Expr(:meta, :facts, 0), :($TW._conf_call($c.b, $Xex, u))))),
                :($TW._declared_defaults(::Type{$Xex}, ::Type{$Tex}) = $c.recs)]
 end
 
