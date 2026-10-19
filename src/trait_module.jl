@@ -64,6 +64,7 @@ _prologue() = Any[:(Base.Experimental.@compiler_options facts=true),     # Julia
                   :(const __tw_extended__ = Set{Any}()),          # other modules' functions given workers here
                   :(const __tw_methods_seen__ = Base.IdSet{Method}()),
                   :(const __tw_positions__ = Any[]),          # (function, position, nargs) of the entries' trait positions
+                  :(const __tw_untyped__ = Any[]),            # (function, nargs, method object, trait positions) of tabled entries (untyped.jl)
                   :(const __tw_finished__ = Ref(false))]
 _epilogue() = :($TraitWorld._latest($TraitWorld._finish_module, @__MODULE__))
 
@@ -537,12 +538,19 @@ function _rewrite_fdef(mod::Module, ex)
                                                   "methods to it only where it already has an entry of that shape (rule 3)")
         end
         nargs = nva == 0 ? length(args) : -1
+        # an entry of trait positions and ordinary arguments only reaches the table of declared
+        # implementations when its caller does not know the types (untyped.jl): compiled once
+        tabled = nva == 0 && isempty(kws) && all(x -> x.kind in (:trait, :plain, :untyped), args) &&
+                 any(x -> x.kind === :trait, args)
         eargs = Any[]
         stmts = Any[]
         callnames = Any[]
         for x in args
             nm = x.name
-            if x.kind === :trait
+            if x.kind === :trait && tabled
+                push!(eargs, :(@nospecialize($nm)))
+                push!(callnames, nm)
+            elseif x.kind === :trait
                 # specialized (as plain Julia's methods are): an untyped caller's one dynamic call reaches
                 # the entry compiled for the argument's type, where the implementation, the views and the
                 # worker's selection fold (a small method per function and type, never invalidated)
@@ -628,6 +636,56 @@ function _rewrite_fdef(mod::Module, ex)
         # an ordinary method, inlined into a typed caller (keys-plan §6): there it runs at plain speed.
         # It is the boundary (rule 2): compiled in its caller's mode, while the worker it calls is
         # compiled by facts (`Expr(:meta, :facts, 0)`, read by Julia's compiler)
+        if tabled
+            # where a trait argument's type is not known here: its builder from the position's table,
+            # then one dynamic call to the entry's method specialized on the builders (one per key)
+            tag = gensym(Symbol(:tw_untyped_, fname isa Symbol ? fname : :f))
+            tpos = [i for (i, x) in enumerate(args) if x.kind === :trait]
+            bsyms = [gensym(:b) for _ in tpos]
+            known = foldl((a, b) -> :($a & $b), [:($TraitWorld._known_type($(args[i].name))) for i in tpos])
+            plainv = foldl((a, b) -> :($a & $b), [:(!($(args[i].name) isa $TraitWorld.Dynamic || $(args[i].name) isa $TraitWorld.TObj)) for i in tpos])
+            wsym = gensym(:w)
+            look = Any[:($wsym = Base.tls_world_age())]
+            for (j, i) in enumerate(tpos)
+                push!(look, :($(bsyms[j]) = $TraitWorld._ubuilder($TraitWorld.EntryPos{typeof($fname),$i,$nargs}(),
+                                                                     typeof($(args[i].name))::DataType, $wsym)))
+            end
+            found = foldl((a, b) -> :($a & $b), [:($(bsyms[j]) isa $TraitWorld.Builder) for j in eachindex(tpos)])
+            tblock = :(if !($known) && $plainv
+                           $(look...)
+                           $found && return Base.inferencebarrier($tag())($(bsyms...), $(callnames...))   # a dispatch, on the builders' types
+                       end)
+            pushfirst!(stmts, tblock)
+            # the specialized method: the views from the builders' data, the worker's call as the entry's
+            cargs = Any[]
+            cstmts = Any[]
+            cnames = Any[]
+            for (i, x) in enumerate(args)
+                if x.kind === :trait
+                    xa = gensym(:xa); v = gensym(Symbol(x.name, :_view))
+                    push!(cargs, :(@nospecialize($(x.name))))
+                    push!(cstmts, :($xa = $(Expr(:new, :($TraitWorld.XAny), x.name))))
+                    j = findfirst(==(i), tpos)
+                    push!(cstmts, :($v = $TraitWorld._build_any($(bsyms[j]), $xa)))
+                    push!(cstmts, :($TraitWorld.keeps($TraitWorld.KeepOf{typeof($fname)}()) && ($v = $TraitWorld._with_object_any($v, $xa))))
+                    push!(cnames, v)
+                else
+                    push!(cargs, eargs[i])
+                    push!(cnames, x.name)
+                end
+            end
+            cres = gensym(:res)
+            # a frame of its own: a backtrace shows the worker at its bound, as from the entry's call
+            push!(cstmts, :($cres = @noinline $TraitWorld.checked_call($fname, $(cnames...))))
+            push!(cstmts, :(return $cres isa $TraitWorld.LikeResult ?
+                            Base.inferencebarrier($TraitWorld._like_out)($cres, $us, $(Expr(:tuple, [cnames[i] for i in tpos]...))) : $cres))
+            csig = Expr(:call, :(::$tag), [:($(bsyms[j])::$TraitWorld.Builder) for j in eachindex(tpos)]..., cargs...)
+            isempty(kept) || (csig = Expr(:where, csig, kept...))
+            push!(rest, :(struct $tag end))
+            push!(rest, Expr(:macrocall, GlobalRef(Base, Symbol("@noinline")), LineNumberNode(0, :none),
+                             Expr(:function, csig, Expr(:block, cstmts...))))
+            push!(rest, :(isdefined(@__MODULE__, :__tw_untyped__) && push!(__tw_untyped__, ($fname, $nargs, $tag(), $(Tuple(tpos))))))
+        end
         pushfirst!(stmts, Expr(:meta, :facts, 0))
         push!(rest, Expr(:macrocall, GlobalRef(Base, Symbol("@inline")), LineNumberNode(0, :none),
                          Expr(:function, esig, Expr(:block, stmts...))))

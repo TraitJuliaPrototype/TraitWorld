@@ -494,7 +494,21 @@ function _register_type_printers()
     isdefined(Base.Experimental, :register_type_printer) || return nothing
     Base.Experimental.register_type_printer(Base.typename(TObj), _show_tobj_type)
     Base.Experimental.register_type_printer(Base.typename(CObj), _show_cobj_type)
+    Base.Experimental.register_type_printer(Base.typename(Builder), _show_builder_type)
     return nothing
+end
+"A builder's type (an untyped call's frame) prints as the implementation it builds: `implementation of PVec{Float64} at Vector{Float64}`."
+function _show_builder_type(io::IO, @nospecialize(T))
+    S = T isa DataType && length(T.parameters) == 1 ? T.parameters[1] : nothing
+    (S isa DataType && S <: Tuple && all(V -> V isa DataType && V <: VSpec && length(V.parameters) == 6, S.parameters)) ||
+        return _show_type_plain(io, T)
+    print(io, "implementation of ")
+    for (i, V) in enumerate(S.parameters)
+        i > 1 && print(io, " & ")
+        _show_bound(io, V.parameters[1])
+        print(io, " at ")
+        _show_key(io, V.parameters[3])
+    end
 end
 Base.show(io::IO, t::TObj) = (print(io, "trait object "); _show_tobj(io, typeof(t)))
 "A key as a reader wants it: the receiver type, then the declared fields' types, `Vector{Float64}; u::Vector{Float64}, p::Params`."

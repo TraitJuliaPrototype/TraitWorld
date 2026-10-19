@@ -652,7 +652,9 @@ function _conformance_methods(Xex, Tex)
                Expr(:macrocall, GlobalRef(Base, Symbol("@inline")), LineNumberNode(0, :none),
                     Expr(:function, :($TW.conformance(::$TW.As{$Xex}, u::$Tex)),
                          Expr(:block, Expr(:meta, :facts, 0), :($TW._conf_call($c.b, $Xex, u))))),
-               :($TW._declared_defaults(::Type{$Xex}, ::Type{$Tex}) = $c.recs)]
+               :($TW._declared_defaults(::Type{$Xex}, ::Type{$Tex}) = $c.recs),
+               :($TW._declared_builder(::$TW.As{$Xex}, ::Type{$Tex}) = $c.b),      # for the untyped calls' table (untyped.jl)
+               :($TW._compile_ahead(@__MODULE__, $Xex, $Tex))]       # while its package is built: the code its calls need (ahead.jl)
 end
 
 """

@@ -20,6 +20,7 @@ export Trait, Callable, CallMode, DynamicCall, CompiledCall, compiled_call, dyna
 
 function __init__()
     empty!(_NOT_EXTENSIONS)
+    _SESSION[] = (time_ns() ⊻ UInt(getpid()) << 32) | 1   # tables of untyped calls saved in images are ignored (untyped.jl)
     _hooks_init!()
     _strict_init!()
     _DEFCHECK_AT_END[] = get(ENV, "JULIA_TW_DEFCHECK", "1") != "0"
@@ -45,6 +46,7 @@ function _on_package_load(id::Base.PkgId)
     _bump!()
     m = get(Base.loaded_modules, id, nothing)
     m isa Module || return nothing
+    _note_checked_ahead!(m)
     _strict_known_delegates!()
     _report_refused_at_load()                                                # what the image hook left inactive
     return nothing
@@ -58,6 +60,8 @@ include("implement.jl")
 include("entry.jl")
 include("trait_module.jl")
 include("checks.jl")
+include("untyped.jl")
+include("ahead.jl")
 include("verify.jl")
 include("concrete.jl")
 include("certificate.jl")
@@ -107,6 +111,8 @@ struct _PCOne; data::Vector{Float64}; end
 PrecompileTools.@compile_workload begin
     v = [1.0, 2.0]
     _PC.pcsum(v); _PC.pcsum(_PCProj(v)); _PC.pcsum(_PCDyn(v)); _PC.pcsum(_PCOwn(2)); _PC.pcsum(_PCOne(v))
+    # untyped calls: the table of declared implementations (untyped.jl), its slow path included
+    for x in Any[v, _PCProj(v), _PCOwn(2), _PCOne(v)]; _PC.pcsum(x); end
     macroexpand(TraitWorld, :(@implement _PC.PCT _PCOne))
     _PC.pcboth(v, _PCProj(v))
     _PC.pcmap(abs, v); _PC.pcmap(x -> 2x, _PCProj(v))

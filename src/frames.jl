@@ -16,6 +16,7 @@ const _SRC_DIR = Ref{String}("")
 function _is_machinery_frame(sf::Base.StackTraces.StackFrame)
     m = parentmodule(sf)
     m isa Module && Base.moduleroot(m) === TraitWorld && return true
+    occursin("tw_untyped_", String(sf.func)) && return true          # an entry's method for untyped calls
     d = _SRC_DIR[]
     return !isempty(d) && startswith(String(sf.file), d)
 end
