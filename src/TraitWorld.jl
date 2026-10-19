@@ -115,7 +115,7 @@ PrecompileTools.@compile_workload begin
     macroexpand(_PC, :(@trait Q{R} begin q(r::R)::Int; q2(r::R, i::Int)::Float64 = 1.0 end))
     macroexpand(_PC, :(f(t::PCT, i::Int) = pv(t, i)))
     conformance_problems(_PC.PCT, Vector{Float64}, (:pn, :pv))
-    worker_problems(Tuple{typeof(_PC.pcsum),typeof(TObj((View{_PC.PCT}(Impl{(:pd,)}(), v),)))})
+    worker_problems(Tuple{typeof(_PC.pcsum),typeof(TObj((_selfview(_PC.PCT, Impl{(:pd,)}(), v),)))})
     # rule 3 per signature (Union members expanded)
     for m in methods(_PC.pv)
         owned_method(m)

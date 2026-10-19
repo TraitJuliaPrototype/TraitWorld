@@ -90,14 +90,42 @@ struct View{X,W,K,N,P} <: AbstractView{X,W,K}
     fs::NTuple{N,Slot}
     parts::P
 end
-"A view of a value that is its own implementing value, with no declared fields: generic implementations' constraints, `Like` results."
-View{X}(w::W, r) where {X,W} = View{X,W,typeof(r),0,Tuple{typeof(r)}}(w, ismutable(r) ? r : nothing, SELF, (), (r,))
+"""
+A held view: the view of an immutable value that is its own implementing value, holding the whole
+value (`parts[1]`) and its declared fields' values, with no read-through object or slot (the
+user's decision, session 29). Reading it is a field load, and a trait object of an immutable value
+is as large as the value: a `Dynamic` of it is one box, as a plain abstractly typed value is. A key
+used both held and read through has one worker per view type. The declared fields' slots are kept
+only to rebuild a result like the input.
+"""
+struct Held{X,W,K,N,P} <: AbstractView{X,W,K}
+    w::W
+    fs::NTuple{N,Slot}
+    parts::P
+end
+"The view of `r` as its own implementing value, with no declared fields (generic implementations' constraints, `Like` results): held when immutable."
+@inline _selfview(::Type{X}, w::W, r) where {X,W} = ismutable(r) ?
+    View{X,W,typeof(r),0,Tuple{typeof(r)}}(w, r, SELF, (), (r,)) :
+    Held{X,W,typeof(r),0,Tuple{typeof(r)}}(w, (), (r,))
+"The view type `_selfview` makes for a value of type `R`."
+_selfview_type(@nospecialize(X), @nospecialize(W), @nospecialize(R)) =
+    isconcretetype(R) && !ismutabletype(R) ? Held{X,W,R,0,Tuple{R}} : View{X,W,R,0,Tuple{R}}
 
 "The implementing value a view stands for: the user's object, or its forwarding field, read now (held for an immutable type)."
 @inline function _rep(v::View{X,W,K}) where {X,W,K}
     getfield(v, :o) === nothing && return getfield(getfield(v, :parts), 1)
     return _loadpart(_impl(K), v, getfield(v, :r))
 end
+@inline _rep(v::Held) = getfield(getfield(v, :parts), 1)
+"Whether a view holds its parts (an immutable value): its fields cannot be written."
+@inline _isheld(v::View) = getfield(v, :o) === nothing
+@inline _isheld(::Held) = true
+"The slot of a view's implementing value in the user's object (`SELF`: the object itself)."
+@inline _viewslot(v::View) = getfield(v, :r)
+@inline _viewslot(::Held) = SELF
+"The user's object a view reads, or `nothing` when it holds only parts (a held view holds the whole value)."
+@inline _viewobject(v::View) = getfield(v, :o)
+@inline _viewobject(v::Held) = getfield(getfield(v, :parts), 1)
 "The key of a view type."
 _reptype(::Type{<:AbstractView{X,W,K}}) where {X,W,K} = K
 
@@ -523,7 +551,7 @@ _fieldkeytype(::Type{X}, ::Val{f}, ::Type{K}) where {X,f,K} = K <: Key ? _keyfie
     return _fget(X, Val(f), getfield(v, :w), v, _reptype(typeof(v)))
 end
 @inline function _fget(::Type{X}, ::Val{f}, w, v, ::Type{K}) where {X,f,K}
-    getfield(v, :o) === nothing && return getfield(getfield(v, :parts), 1 + _fieldpos(X, Val(f)))
+    _isheld(v) && return getfield(getfield(v, :parts), 1 + _fieldpos(X, Val(f)))
     return _loadpart(_fieldkeytype(X, Val(f), K), v, getfield(v, :fs)[_fieldpos(X, Val(f))])
 end
 "A field `f` of trait `X` written on a trait object: a store into the user's object, as `u.f = x` in plain Julia."
@@ -532,7 +560,7 @@ end
     K = _reptype(typeof(v))
     T = _fieldkeytype(X, Val(f), K)
     y = x::T
-    getfield(v, :o) === nothing && Base.inferencebarrier(_readonly)(X, f)     # the conformance check refuses writable fields on immutable types
+    _isheld(v) && Base.inferencebarrier(_readonly)(X, f)     # the conformance check refuses writable fields on immutable types
     _storefield(T, v, getfield(v, :fs)[_fieldpos(X, Val(f))], y)
     return y
 end
@@ -641,7 +669,7 @@ end
 
 @inline _subobj(sub::Tuple, r) = TObj(_subviews(r, sub...))
 @inline _subviews(r) = ()
-@inline _subviews(r, s::Wit{X}, rest...) where {X} = (View{X}(s.w, r), _subviews(r, rest...)...)
+@inline _subviews(r, s::Wit{X}, rest...) where {X} = (_selfview(X, s.w, r), _subviews(r, rest...)...)
 
 # --- Callable: erased function pointers and checked calls ------------------
 

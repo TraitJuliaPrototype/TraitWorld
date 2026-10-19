@@ -69,7 +69,7 @@ end
     @test colmean([[1.0, 3.0]], 1) == 2.0                    # a representation is its own projection
     @test colrange([1.0 5.0; 3.0 2.0], 1) == 2.0
     # a default reaches the dynamic operations, never the representation's implementation
-    @test value(TObj((TraitWorld.View{ColTable}(TraitWorld.proj_witness(ColTable, Reversed,
+    @test value(TObj((TraitWorld._selfview(ColTable, TraitWorld.proj_witness(ColTable, Reversed,
                      TraitWorld._proj(ColTable, Reversed)), [[1.0], [2.0]]),)), 1, 1) == 2.0
     @test total(Reversed([[1.0, 2.0], [10.0, 20.0]]), 2) == total([[1.0, 2.0], [10.0, 20.0]], 2)
     @test_throws MethodError colmean(42, 1)                  # no projection: as in plain Julia

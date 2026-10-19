@@ -381,7 +381,7 @@ end
 "The type of the trait object a generic implementation's body receives at `R`."
 function _subobj_type(sub::Tuple, @nospecialize(R))
     Xs = Any[typeof(s).parameters[1] for s in sub]
-    vs = Any[View{typeof(s).parameters[1],typeof(s.w),R,0,Tuple{R}} for s in sub]
+    vs = Any[_selfview_type(typeof(s).parameters[1], typeof(s.w), R) for s in sub]
     return TObj{_encode_traits(Xs),Tuple{vs...}}
 end
 

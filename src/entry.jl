@@ -37,7 +37,7 @@ How a builder makes one trait's view for a user type: the witness, the slot of t
 implementing value (the object itself, or its forwarding field), and the slots of the
 declared fields. The view's type is `View{X, W, K, N, P}`, the same for every user type of key `K`.
 """
-struct VSpec{X,W,K,N,P}
+struct VSpec{X,W,K,N,P,S}    # S: the user's type is the key's implementing type (`r` is `SELF`)
     w::W
     r::Slot
     fs::NTuple{N,Slot}
@@ -49,9 +49,15 @@ struct Builder{S<:Tuple}
 end
 @inline (b::Builder)(t) = TObj(_build(t, getfield(b, :specs)...))
 @inline _build(t) = ()
-@inline _build(t, s::VSpec{X,W,K,N,P}, rest...) where {X,W,K,N,P} =
-    (View{X,W,K,N,P}(getfield(s, :w), ismutable(t) ? t : nothing, getfield(s, :r), getfield(s, :fs),
-                     _parts(P, t, getfield(s, :r), getfield(s, :fs))), _build(t, rest...)...)
+@inline _build(t, s::VSpec{X,W,K,N,P,S}, rest...) where {X,W,K,N,P,S} =
+    (_buildview(t, s, Val(S && !ismutable(t))), _build(t, rest...)...)
+# an immutable value that is its own implementing value is held whole; any other is read through
+# (mutable) or held as parts (an immutable value forwarding to a field)
+@inline _buildview(t, s::VSpec{X,W,K,N,P}, ::Val{true}) where {X,W,K,N,P} =
+    Held{X,W,K,N,P}(getfield(s, :w), getfield(s, :fs), _parts(P, t, getfield(s, :r), getfield(s, :fs)))
+@inline _buildview(t, s::VSpec{X,W,K,N,P}, ::Val{false}) where {X,W,K,N,P} =
+    View{X,W,K,N,P}(getfield(s, :w), ismutable(t) ? t : nothing, getfield(s, :r), getfield(s, :fs),
+                    _parts(P, t, getfield(s, :r), getfield(s, :fs)))
 
 """
 The parts a view holds, typed by the key: the implementing value (`nothing` when there
@@ -415,7 +421,9 @@ end
         w === nothing && throw(TraitBoundError("$(U) forwards $X to $(p.R), which does not implement $Y"))
         K, fs = _key_and_slots(Y, p, U, w)
         r = p.field == 0 ? SELF : _slot(U, p.field)
-        push!(specs, VSpec{_instance(Y, K),typeof(w),K,length(fs),_partstype(K)}(w, r, fs))
+        # held whole when the user's type is its own implementing value (not a key without one,
+        # whose parts are its declared fields only)
+        push!(specs, VSpec{_instance(Y, K),typeof(w),K,length(fs),_partstype(K),p.field == 0 && _impl(K) !== Nothing}(w, r, fs))
     end
     return Builder(Tuple(specs))
 end
@@ -674,8 +682,8 @@ A result like `t` with declared fields replaced; also on a result of `like`.
         X = _family(typeof(v).parameters[1])
         if u isa Dynamic
             # a dynamic value in, a dynamic value of the same trait out
-            o = getfield(v, :o)
-            o === nothing && getfield(getfield(v, :r), :off) >= 0 && throw(TraitBoundError(
+            o = _viewobject(v)
+            o === nothing && getfield(_viewslot(v), :off) >= 0 && throw(TraitBoundError(
                 "a dynamic value of an immutable type keeps the parts $X can see, not the whole object, " *
                 "so a result like it cannot be rebuilt; pass the value itself"))
             nu = _invert(X, v, o === nothing ? getfield(getfield(v, :parts), 1) : o, res)
@@ -694,9 +702,9 @@ A type that implements the operations itself is replaced by the new value (of th
 otherwise the user's object is rebuilt by its constructor with the forwarding field and the
 declared fields replaced, so its parameters follow the new fields.
 """
-function _invert(@nospecialize(X), v::View, u, res::LikeResult)
+function _invert(@nospecialize(X), v::AbstractView, u, res::LikeResult)
     x = res.x
-    r = getfield(v, :r)
+    r = _viewslot(v)
     if !(x isa KeepSelf) && getfield(r, :off) < 0
         typeof(x) <: Base.typename(typeof(u)).wrapper ||
             throw(TraitBoundError("$(typeof(u)) implements $X itself, but the result is a $(typeof(x)): " *
@@ -729,7 +737,7 @@ function _dyn_like(d::Dynamic{X}, x) where {X}
     t = opened(d)
     v = getfield(t, :views)[1]
     isempty(getfield(v, :fs)) || throw(TraitBoundError("$X declares fields, so a new value of its implementing type alone does not conform"))
-    return Dynamic{X}(TObj(map(w -> View{typeof(w).parameters[1]}(getfield(w, :w), x), getfield(t, :views))))
+    return Dynamic{X}(TObj(map(w -> _selfview(typeof(w).parameters[1], getfield(w, :w), x), getfield(t, :views))))
 end
 
 # --- membership (note "Traits as abstract types") ----------------------------------
