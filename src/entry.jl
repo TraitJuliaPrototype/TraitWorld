@@ -135,7 +135,7 @@ end
 const _SLOW = Ref(IdDict{Any,Any}())                  # Pair(X, U) => Builder or NOTRAIT; copy-on-write
 const _SLOW_WORLD = Ref{UInt}(0)                  # the world `_SLOW` was decided in: any definition makes it stale
 "The conformance of a type with no method of its own: a generic implementation, a family, a dynamic one."
-@noinline function _conformance_slow(@nospecialize(X), @nospecialize(u))
+@machinery @noinline function _conformance_slow(@nospecialize(X), @nospecialize(u))
     U = typeof(u)
     key = Pair{Any,Any}(X, U)
     w = Base.tls_world_age()                            # decided in the caller's world, as dispatch is
@@ -175,7 +175,7 @@ definition adds a bound; until then this fallback computes it.
 """
 needed
 needed(::EntryPos{F,pos,nargs}) where {F,pos,nargs} = Base.inferencebarrier(_needed_slow)(F, pos, nargs)
-_needed_slow(@nospecialize(F), pos::Int, nargs::Int) = TraitList{Tuple{traits_at(F.instance, pos, nargs)...}}()
+@machinery _needed_slow(@nospecialize(F), pos::Int, nargs::Int) = TraitList{Tuple{traits_at(F.instance, pos, nargs)...}}()
 
 """
     enter(EntryPos{F, pos, nargs}(), t)
@@ -399,7 +399,7 @@ function _no_worker_error(@nospecialize(sig))
 end
 
 "The views of a value of type `U` for the traits `needed`: a `Builder`, or `NOTRAIT`."
-function _builder_for(needed::Vector{Any}, @nospecialize(U))
+@machinery function _builder_for(needed::Vector{Any}, @nospecialize(U))
     found = Any[]                    # (X, ProjRec)
     for X in needed
         p = proj_lookup(X, U)
@@ -486,7 +486,7 @@ function kwfallback(nt::NamedTuple, f::F, args...) where {F}
     return Base.inferencebarrier(_fallback_plain)(nt, f, args)
 end
 
-@noinline function _fallback_plain(@nospecialize(nt), @nospecialize(f), args::Tuple)
+@machinery @noinline function _fallback_plain(@nospecialize(nt), @nospecialize(f), args::Tuple)
     m = _plain_method(f, Tuple{Core.Typeof(f),map(typeof, args)...})
     m === nothing && throw(MethodError(f, args))
     body = Base.unwrap_unionall(m.sig)
@@ -666,7 +666,7 @@ A result like `t` with declared fields replaced; also on a result of `like`.
 
 "How an entry returns: a result like the input becomes a value of the caller's type (entries inline this test, building the tuples only for such a result)."
 @inline _out(res, us::Tuple, vs::Tuple) = res isa LikeResult ? Base.inferencebarrier(_like_out)(res, us, vs) : res
-function _like_out(res::LikeResult, us::Tuple, vs::Tuple)
+@machinery function _like_out(res::LikeResult, us::Tuple, vs::Tuple)
     for i in eachindex(vs)
         vs[i] === res.t || continue
         u = us[i]

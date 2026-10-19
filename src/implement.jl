@@ -472,7 +472,7 @@ end
 
 _check_implementation(mod::Module, @nospecialize(X), @nospecialize(R), given::Tuple) =
     _latest(_check_implementation_now, mod, X, R, given)
-function _check_implementation_now(mod::Module, @nospecialize(X), @nospecialize(R), given::Tuple)
+@machinery function _check_implementation_now(mod::Module, @nospecialize(X), @nospecialize(R), given::Tuple)
     _check_delegate(mod, X, R)
     definer = owner(mod)
     tmod = owner(parentmodule(X))
@@ -502,7 +502,7 @@ function _check_implementation_now(mod::Module, @nospecialize(X), @nospecialize(
 end
 
 _check_projection(mod::Module, @nospecialize(X), @nospecialize(T)) = _latest(_check_projection_now, mod, X, T)
-function _check_projection_now(mod::Module, @nospecialize(X), @nospecialize(T))
+@machinery function _check_projection_now(mod::Module, @nospecialize(X), @nospecialize(T))
     _check_delegate(mod, X, T)
     p = _proj(X, T)::ProjRec
     definer = owner(mod)
@@ -522,7 +522,7 @@ end
 
 "A type declared to conform by its own methods has the fields the trait and its supertraits declare."
 _check_own_fields(@nospecialize(X), @nospecialize(T)) = _latest(_check_own_fields_now, X, T)
-function _check_own_fields_now(@nospecialize(X), @nospecialize(T))
+@machinery function _check_own_fields_now(@nospecialize(X), @nospecialize(T))
     for Y in trait_closure(X)
         ps = _field_problems(Y, T, nothing, isempty(_ops(Y)) ? Nothing : T)
         isempty(ps) || throw(ImplementError("$T does not have the fields $Y declares:\n  " * join(ps, "\n  ")))
@@ -616,7 +616,7 @@ What a conformance declaration fixes, after its checks: the builder of its views
 without those the implementing type already had a method for.
 """
 _declare_conformance(@nospecialize(X), @nospecialize(T)) = _latest(_declare_conformance_now, X, T)
-function _declare_conformance_now(@nospecialize(X), @nospecialize(T))
+@machinery function _declare_conformance_now(@nospecialize(X), @nospecialize(T))
     recs = Any[]
     (T isa DataType && isconcretetype(T)) || return (b = nothing, recs = ())
     p = proj_lookup(X, T)
@@ -681,7 +681,7 @@ function _family_registry end
     b === nothing && return Base.inferencebarrier(_conf_family_slow)(reg, X, u)
     return (b::Builder)(u)
 end
-@noinline function _conf_family_slow(reg::Base.RefValue{IdDict{Any,Any}}, @nospecialize(X), @nospecialize(u))
+@machinery @noinline function _conf_family_slow(reg::Base.RefValue{IdDict{Any,Any}}, @nospecialize(X), @nospecialize(u))
     U = typeof(u)
     # a member at an abstract parameter (`S{Any}`) is refused at the entry where X asks for concrete keys
     _latest(_concreteness_of, X) === :concrete_only && !key_concrete(U) &&
@@ -701,7 +701,7 @@ end
     return r
 end
 "The builder of a family member's conformance, fixed when first compiled: `nothing` if it cannot be."
-function _family_builder(@nospecialize(X), @nospecialize(U))
+@machinery function _family_builder(@nospecialize(X), @nospecialize(U))
     (U isa DataType && isconcretetype(U)) || return nothing
     try
         # a member of a family declared by existing methods that does not conform (it breaks the
@@ -904,7 +904,7 @@ end
 # and types at abstract argument types, so their native code was invalidated by large loads and
 # compiled again at the next `@implement` (0.6 s, 1.4-1.7 s after CSV, DataFrames and CairoMakie;
 # session 26). Under the policy those calls dispatch at run time instead.
-function _implement_expand(mod::Module, @nospecialize(file), argv::Vector{Any})
+@machinery function _implement_expand(mod::Module, @nospecialize(file), argv::Vector{Any})
     _note_extension!(mod, file)
     TW = TraitWorld
     isempty(argv) && error("@implement: nothing to implement")

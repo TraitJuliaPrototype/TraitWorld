@@ -329,7 +329,7 @@ not new ones for the pair of views. A trait object with one view is kept as it i
 """
 @inline _narrow(::Type{X}, t::TObj{T,V}) where {X,T,V} = fieldcount(V) == 1 ? t : Base.inferencebarrier(_narrow_slow)(X, t)
 const _NARROW = IdDict{Any,Any}()
-function _narrow_slow(@nospecialize(X), @nospecialize(t::TObj))
+@machinery function _narrow_slow(@nospecialize(X), @nospecialize(t::TObj))
     V = typeof(getfield(t, :views))
     keep = @lock _LOCK get(_NARROW, (X, V), nothing)
     if keep === nothing
@@ -366,7 +366,7 @@ along the path `Dynamic{X}(x)` takes, in the checks' own cache. A type whose tra
 inferred concretely is left out (its values are registered when made). Called after each
 declaration (`_bump!`) and when a package is loaded (images do not run top-level code again).
 """
-function _note_conformances!()
+@machinery function _note_conformances!()
     try
         for m in methods(implementation)
             (@lock _CAND_LOCK m in _CAND_SEEN) && continue

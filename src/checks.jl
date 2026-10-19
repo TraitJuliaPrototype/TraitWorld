@@ -74,7 +74,7 @@ _escapes(@nospecialize(T)) = T isa Union ? any(_escapes, Base.uniontypes(T)) :
     (T isa DataType && (T <: TObj || T <: AbstractView || T <: CObj || T <: CMulti || T <: LikeResult ||
                         (T <: Tuple && any(_escapes, T.parameters))))
 
-function worker_problems(@nospecialize(sig), seen = Base.IdSet{Any}(), out = String[]; root::Bool = true)
+@machinery function worker_problems(@nospecialize(sig), seen = Base.IdSet{Any}(), out = String[]; root::Bool = true)
     sig in seen && return out
     push!(seen, sig)
     return _worker_problems(sig, seen, out, root)
@@ -327,7 +327,7 @@ _worker_ftype(@nospecialize(sig)) = sig.parameters[1] === typeof(Core.kwcall) ? 
 @inline _checked_out(x::LikeResult) = x
 _noescape(::Union{TObj,AbstractView,CObj,CMulti,LikeResult}) = throw(TraitUseError(["a trait object was returned to ordinary code: a trait object is a handle, not a value"]))
 
-@noinline function _check_once(flag::Base.RefValue{Bool}, @nospecialize(sig))
+@machinery @noinline function _check_once(flag::Base.RefValue{Bool}, @nospecialize(sig))
     CLOSED_WORLD[] && (flag[] = true; return nothing)      # checked by verify_main at build time
     _FACTS_DEBUG[] && Core.println("TraitWorld: first-call check of ", sig, ccall(:jl_generating_output, Cint, ()) == 1 ? " (while generating an image)" : "")
     # a value conforming at parameters no bound accepts: no worker for the signature

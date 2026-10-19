@@ -23,6 +23,27 @@ function _fact_splits(@nospecialize(s))
     return ss === nothing ? Any[s] : ss
 end
 
+"""
+    @machinery function f(…) … end
+
+A slow path of the machinery (a definition's checks, finding a builder or a family member, the
+first call's checks, the definition hooks), compiled by facts whoever calls it (`Expr(:meta,
+:facts, 1)`, Julia's per-method mode): the code a session compiles for it rests on facts only, so
+loading packages does not invalidate it, and strict mode protects it as it protects trait code.
+TraitWorld's other code stays plain: the entries' helpers are inlined into plain callers.
+"""
+macro machinery(ex)
+    def = ex
+    while def isa Expr && def.head === :macrocall            # `@noinline function …`
+        def = def.args[end]
+    end
+    (def isa Expr && def.head in (:function, :(=))) || error("@machinery: expected a method definition")
+    body = def.args[2]
+    body isa Expr && body.head === :block || (body = def.args[2] = Expr(:block, body))
+    pushfirst!(body.args, Expr(:meta, :facts, 1))
+    return esc(ex)
+end
+
 "The cache owner of the definition checks' inference: none of their results reaches the code that runs."
 struct _CheckOwner end
 """

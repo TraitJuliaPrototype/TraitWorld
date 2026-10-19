@@ -157,7 +157,7 @@ end
 # --- the hooks --------------------------------------------------------------------------
 
 "Called by the runtime for every method definition: before it is visible (`after = false`, may throw), and after."
-function _on_method_definition(m::Method, after::Bool)
+@machinery function _on_method_definition(m::Method, after::Bool)
     err = nothing
     try
         if !after
@@ -227,7 +227,7 @@ function _refresh_keeps!(mod::Module)
 end
 
 "Called by the runtime with a package image's new methods before they are activated: those to leave inactive."
-function _on_image_methods(ms::Vector{Any}, pkg::String)
+@machinery function _on_image_methods(ms::Vector{Any}, pkg::String)
     refused = Any[]
     try
         for m in ms

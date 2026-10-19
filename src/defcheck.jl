@@ -274,7 +274,7 @@ function _keeps_sig(@nospecialize(sig), seen::Base.IdSet{Any})
 end
 
 "Whether any worker of `f` may keep a trait object (see `keeps`)."
-function _analyze_keeps(@nospecialize(f))
+@machinery function _analyze_keeps(@nospecialize(f))
     seen = Base.IdSet{Any}()
     try
         for m in methods(f)
