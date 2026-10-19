@@ -63,3 +63,59 @@ companions(f) = [mi for (g, n, tag, tpos) in UTab.__tw_untyped__ if g === f for 
     @test count(mi -> isconcretetype(mi.specTypes.parameters[2]), companions(UTab.sfirst)) == 1
     @test_throws MethodError untyped(Any[42])
 end
+
+# The table's worlds and the implementations it does not serve: a redefined operation, a type
+# declared after a call (an older world must not see it), a family member, a generic implementation.
+toplevel(quote
+    @trait_module module UTab2
+    using TraitWorld
+    export Val1, vtwice, Fam, fsum, Gen, gfirst
+    @trait Val1 begin
+        val1(v::Val1)::Float64
+    end
+    vtwice(v::Val1) = 2 * val1(v)
+    @trait Fam begin
+        @const data::Vector{Float64}
+    end
+    fsum(f::Fam) = sum(f.data)
+    @trait Gen{R} begin
+        glen(r::R)::Int
+    end
+    @implement Gen{A} where {A <: AbstractVector} begin           # a generic implementation
+        glen(r) = length(r)
+    end
+    gfirst(g::Gen) = glen(g)
+    end
+end)
+toplevel(quote
+    struct V1; x::Float64; end
+    UTab2.val1(v::V1) = v.x
+    @implement UTab2.Val1 V1
+    struct FM{P}; data::Vector{Float64}; p::P; end
+    @implement UTab2.Fam FM{P} where {P}                          # a family
+end)
+
+@testset "untyped calls: worlds, redefinitions, families, generic implementations" begin
+    call1(v) = (r = Float64[]; for x in v; push!(r, UTab2.vtwice(x)::Float64); end; r)
+    xs = Any[V1(1.5)]
+    @test call1(xs) == [3.0]
+    w = Base.get_world_counter()
+    toplevel(:(UTab2.val1(v::V1) = 10 * v.x))                    # the operation redefined
+    @test Base.invokelatest(call1, xs) == [30.0]
+    @test Base.invoke_in_world(w, call1, xs) == [3.0]               # the older world: the old method
+    # a type declared after the site was used: the older world has no implementation for it
+    toplevel(quote
+        struct V2; x::Float64; end
+        UTab2.val1(v::V2) = v.x + 1
+    end)
+    w2 = Base.get_world_counter()
+    toplevel(:(@implement UTab2.Val1 V2))
+    ys = Any[Base.invokelatest(getglobal(Main, :V2), 1.0)]
+    @test Base.invokelatest(call1, ys) == [4.0]
+    @test_throws MethodError Base.invoke_in_world(w2, call1, ys)    # as plain Julia: no method there
+    # a family member and a generic implementation, called untyped: the entry's own path
+    callf(v) = (r = Float64[]; for x in v; push!(r, UTab2.fsum(x)::Float64); end; r)
+    @test callf(Any[FM([1.0, 2.0], :a), FM([3.0], 1)]) == [3.0, 3.0]
+    callg(v) = (r = Int[]; for x in v; push!(r, UTab2.gfirst(x)::Int); end; r)
+    @test callg(Any[[1, 2, 3], [1.0]]) == [3, 1]
+end

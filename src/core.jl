@@ -688,6 +688,16 @@ end
 # --- Callable: erased function pointers and checked calls ------------------
 
 """
+The pointer of an `Erased`, in a mutable cell: a package image resets a mutable struct's `Ptr`
+fields to null (an immutable one's it saves as the old session's address, which crashes when
+called), so a value kept in an image (`const D = dynamic_fn(…)`) finds null in a new session and
+makes its pointer again, once. A load and a compare per call; compiled code cannot fold the
+address in as a constant.
+"""
+mutable struct _PtrCell
+    @atomic ptr::Ptr{Cvoid}
+end
+"""
     Erased{A, S}
 
 A function from above, erased to a pointer to its code compiled for `A`
@@ -696,7 +706,7 @@ S}` serves every function with that signature; each call is indirect. The
 result is asserted, never converted.
 """
 struct Erased{A,S}
-    ptr::Ptr{Cvoid}
+    cell::_PtrCell
     obj::Any
 end
 struct _CallWrap{S} end
@@ -723,14 +733,22 @@ _cdecl(@nospecialize(T)) = isbitstype(T) && sizeof(T) > 0 ? T : isconcretetype(T
     return Expr(:cfunction, Ptr{Cvoid}, QuoteNode(_CallWrap{S}()), _ctype(S),
                 :(Core.svec($(Ref{F}), $(ats...))), QuoteNode(:caller_world))
 end
-Erased{A,S}(f::F) where {A,S,F} = Erased{A,S}(_fptr(A, S, F), f)
+Erased{A,S}(f::F) where {A,S,F} = Erased{A,S}(_PtrCell(_fptr(A, S, F)), f)
+"The pointer of `e` in this session: made again after an image load reset it."
+@noinline function _erased_ptr_slow(e::Erased{A,S}) where {A,S}
+    p = Base.invokelatest(_fptr, A, S, typeof(getfield(e, :obj)))::Ptr{Cvoid}
+    @atomic getfield(e, :cell).ptr = p
+    return p
+end
 @generated function (e::Erased{A,S})(args...) where {A,S}
     length(A.parameters) <= 6 || return :(error("Erased: at most 6 arguments"))
     ats = map(_ctype, A.parameters)
     argex = [:(args[$i]) for i in 1:length(ats)]
     return quote
         Base.@_inline_meta
-        x = ccall(e.ptr, $(_ctype(S)), (Any, $(ats...)), e.obj, $(argex...))
+        p = @atomic :monotonic getfield(e, :cell).ptr
+        p == C_NULL && (p = _erased_ptr_slow(e))
+        x = ccall(p, $(_ctype(S)), (Any, $(ats...)), e.obj, $(argex...))
         x::$S
     end
 end
