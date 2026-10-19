@@ -38,17 +38,17 @@ function fully_typed(@nospecialize(f), @nospecialize(argtypes::Tuple))
     ndyn = count(p -> p.first === :dynamic, r.targets) + count(h -> h.kind === :dynamic, r.holes)
     return FullyTypedReport(Base.signature_type(f, argtypes), sites, ndyn)
 end
-"The caller `fully_typed` walks from: a call of `f` at the arguments' types (fixed arities with type parameters, so that a `Type{T}` argument stays `Type{T}`: a varargs signature would widen it to a kind)."
-_certified_call(f::F) where {F} = f()
-_certified_call(f::F, a1::A1) where {F,A1} = f(a1)
-_certified_call(f::F, a1::A1, a2::A2) where {F,A1,A2} = f(a1, a2)
-_certified_call(f::F, a1::A1, a2::A2, a3::A3) where {F,A1,A2,A3} = f(a1, a2, a3)
-_certified_call(f::F, a1::A1, a2::A2, a3::A3, a4::A4) where {F,A1,A2,A3,A4} = f(a1, a2, a3, a4)
-_certified_call(f::F, a1::A1, a2::A2, a3::A3, a4::A4, a5::A5) where {F,A1,A2,A3,A4,A5} = f(a1, a2, a3, a4, a5)
-_certified_call(f::F, a1::A1, a2::A2, a3::A3, a4::A4, a5::A5, a6::A6) where {F,A1,A2,A3,A4,A5,A6} = f(a1, a2, a3, a4, a5, a6)
-_certified_call(f::F, a1::A1, a2::A2, a3::A3, a4::A4, a5::A5, a6::A6, a7::A7) where {F,A1,A2,A3,A4,A5,A6,A7} = f(a1, a2, a3, a4, a5, a6, a7)
-_certified_call(f::F, a1::A1, a2::A2, a3::A3, a4::A4, a5::A5, a6::A6, a7::A7, a8::A8) where {F,A1,A2,A3,A4,A5,A6,A7,A8} = f(a1, a2, a3, a4, a5, a6, a7, a8)
-_certified_call(f::F, args::Vararg{Any,N}) where {F,N} = f(args...)
+"The caller `fully_typed` walks from: a call of `f` at the arguments' types (fixed arities with type parameters, so that a `Type{T}` argument stays `Type{T}`: a varargs signature would widen it to a kind). The call is not inlined: the walk sees `f`'s code as `f`'s, not as this helper's."
+_certified_call(f::F) where {F} = @noinline f()
+_certified_call(f::F, a1::A1) where {F,A1} = @noinline f(a1)
+_certified_call(f::F, a1::A1, a2::A2) where {F,A1,A2} = @noinline f(a1, a2)
+_certified_call(f::F, a1::A1, a2::A2, a3::A3) where {F,A1,A2,A3} = @noinline f(a1, a2, a3)
+_certified_call(f::F, a1::A1, a2::A2, a3::A3, a4::A4) where {F,A1,A2,A3,A4} = @noinline f(a1, a2, a3, a4)
+_certified_call(f::F, a1::A1, a2::A2, a3::A3, a4::A4, a5::A5) where {F,A1,A2,A3,A4,A5} = @noinline f(a1, a2, a3, a4, a5)
+_certified_call(f::F, a1::A1, a2::A2, a3::A3, a4::A4, a5::A5, a6::A6) where {F,A1,A2,A3,A4,A5,A6} = @noinline f(a1, a2, a3, a4, a5, a6)
+_certified_call(f::F, a1::A1, a2::A2, a3::A3, a4::A4, a5::A5, a6::A6, a7::A7) where {F,A1,A2,A3,A4,A5,A6,A7} = @noinline f(a1, a2, a3, a4, a5, a6, a7)
+_certified_call(f::F, a1::A1, a2::A2, a3::A3, a4::A4, a5::A5, a6::A6, a7::A7, a8::A8) where {F,A1,A2,A3,A4,A5,A6,A7,A8} = @noinline f(a1, a2, a3, a4, a5, a6, a7, a8)
+_certified_call(f::F, args::Vararg{Any,N}) where {F,N} = @noinline f(args...)
 
 "How to make a run-time site a fact, by its kind."
 function _site_hint(h::Hole)

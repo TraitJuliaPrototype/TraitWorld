@@ -715,7 +715,7 @@ function _scan(mi::Core.MethodInstance, cx::_Walk)
                 # reached only by a user type with none of the entry's traits
                 notrait ? hole(:fallback, i, cm.name, Any[]) : site(:trait, i, cm.name, Any[])
                 continue
-            elseif cm isa Method && cm.nospecialize != 0 && isdefined(cm.module, :__tw_entries__)
+            elseif cm isa Method && _is_entry(cm)
                 # an entry of a trait module: compiled once (that instance must have native code),
                 # but analyzed at the call site's argument types, so only the user types the program
                 # can pass are enumerated

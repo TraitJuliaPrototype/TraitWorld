@@ -503,8 +503,11 @@ end
     return invoke(f, sig, args...; nt...)
 end
 
-"An entry: a `@nospecialize` method of a trait module (only entries are generated that way)."
-_is_entry(m::Method) = m.nospecialize != 0 && isdefined(m.module, :__tw_entries__)
+"""
+An entry: a method of a trait module compiled in its caller's mode (the boundary meta,
+`Method.facts == 1`); the only other such methods are the implementations, of `conformance`.
+"""
+_is_entry(m::Method) = m.facts == 1 && m.name !== :conformance && isdefined(m.module, :__tw_entries__)
 
 function _plain_method(@nospecialize(f), @nospecialize(sig))
     # all applicable methods: a method lookup would drop those the entry covers

@@ -542,7 +542,13 @@ function _rewrite_fdef(mod::Module, ex)
         callnames = Any[]
         for x in args
             nm = x.name
-            if x.kind in (:trait, :callable, :callables)
+            if x.kind === :trait
+                # specialized (as plain Julia's methods are): an untyped caller's one dynamic call reaches
+                # the entry compiled for the argument's type, where the implementation, the views and the
+                # worker's selection fold (a small method per function and type, never invalidated)
+                push!(eargs, nm)
+                push!(callnames, nm)
+            elseif x.kind in (:callable, :callables)
                 push!(eargs, :(@nospecialize($nm)))
                 push!(callnames, nm)
             elseif x.kind === :vararg_trait
