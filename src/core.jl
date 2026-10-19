@@ -356,18 +356,6 @@ Base.convert(::Type{Dynamic{X}}, t::TObj) where {X} = Dynamic{X}(t)
 "The trait object a dynamic value keeps: what a bound opens."
 @inline opened(d::Dynamic) = getfield(d, :t)
 
-"""
-Operation `k` of a dynamic value's trait, declared with argument types `AT` and result type `RT`:
-a call at the trait object's run-time type, its result asserted to the declared type (a builtin:
-the declared type holds downstream). Julia's compiler splits the call at the call site over the
-trait-object types dynamic values of `X` hold (`dynamic_call`, part (D)), with the dynamic call for
-any other type; in code compiled by facts that call runs code compiled by facts (part (C)).
-"""
-Base.@constprop :aggressive @inline _dyn_call(dyn::Dynamic{X}, ::Val, f::F, ::Type{AT}, ::Type{RT}, args::Vararg{Any,N}) where {X,F,AT,RT,N} =
-    CC.dynamic_call(_family_of(X), RT, f, opened(dyn), args...)::RT
-# (`@constprop :aggressive`: inferred again at every call site, so that each caller splits over the
-# candidates known when it is compiled, not over those of the first caller)
-
 "The trait family of `X`, a constant of the specialized caller (the key of the call-site splits)."
 @generated _family_of(::Type{X}) where {X} = :($(_family(X)))
 

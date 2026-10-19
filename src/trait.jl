@@ -295,8 +295,9 @@ macro trait(header, block = nothing)
                         Expr(:(=), Expr(:where, :($(d.fexpr)(t::$TW.TObj{$T}, args...)), _tobj_where(name, np, T)...),
                              Expr(:block, :($TW.opcall($name, Val($key), $(d.fexpr), t, args...))))))
     end
-    # the operations on a dynamic value: dispatch on the trait object it keeps, assert the
-    # declared result type where it does not depend on the representation (`_dyn_call`)
+    # the operations on a dynamic value: a call at the trait object's run-time type, its result asserted
+    # to the declared type where that does not depend on the representation (a builtin: the declared
+    # type holds downstream); in code compiled by facts the call runs code compiled by facts (part (C))
     for (k, d) in enumerate(decls)
         syms = [gensym(:a) for _ in d.args]
         dep(t) = _mentions(t, Rsym) || any(p -> _mentions(t, p), pnames)
