@@ -648,13 +648,28 @@ function _rewrite_fdef(mod::Module, ex)
             look = Any[:($wsym = Base.tls_world_age())]
             for (j, i) in enumerate(tpos)
                 push!(look, :($(bsyms[j]) = $TraitWorld._ubuilder($TraitWorld.EntryPos{typeof($fname),$i,$nargs}(),
-                                                                     typeof($(args[i].name))::DataType, $wsym)))
+                                                                     $(Expr(:new, :($TraitWorld.XAny), args[i].name)), $wsym)))
             end
             found = foldl((a, b) -> :($a & $b), [:($(bsyms[j]) isa $TraitWorld.Builder) for j in eachindex(tpos)])
-            tblock = :(if !($known) && $plainv
-                           $(look...)
-                           $found && return Base.inferencebarrier($tag())($(bsyms...), $(callnames...))   # a dispatch, on the builders' types
-                       end)
+            if length(tpos) == 1
+                # one trait position: through the pattern's pointer for the type (no second dispatch)
+                i1 = tpos[1]
+                esym = gensym(:e)
+                nall = length(args)
+                tblock = :(if !($known) && $plainv
+                               $wsym = Base.tls_world_age()
+                               $esym = $TraitWorld._pentry($TraitWorld.EntryPos{typeof($fname),$i1,$nargs}(), $tag(),
+                                                           $(Expr(:new, :($TraitWorld.XAny), args[i1].name)), $wsym, Val($nall))
+                               if getfield($esym, :fp) != C_NULL
+                                   return ccall(getfield($esym, :fp), Any, ($([:Any for _ in 0:nall]...),), getfield($esym, :fo), $(callnames...))
+                               end
+                           end)
+            else
+                tblock = :(if !($known) && $plainv
+                               $(look...)
+                               $found && return Base.inferencebarrier($tag())($(bsyms...), $(callnames...))   # a dispatch, on the builders' types
+                           end)
+            end
             pushfirst!(stmts, tblock)
             # the specialized method: the views from the builders' data, the worker's call as the entry's
             cargs = Any[]
@@ -676,7 +691,7 @@ function _rewrite_fdef(mod::Module, ex)
             end
             cres = gensym(:res)
             # a frame of its own: a backtrace shows the worker at its bound, as from the entry's call
-            push!(cstmts, :($cres = @noinline $TraitWorld.checked_call($fname, $(cnames...))))
+            push!(cstmts, :($cres = $TraitWorld.checked_call($fname, $(cnames...))))
             push!(cstmts, :(return $cres isa $TraitWorld.LikeResult ?
                             Base.inferencebarrier($TraitWorld._like_out)($cres, $us, $(Expr(:tuple, [cnames[i] for i in tpos]...))) : $cres))
             csig = Expr(:call, :(::$tag), [:($(bsyms[j])::$TraitWorld.Builder) for j in eachindex(tpos)]..., cargs...)

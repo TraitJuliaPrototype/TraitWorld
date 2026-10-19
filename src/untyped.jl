@@ -42,8 +42,9 @@ const _SESSION = Ref{UInt}(0)
 "The table of entry position `P`, embedded in the code that reads it."
 @generated _utable(::P) where {P} = UTable()
 
-"The builder for user type `T` at a table in world `w`, or `nothing` when the table does not know it."
-@inline function _ulookup(tbl::UTable, T::DataType, w::UInt)
+"The builder for the held value's type at a table in world `w`, or `nothing` when the table does not know it."
+@inline function _ulookup(tbl::UTable, xa::XAny, w::UInt)
+    T = typeof(getfield(xa, :x))
     (@atomic :acquire tbl.session) === _SESSION[] || return nothing
     es = @atomic :acquire tbl.entries
     for i in 1:length(es)
@@ -105,11 +106,14 @@ _declared_builder(::As, @nospecialize(T)) = nothing
 "In the table for a type whose implementation the table does not serve: the entry takes its own path."
 const _UNTABLED = :untabled
 
-"The builder of `T` at `p` in world `w`: from the table, or found and added."
-@inline function _ubuilder(p::EntryPos, T::DataType, w::UInt)
+"""
+The builder of the held value's type at `p` in world `w`: from the table, or found and added. The
+value comes in its holder: a type passed as a value is a kind, and a call at a kind is a run-time site.
+"""
+@inline function _ubuilder(p::EntryPos, xa::XAny, w::UInt)
     tbl = _utable(p)
-    b = _ulookup(tbl, T, w)
-    b === nothing && return Base.inferencebarrier(_umiss)(tbl, p, T, w)
+    b = _ulookup(tbl, xa, w)
+    b === nothing && return Base.inferencebarrier(_umiss)(tbl, p, typeof(getfield(xa, :x))::DataType, w)
     return b
 end
 
@@ -153,3 +157,104 @@ end
 @generated _view_with_any(v::View{X,W,K,N,P}, xa::XAny) where {X,W,K,N,P} =
     Expr(:new, View{X,W,K,N,P}, :(getfield(v, :w)), :(getfield(xa, :x)), :(getfield(v, :r)), :(getfield(v, :fs)), :(getfield(v, :parts)))
 @inline _view_with_any(v, xa::XAny) = v
+
+# --- the entry's method through a pointer (one trait position): no second dispatch -------------
+# The step-1 pointer: a `cfunction` of the calling convention `:caller_world`, which runs in the
+# caller's world through a world-checked cache. One per entry pattern and builder type: the
+# callable `_UCall{G, B}` holds the builder and calls the pattern's method `G` on it statically.
+
+"The call of an entry pattern's method `G` with the builder held: `G()(b, args...)`."
+struct _UCall{G,B}
+    b::Any          # held by reference: an isbits callable behind a `Ref` argument is copied into a box per call
+end
+# fixed arities: a vararg method behind the pointer would build its argument tuple
+@inline (c::_UCall{G,B})() where {G,B} = G.instance(getfield(c, :b)::B)
+@inline (c::_UCall{G,B})(@nospecialize(a)) where {G,B} = G.instance(getfield(c, :b)::B, a)
+@inline (c::_UCall{G,B})(@nospecialize(a), @nospecialize(b)) where {G,B} = G.instance(getfield(c, :b)::B, a, b)
+@inline (c::_UCall{G,B})(a, b, d) where {G,B} = G.instance(getfield(c, :b)::B, a, b, d)
+@inline (c::_UCall{G,B})(a, b, d, e) where {G,B} = G.instance(getfield(c, :b)::B, a, b, d, e)
+@inline (c::_UCall{G,B})(a, b, d, e, f) where {G,B} = G.instance(getfield(c, :b)::B, a, b, d, e, f)
+# the arguments come boxed and are not specialized on: `Any` is then a compileable signature, so
+# the pointer's thunk calls code compiled once (a slot that specializes is never compiled at `Any`,
+# and the thunk would fall back to a dynamic dispatch, compiling `_UWrap` per type behind it)
+struct _UWrap end
+(::_UWrap)(o) = o()
+(::_UWrap)(o, @nospecialize(a)) = o(a)
+(::_UWrap)(o, @nospecialize(a), @nospecialize(b)) = o(a, b)
+(::_UWrap)(o, @nospecialize(a), @nospecialize(b), @nospecialize(c)) = o(a, b, c)
+(::_UWrap)(o, @nospecialize(a), @nospecialize(b), @nospecialize(c), @nospecialize(d)) = o(a, b, c, d)
+(::_UWrap)(o, @nospecialize(a), @nospecialize(b), @nospecialize(c), @nospecialize(d), @nospecialize(e)) = o(a, b, c, d, e)
+"A pointer to `o(args...)` for the callable type `F` and `N` arguments, all passed boxed, in the caller's world."
+@generated function _ufptr(::Type{F}, ::Val{N}) where {F,N}
+    return Expr(:cfunction, Ptr{Cvoid}, QuoteNode(_UWrap()), Any,
+                :(Core.svec($(Ref{F}), $(fill(Any, N)...))), QuoteNode(:caller_world))
+end
+
+"One user type's pointer for an entry pattern: the pointer, the callable it is called with, a range of worlds."
+struct PEntry
+    T::DataType
+    fp::Ptr{Cvoid}
+    fo::Any
+    lo::UInt
+    hi::UInt
+end
+mutable struct PTable
+    @atomic entries::Vector{PEntry}
+    @atomic session::UInt
+end
+"The pointer table of entry pattern `G`, embedded in the code that reads it."
+@generated _ptable(::G) where {G} = PTable(PEntry[], UInt(0))
+
+"The pointer entry for the held value's type, or `nothing`."
+@inline function _plookup(t::PTable, xa::XAny, w::UInt)
+    T = typeof(getfield(xa, :x))
+    (@atomic :acquire t.session) === _SESSION[] || return nothing
+    es = @atomic :acquire t.entries
+    for i in 1:length(es)
+        e = @inbounds es[i]
+        (e.T === T && e.lo <= w && w <= e.hi) && return e
+    end
+    return nothing
+end
+
+"""
+The pointer entry of entry pattern `g` (a method of `N` arguments after the builder) for the
+held value's type: from its position's builder, made once, valid for the builder's worlds. Its
+pointer is `C_NULL` when the table does not serve the type (no builder).
+"""
+@machinery @noinline function _pmiss(t::PTable, @nospecialize(p::EntryPos), @nospecialize(g), xa::XAny, w::UInt, N::Int)
+    T = typeof(getfield(xa, :x))::DataType
+    tbl = _utable(p)
+    b = _ulookup(tbl, xa, w)
+    b === nothing && (b = _umiss(tbl, p, T, w))
+    lo, hi = w, w
+    for e in @atomic tbl.entries
+        (e.T === T && e.lo <= w <= e.hi) && (lo = e.lo; hi = e.hi)
+    end
+    if b isa Builder
+        fo = _UCall{typeof(g),typeof(b)}(b)
+        fp = Base.invokelatest(_ufptr, typeof(fo), Val(N))::Ptr{Cvoid}
+    else
+        fo, fp = b, C_NULL
+    end
+    e = PEntry(T, fp, fo, lo, hi)
+    @lock _LOCK begin
+        s = _SESSION[]
+        old = (@atomic t.session) === s ? (@atomic t.entries) : PEntry[]
+        new = PEntry[]
+        for x in old
+            (x.T === T && x.lo <= hi && lo <= x.hi) || push!(new, x)
+        end
+        push!(new, e)
+        @atomic :release t.entries = new
+        @atomic :release t.session = s
+    end
+    return e
+end
+"The pointer entry for the held value at entry pattern `g`, from its table, or made."
+@inline function _pentry(p::EntryPos, g, xa::XAny, w::UInt, ::Val{N}) where {N}
+    t = _ptable(g)
+    e = _plookup(t, xa, w)
+    e === nothing && return Base.inferencebarrier(_pmiss)(t, p, g, xa, w, N)::PEntry
+    return e
+end

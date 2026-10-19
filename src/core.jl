@@ -713,7 +713,8 @@ struct _CallWrap{S} end
 # (`Any`): the same pointer, without allocating a `RefValue`.
 # (a zero-size type, `Nothing`, is no C type: it goes as a reference too)
 _ctype(@nospecialize(T)) = isbitstype(T) && sizeof(T) > 0 ? T : Any
-_cdecl(@nospecialize(T)) = isbitstype(T) && sizeof(T) > 0 ? T : Ref{T}
+# (an abstract type is `Any` on both sides: `Ref{T}` there would mean a pointer to a slot holding the value)
+_cdecl(@nospecialize(T)) = isbitstype(T) && sizeof(T) > 0 ? T : isconcretetype(T) ? Ref{T} : Any
 # The calling convention `:caller_world` (a patch of the compiler): the call runs in the caller's
 # world, as a direct call does; the pointer's thunk is a world-checked call-site cache. (A plain
 # `@cfunction` runs in the latest world, as a callback from C must.)
