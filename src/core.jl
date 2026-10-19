@@ -364,7 +364,7 @@ trait-object types dynamic values of `X` hold (`dynamic_call`, part (D)), with t
 any other type; in code compiled by facts that call runs code compiled by facts (part (C)).
 """
 Base.@constprop :aggressive @inline _dyn_call(dyn::Dynamic{X}, ::Val, f::F, ::Type{AT}, ::Type{RT}, args::Vararg{Any,N}) where {X,F,AT,RT,N} =
-    CC.dynamic_call(_family_of(X), f, opened(dyn), args...)::RT
+    CC.dynamic_call(_family_of(X), RT, f, opened(dyn), args...)::RT
 # (`@constprop :aggressive`: inferred again at every call site, so that each caller splits over the
 # candidates known when it is compiled, not over those of the first caller)
 

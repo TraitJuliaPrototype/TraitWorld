@@ -937,6 +937,13 @@ function _implement_expand(mod::Module, @nospecialize(file), argv::Vector{Any})
     length(head.args) == np + 2 ||
         error("@implement: $X takes $(np == 0 ? "the representation" : "$np parameter(s) and the representation, last"); got `$head`")
     Rex = head.args[end]
+    if block !== nothing
+        Rv = _tryeval(mod, Rex)
+        Rv isa Type && _has_conformance_method(X, Rv) &&
+            throw(ImplementError("$Rv already conforms to $X: a conformance is not redeclared in a session. " *
+                                 "An override of a default belongs to the conformance (the key and kept values depend on it); " *
+                                 "to change it, change the declaration and restart Julia (redeclaration is not built yet)"))
+    end
     pdefs = _param_methods(X, head.args[2:end-1], Rex, Any[])
     if block === nothing
         # the representation's existing methods implement the trait (Base's, or its owner's)
