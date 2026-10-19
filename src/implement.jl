@@ -652,6 +652,19 @@ _declare_conformance(@nospecialize(X), @nospecialize(T)) = _latest(_declare_conf
     return (b = _conformance_builder(X, T), recs = Tuple(recs))
 end
 
+"Whether `T` has a declaration of its own for `X`: a `conformance` method at `T` itself, not a family's (a member may still declare its own) nor the fallback."
+function _declared_for(@nospecialize(X), @nospecialize(T))
+    T isa Type || return false
+    m = Base._which(Tuple{typeof(conformance),As{X},T}; raise = false)
+    m === nothing && return false
+    return Base.unwrap_unionall(m.method.sig).parameters[3] === T
+end
+"The refusal of a second declaration for `T` in a session."
+_redeclared(@nospecialize(X), @nospecialize(T)) =
+    ImplementError("$T already conforms to $X: an implementation is not redeclared in a session. " *
+                   "Which operations its own methods and the defaults serve is fixed by the declaration (the key and kept values depend on it); " *
+                   "to change it, change the declaration and restart Julia (redeclaration is not built yet)")
+
 "Whether `conformance(X, ::T)` has a method of its own (a declaration made it), not the fallback."
 function _has_conformance_method(@nospecialize(X), @nospecialize(T))
     T isa Type || return false
@@ -672,7 +685,7 @@ function _conformance_methods(Xex, Tex)
     return Any[:(const $c = $TW._declare_conformance($Xex, $Tex)),
                Expr(:macrocall, GlobalRef(Base, Symbol("@inline")), LineNumberNode(0, :none),
                     Expr(:function, :($TW.conformance(::$TW.As{$Xex}, u::$Tex)),
-                         Expr(:block, Expr(:meta, :facts, 0), :($TW._conf_call($c.b, $Xex, u))))),
+                         Expr(:block, Expr(:meta, :facts_boundary), :($TW._conf_call($c.b, $Xex, u))))),
                :($TW._declared_defaults(::Type{$Xex}, ::Type{$Tex}) = $c.recs),
                :($TW._declared_builder(::$TW.As{$Xex}, ::Type{$Tex}) = $c.b),      # for the untyped calls' table (untyped.jl)
                :($TW._compile_ahead(@__MODULE__, $Xex, $Tex))]       # while its package is built: the code its calls need (ahead.jl)
@@ -941,16 +954,13 @@ end
     rest = collect(args[2:end])
     # --- projections: @implement X T …, @implement (X, Y) T …, @implement X{R} T …
     if !isempty(rest) && !(rest[1] isa Expr && rest[1].head === :block)
-        # an implementation declared again in the session, with a block of methods: refused with
-        # the reason (design.md §4.4), not with what the block lacks
-        if length(rest) >= 2 && rest[end] isa Expr && rest[end].head === :block
-            X = try Core.eval(mod, head) catch; nothing end
-            T = try Core.eval(mod, rest[1]) catch; nothing end
-            if X isa Type && T isa Type && is_trait(X) && _has_conformance_method(X, T)
-                throw(ImplementError("$T already conforms to $X: an implementation is not redeclared in a session. " *
-                                     "An override of a default belongs to the implementation (the key and kept values depend on it); " *
-                                     "to change it, change the declaration and restart Julia (redeclaration is not built yet)"))
-            end
+        # an implementation declared again in the session, in any form: refused with the reason
+        # (traits reference §5.10), not with what the new form lacks
+        T = try Core.eval(mod, rest[1]) catch; nothing end
+        for xex in (head isa Expr && head.head === :tuple ? head.args : Any[head])
+            xex isa Expr && xex.head === :curly && (xex = xex.args[1])         # stated parameters: `X{P…}`
+            X = try Core.eval(mod, xex) catch; nothing end
+            X isa Type && T isa Type && is_trait(X) && _declared_for(X, T) && throw(_redeclared(X, T))
         end
         return _implement_projection(mod, head, rest; fmap)
     end
@@ -969,10 +979,7 @@ end
     Rex = head.args[end]
     if block !== nothing
         Rv = _tryeval(mod, Rex)
-        Rv isa Type && _has_conformance_method(X, Rv) &&
-            throw(ImplementError("$Rv already conforms to $X: an implementation is not redeclared in a session. " *
-                                 "An override of a default belongs to the implementation (the key and kept values depend on it); " *
-                                 "to change it, change the declaration and restart Julia (redeclaration is not built yet)"))
+        Rv isa Type && _declared_for(X, Rv) && throw(_redeclared(X, Rv))
     end
     pdefs = _param_methods(X, head.args[2:end-1], Rex, Any[])
     if block === nothing
@@ -984,7 +991,7 @@ end
             $TW.implementation(::Type{$X}, ::Type{$Rex}) = $rec
             $TW._check_implementation(@__MODULE__, $X, $Rex,
                 $TW._remaining_ops($X, $Rex))     # a call, not a generator: a closure in the user's module was compiled per declaration
-            $(_has_conformance_method(X, _tryeval(mod, Rex)) ? nothing : Expr(:block, _conformance_methods(X, Rex)...))
+            $(_declared_for(X, _tryeval(mod, Rex)) ? nothing : Expr(:block, _conformance_methods(X, Rex)...))
             $TW._bump!()
             nothing
         end)
@@ -998,7 +1005,7 @@ end
     push!(out, :(const $rec = $TW.ImplRec(:methods, $defaults)))
     push!(out, :($TW.implementation(::Type{$X}, ::Type{$Rex}) = $rec))
     push!(out, :($TW._check_implementation(@__MODULE__, $X, $Rex, $given)))
-    _has_conformance_method(X, _tryeval(mod, Rex)) || append!(out, _conformance_methods(X, Rex))
+    _declared_for(X, _tryeval(mod, Rex)) || append!(out, _conformance_methods(X, Rex))
     push!(out, :($TW._bump!()))
     push!(out, :nothing)
     return esc(Expr(:block, out...))
@@ -1013,12 +1020,34 @@ function _param_methods(@nospecialize(X), pexs, Rex, wheres::Vector{Any})
     for (p, pex) in zip(ps, pexs)
         pex === :_ && continue              # defined by the trait's equation or field
         sig = :($TW.param(::Type{$X}, ::Val{$(QuoteNode(p))}, ::Type{$Rex}))
-        push!(out, Expr(:(=), isempty(wheres) ? sig : Expr(:where, sig, wheres...), pex))
+        defs = Any[Expr(:(=), isempty(wheres) ? sig : Expr(:where, sig, wheres...), pex)]
         # the same parameter at a key with declared fields, whose receiver type is Rex
         ksig = :($TW.param(::Type{$X}, ::Val{$(QuoteNode(p))}, ::Type{$TW.Key{$Rex,F__}}))
-        push!(out, Expr(:(=), Expr(:where, ksig, wheres..., :F__), pex))
+        push!(defs, Expr(:(=), Expr(:where, ksig, wheres..., :F__), pex))
+        if isempty(wheres)
+            # an equation always holds: a value the trait defines (an equation, a field) is checked, never replaced
+            push!(out, Expr(:if, :(!$TW._param_agrees($X, $(QuoteNode(p)), $Rex, $pex)), Expr(:block, defs...)))
+        else
+            append!(out, defs)
+        end
     end
     return out
+end
+
+"""
+Whether the trait `X` defines its parameter `p` at `R` itself (by an equation or a field) with the
+value an implementation states: then the stated value is not defined again. A different value is
+refused: an equation always holds. `false` when the trait does not define `p` at `R`.
+"""
+function _param_agrees(@nospecialize(X), p::Symbol, @nospecialize(R), @nospecialize(stated))
+    Base.invokelatest(hasmethod, param, Tuple{Type{X}, Val{p}, Type{R}}) || return false
+    v = try
+        Base.invokelatest(param, X, Val(p), R)
+    catch err
+        throw(ImplementError("$R states $p = $stated for $X, whose equation for $p cannot be computed at $R ($(sprint(showerror, err))): an equation always holds"))
+    end
+    isequal(v, stated) && return true
+    throw(ImplementError("$R states $p = $stated for $X, but $X defines $p = $v at $R: an equation always holds; state the same value or leave $p out"))
 end
 
 """
@@ -1189,7 +1218,7 @@ function _implement_oneline(mod::Module, traits::Vector{Any}, Tex, Rdecl; pexs =
                            $TW._remaining_ops($xex, $Tex))))     # a call, not a generator (compiled per declaration)
             # the one-line form declares that the type conforms: it must have the declared fields
             fmap === nothing && push!(out, :($TW._check_own_fields($xex, $Tex)))
-            _has_conformance_method(X, T) || append!(out, _conformance_methods(xex, Tex))
+            _declared_for(X, T) || append!(out, _conformance_methods(xex, Tex))
         end
         push!(out, :($TW._bump!()))
         push!(out, :nothing)
@@ -1368,7 +1397,7 @@ function _implement_projection(mod::Module, head, rest; field::Int = 0, fmap = n
         push!(out, :($TW._check_projection(@__MODULE__, $X, $Tex)))
     end
     for X in traits
-        _has_conformance_method(_tryeval(mod, X), _tryeval(mod, Tex)) || append!(out, _conformance_methods(X, Tex))
+        _declared_for(_tryeval(mod, X), _tryeval(mod, Tex)) || append!(out, _conformance_methods(X, Tex))
     end
     push!(out, :($TW._bump!()))
     push!(out, :nothing)

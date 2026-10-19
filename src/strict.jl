@@ -128,9 +128,34 @@ function _strict_violation(m::Method)
     # applies to, an abstract type included) is no pirate, wherever it wins: by Lemma O only
     # pirates need the walk, and they are few (a package image's methods are nearly all owned)
     owned_method(m) && return nothing
+    return _winning_fact(m, s -> !_stakeholder(definer, s))
+end
+
+"""
+A package extension's method that would win at a fact of valid trait-world code whose signature
+holds no type of the extension's triggers: `(sig, caller)`, or `nothing`. The extension acts for
+its parent there, a stakeholder's change: followed, with a warning (`_extension_warn`).
+"""
+function _extension_win(m::Method)
+    r = Base.moduleroot(m.module)
+    _extension_parent(r) === nothing && return nothing
+    trig = _extension_triggers(r)
+    trig === nothing && return nothing
+    no_trigger(s) = !any(o -> o isa Module && String(nameof(o)) in trig, sig_owners(s))
+    return _winning_fact(m, no_trigger)
+end
+function _extension_warn(m::Method, v)
+    @warn "The package extension $(Base.moduleroot(m.module)) defines $(m.sig), which wins at $(v[1]), " *
+          "a fact of trait code ($(_short(v[2]))) with none of the extension's triggers in it: " *
+          "followed as its parent's change; that trait code compiles again" maxlog = 20
+    return nothing
+end
+
+"The first fact `(sig, caller)` of valid trait-world code at which `m` would win and `accept(sig)` holds, or `nothing`."
+function _winning_fact(m::Method, accept)
     world = Base.get_world_counter()
     check(s, caller) = caller isa Core.CodeInstance && caller.max_world == typemax(UInt) && _trait_world_code(caller) &&
-                       _fact_sig(s) && _would_win_split(m, s, world) && !_stakeholder(definer, s)
+                       _fact_sig(s) && _would_win_split(m, s, world) && accept(s)
     # 1. calls that dispatch to an existing method's specializations, where m would win
     ms = Base._methods_by_ftype(m.sig, nothing, -1, world, false, Ref{UInt}(typemin(UInt)), Ref{UInt}(typemax(UInt)), Ptr{Int32}(C_NULL))
     if ms isa Vector
@@ -233,6 +258,8 @@ function _strict_on_definition(m::Method, after::Bool)
     if !after
         v = _strict_violation(m)
         v === nothing || throw(PirateError(m, owner(m.module), v[1], v[2], false))
+        w = _extension_win(m)
+        w === nothing || _extension_warn(m, w)
         _strict_log_start!()
     else
         _strict_after!(m)
@@ -256,7 +283,11 @@ function _strict_image_refusals(ms::Vector{Any})
         own = _strict_owned(m)
         t1 = time_ns()
         _STRICT_STATS[3] += (t1 - t0) / 1e9
-        own && continue
+        if own
+            w = _extension_win(m)          # an extension's method is owned (it counts as its parent)
+            w === nothing || _extension_warn(m, w)
+            continue
+        end
         _STRICT_STATS[2] += 1
         v = _strict_violation(m)
         _STRICT_STATS[4] += (time_ns() - t1) / 1e9

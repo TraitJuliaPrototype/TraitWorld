@@ -2,7 +2,7 @@
 # The facts mode is Julia's (julia-1.13, Compiler/src/facts.jl; writeup/design.md §6): a trait
 # module is compiled by facts under the cache owner `:facts` (`@compiler_options facts=true`,
 # which `@trait_module` declares), entries are boundaries compiled in their caller's mode
-# (`Expr(:meta, :facts, 0)`), and code compiled by facts dispatches at run time to code compiled
+# (`Expr(:meta, :facts_boundary)`), and code compiled by facts dispatches at run time to code compiled
 # by facts. What TraitWorld keeps here: the definition checks' interpreter, the world decisions are
 # made in, and the facts rule's signature test (the compiler's, one source of truth).
 # ---------------------------------------------------------------------------
@@ -28,7 +28,7 @@ end
 
 A slow path of the machinery (a definition's checks, finding a builder or a family member, the
 first call's checks, the definition hooks), compiled by facts whoever calls it (`Expr(:meta,
-:facts, 1)`, Julia's per-method mode): the code a session compiles for it rests on facts only, so
+:facts_always)`, Julia's per-method mode): the code a session compiles for it rests on facts only, so
 loading packages does not invalidate it, and strict mode protects it as it protects trait code.
 TraitWorld's other code stays plain: the entries' helpers are inlined into plain callers.
 """
@@ -40,7 +40,7 @@ macro machinery(ex)
     (def isa Expr && def.head in (:function, :(=))) || error("@machinery: expected a method definition")
     body = def.args[2]
     body isa Expr && body.head === :block || (body = def.args[2] = Expr(:block, body))
-    pushfirst!(body.args, Expr(:meta, :facts, 1))
+    pushfirst!(body.args, Expr(:meta, :facts_always))
     return esc(ex)
 end
 

@@ -636,7 +636,7 @@ function _rewrite_fdef(mod::Module, ex)
         isempty(kept) || (esig = Expr(:where, esig, kept...))
         # an ordinary method, inlined into a typed caller (keys-plan §6): there it runs at plain speed.
         # It is the boundary (rule 2): compiled in its caller's mode, while the worker it calls is
-        # compiled by facts (`Expr(:meta, :facts, 0)`, read by Julia's compiler)
+        # compiled by facts (`Expr(:meta, :facts_boundary)`, read by Julia's compiler)
         if tabled
             # where a trait argument's type is not known here: its builder from the position's table,
             # then one dynamic call to the entry's method specialized on the builders (one per key)
@@ -706,7 +706,7 @@ function _rewrite_fdef(mod::Module, ex)
                              Expr(:function, csig, Expr(:block, cstmts...))))
             push!(rest, :(isdefined(@__MODULE__, :__tw_untyped__) && push!(__tw_untyped__, ($fname, $nargs, $tag(), $(Tuple(tpos))))))
         end
-        pushfirst!(stmts, Expr(:meta, :facts, 0))
+        pushfirst!(stmts, Expr(:meta, :facts_boundary))
         push!(rest, Expr(:macrocall, GlobalRef(Base, Symbol("@inline")), LineNumberNode(0, :none),
                          Expr(:function, esig, Expr(:block, stmts...))))
         if entries !== nothing

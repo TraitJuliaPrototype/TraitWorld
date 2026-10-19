@@ -179,7 +179,7 @@ function _ahead_entry!(mod::Module, @nospecialize(T), @nospecialize(f), pos::Int
         name = Expr(:., parentmodule(f), QuoteNode(nameof(f)))
         def = Expr(:macrocall, GlobalRef(Base, Symbol("@inline")), LineNumberNode(0, :none),
                    Expr(:function, Expr(:call, name, [:($(as[i])::$(argt[i])) for i in 1:nargs]...),
-                        Expr(:block, Expr(:meta, :facts, 0), :(return invoke($f, $(Tuple{ps[2:end]...}), $(as...))))))
+                        Expr(:block, Expr(:meta, :facts_boundary), :(return invoke($f, $(Tuple{ps[2:end]...}), $(as...))))))
         for dm in (T isa DataType ? parentmodule(T) : mod, mod)
             try
                 Base.invokelatest(isdefined, dm, :__tw_ahead_entries__) || Core.eval(dm, :(const __tw_ahead_entries__ = true))

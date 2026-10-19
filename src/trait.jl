@@ -308,10 +308,10 @@ macro trait(header, block = nothing)
         if d.ret === Rsym
             rhs = :($TW._dyn_like(dyn, $call))
         else
-            # Julia's call-site split (`Compiler.dynamic_call`, part D), called with the operation's own
+            # Julia's call-site split (`Compiler.split_call`, part D), called with the operation's own
             # arguments: a fixed arity, so a recursion through dynamic values (a scene graph, a tree),
             # where Julia does not inline the cycle's members, passes no varargs tuple (boxed per call)
-            rhs = :($TW.CC.dynamic_call($TW._family_of($X__), $retx, $(d.fexpr), $TW.opened(dyn), $(syms...))::$retx)
+            rhs = :($TW.CC.split_call($TW._family_of($X__), $retx, $(d.fexpr), $TW.opened(dyn), $(syms...))::$retx)
         end
         # inferred again at every call site (`@constprop :aggressive`): each caller splits the call over
         # the candidates known when it is compiled

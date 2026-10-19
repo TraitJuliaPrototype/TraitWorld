@@ -78,3 +78,26 @@ end)
     checked = Set(m.name for m in TraitWorld._DEF_CHECKED if parentmodule(m) === Main.ParamLib)
     @test :fixedsum in checked && !(:total in checked)
 end
+
+# An equation always holds: a stated parameter is checked against the trait's equation, never replaces it
+@testset "a stated parameter agrees with the trait's equation" begin
+    e = try toplevel(quote
+        struct SVa; data::Vector{Float64}; end
+        Base.eltype(::Type{SVa}) = Float64
+        ParamLib.nel(s::SVa) = length(s.data)
+        ParamLib.getel(s::SVa, i::Int) = s.data[i]
+        @implement StateVector{Float64} SVa              # the equation gives Float64 too: accepted
+    end); nothing catch err; err end
+    @test e === nothing
+    @test TraitWorld.param(Main.ParamLib.StateVector, Val(:T), Main.SVa) === Float64
+    e = try toplevel(quote
+        struct SVb; data::Vector{Float64}; end
+        Base.eltype(::Type{SVb}) = Float64
+        ParamLib.nel(s::SVb) = length(s.data)
+        ParamLib.getel(s::SVb, i::Int) = s.data[i]
+        @implement StateVector{Float32} SVb              # the equation gives Float64: refused
+    end); nothing catch err; err end
+    while e isa LoadError; e = e.error; end
+    @test e isa ImplementError && occursin("an equation always holds", sprint(showerror, e))
+    @test TraitWorld.param(Main.ParamLib.StateVector, Val(:T), Main.SVb) === Float64   # the equation stands
+end

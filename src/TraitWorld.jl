@@ -114,6 +114,7 @@ struct _PCOwn; n::Int; end
 end
 struct _PCOne; data::Vector{Float64}; end
 @implement _PC.PCT _PCOne by data
+struct _PCTwo; data::Vector{Float64}; end         # not implemented: the workload expands declarations for it
 
 # a trait of declared fields only, and an implementation by forwarding: the paths of `@implement`
 # that `_PC` does not reach (generic keys, ownership, field slots), so their code is in this image
@@ -136,11 +137,11 @@ PrecompileTools.@compile_workload begin
     _PC.pcsum(v); _PC.pcsum(_PCProj(v)); _PC.pcsum(_PCDyn(v)); _PC.pcsum(_PCOwn(2)); _PC.pcsum(_PCOne(v))
     # untyped calls: the table of declared implementations (untyped.jl), its slow path included
     for x in Any[v, _PCProj(v), _PCOwn(2), _PCOne(v)]; _PC.pcsum(x); end
-    macroexpand(TraitWorld, :(@implement _PC.PCT _PCOne by data))
+    macroexpand(TraitWorld, :(@implement _PC.PCT _PCTwo by data))
     _PC.pcboth(v, _PCProj(v))
     _PC.pcmap(abs, v); _PC.pcmap(x -> 2x, _PCProj(v))
     macroexpand(_PC, :(@implement PCT{Vector{Int}} begin pn(r) = 1; pv(r, i) = 1.0 end))
-    macroexpand(TraitWorld, :(@implement _PC.PCT _PCProj by v))
+    macroexpand(TraitWorld, :(@implement _PC.PCT _PCTwo project(t) = t.data))
     macroexpand(_PC, :(@trait Q{R} begin q(r::R)::Int; q2(r::R, i::Int)::Float64 = 1.0 end))
     macroexpand(_PC, :(f(t::PCT, i::Int) = pv(t, i)))
     conformance_problems(_PC.PCT, Vector{Float64}, (:pn, :pv))
