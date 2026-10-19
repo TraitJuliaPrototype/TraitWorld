@@ -161,29 +161,24 @@ end
 # --- the entry's method through a pointer (one trait position): no second dispatch -------------
 # The step-1 pointer: a `cfunction` of the calling convention `:caller_world`, which runs in the
 # caller's world through a world-checked cache. One per entry pattern and builder type: the
-# callable `_UCall{G, B}` holds the builder and calls the pattern's method `G` on it statically.
+# `_UCall{G, B}` holds the builder; the wrapper `_UWrap` calls the pattern's method `G` with it, statically.
 
-"The call of an entry pattern's method `G` with the builder held: `G()(b, args...)`."
+"An entry pattern's method `G` and the builder it is called with (by `_UWrap`, behind the pointer)."
 struct _UCall{G,B}
     b::Any          # held by reference: an isbits callable behind a `Ref` argument is copied into a box per call
 end
-# fixed arities: a vararg method behind the pointer would build its argument tuple
-@inline (c::_UCall{G,B})() where {G,B} = G.instance(getfield(c, :b)::B)
-@inline (c::_UCall{G,B})(@nospecialize(a)) where {G,B} = G.instance(getfield(c, :b)::B, a)
-@inline (c::_UCall{G,B})(@nospecialize(a), @nospecialize(b)) where {G,B} = G.instance(getfield(c, :b)::B, a, b)
-@inline (c::_UCall{G,B})(a, b, d) where {G,B} = G.instance(getfield(c, :b)::B, a, b, d)
-@inline (c::_UCall{G,B})(a, b, d, e) where {G,B} = G.instance(getfield(c, :b)::B, a, b, d, e)
-@inline (c::_UCall{G,B})(a, b, d, e, f) where {G,B} = G.instance(getfield(c, :b)::B, a, b, d, e, f)
-# the arguments come boxed and are not specialized on: `Any` is then a compileable signature, so
-# the pointer's thunk calls code compiled once (a slot that specializes is never compiled at `Any`,
-# and the thunk would fall back to a dynamic dispatch, compiling `_UWrap` per type behind it)
+# The pointer's wrapper: fixed arities (a vararg method would build its argument tuple); the
+# arguments come boxed and are not specialized on, so `Any` is a compileable signature and the
+# pointer's thunk calls code compiled once (else it falls back to a dynamic dispatch, compiling the
+# wrapper per type behind it). Every argument goes on in a concrete holder, and the pattern's method
+# is called directly: a call with an `Any` argument would be a run-time site where the wrapper is
+# compiled by facts.
 struct _UWrap end
-(::_UWrap)(o) = o()
-(::_UWrap)(o, @nospecialize(a)) = o(a)
-(::_UWrap)(o, @nospecialize(a), @nospecialize(b)) = o(a, b)
-(::_UWrap)(o, @nospecialize(a), @nospecialize(b), @nospecialize(c)) = o(a, b, c)
-(::_UWrap)(o, @nospecialize(a), @nospecialize(b), @nospecialize(c), @nospecialize(d)) = o(a, b, c, d)
-(::_UWrap)(o, @nospecialize(a), @nospecialize(b), @nospecialize(c), @nospecialize(d), @nospecialize(e)) = o(a, b, c, d, e)
+for n in 0:5
+    as = [Symbol(:a, k) for k in 1:n]
+    hs = [Expr(:new, :XAny, a) for a in as]
+    @eval (::_UWrap)(o::_UCall{G,B}, $([:(@nospecialize($a)) for a in as]...)) where {G,B} = G.instance(getfield(o, :b)::B, $(hs...))
+end
 "A pointer to `o(args...)` for the callable type `F` and `N` arguments, all passed boxed, in the caller's world."
 @generated function _ufptr(::Type{F}, ::Val{N}) where {F,N}
     return Expr(:cfunction, Ptr{Cvoid}, QuoteNode(_UWrap()), Any,

@@ -541,7 +541,8 @@ function _rewrite_fdef(mod::Module, ex)
         # an entry of trait positions and ordinary arguments only reaches the table of declared
         # implementations when its caller does not know the types (untyped.jl): compiled once
         tabled = nva == 0 && isempty(kws) && all(x -> x.kind in (:trait, :plain, :untyped), args) &&
-                 any(x -> x.kind === :trait, args)
+                 any(x -> x.kind === :trait, args) &&
+                 !any(w -> any(x -> x.kind === :plain && x.ann !== nothing && _uses(x.ann, _wherevar(w)), args), wheres)   # a holder binds no type variable
         eargs = Any[]
         stmts = Any[]
         callnames = Any[]
@@ -665,27 +666,32 @@ function _rewrite_fdef(mod::Module, ex)
                                end
                            end)
             else
+                holders = [Expr(:new, :($TraitWorld.XAny), x.name) for x in args]
                 tblock = :(if !($known) && $plainv
                                $(look...)
-                               $found && return Base.inferencebarrier($tag())($(bsyms...), $(callnames...))   # a dispatch, on the builders' types
+                               $found && return Base.inferencebarrier($tag())($(bsyms...), $(holders...))   # a dispatch, on the builders' types
                            end)
             end
             pushfirst!(stmts, tblock)
-            # the specialized method: the views from the builders' data, the worker's call as the entry's
+            # the specialized method: the views from the builders' data, the worker's call as the entry's.
+            # Every argument comes in a concrete holder (`XAny`): passed as `Any`, a call to this method
+            # from code compiled by facts would be a run-time site (the pointer's wrapper is such code)
             cargs = Any[]
             cstmts = Any[]
             cnames = Any[]
             for (i, x) in enumerate(args)
+                xa = gensym(:xa)
+                push!(cargs, :($xa::$TraitWorld.XAny))
                 if x.kind === :trait
-                    xa = gensym(:xa); v = gensym(Symbol(x.name, :_view))
-                    push!(cargs, :(@nospecialize($(x.name))))
-                    push!(cstmts, :($xa = $(Expr(:new, :($TraitWorld.XAny), x.name))))
+                    v = gensym(Symbol(x.name, :_view))
+                    push!(cstmts, :($(x.name) = getfield($xa, :x)))
                     j = findfirst(==(i), tpos)
                     push!(cstmts, :($v = $TraitWorld._build_any($(bsyms[j]), $xa)))
                     push!(cstmts, :($TraitWorld.keeps($TraitWorld.KeepOf{typeof($fname)}()) && ($v = $TraitWorld._with_object_any($v, $xa))))
                     push!(cnames, v)
                 else
-                    push!(cargs, eargs[i])
+                    # an ordinary argument: as declared (an untyped one stays `Any`, as in plain Julia)
+                    push!(cstmts, x.ann === nothing ? :($(x.name) = getfield($xa, :x)) : :($(x.name) = getfield($xa, :x)::$(x.ann)))
                     push!(cnames, x.name)
                 end
             end
@@ -695,7 +701,6 @@ function _rewrite_fdef(mod::Module, ex)
             push!(cstmts, :(return $cres isa $TraitWorld.LikeResult ?
                             Base.inferencebarrier($TraitWorld._like_out)($cres, $us, $(Expr(:tuple, [cnames[i] for i in tpos]...))) : $cres))
             csig = Expr(:call, :(::$tag), [:($(bsyms[j])::$TraitWorld.Builder) for j in eachindex(tpos)]..., cargs...)
-            isempty(kept) || (csig = Expr(:where, csig, kept...))
             push!(rest, :(struct $tag end))
             push!(rest, Expr(:macrocall, GlobalRef(Base, Symbol("@noinline")), LineNumberNode(0, :none),
                              Expr(:function, csig, Expr(:block, cstmts...))))
