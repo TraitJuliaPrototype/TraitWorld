@@ -131,6 +131,38 @@ _opfn(@nospecialize(X), op::Symbol) = _in_decision_world(op_function, X, Val(op)
 _hasdefault(@nospecialize(X), op::Symbol) = _in_decision_world(has_default, X, Val(op))::Bool
 _mutating(@nospecialize(X), op::Symbol) = _in_decision_world(is_mutating, X, Val(op))::Bool
 
+"""
+The operations of `X` that `T` must implement (no default), one line each: the declared signature at
+`T` and what `T` has of it, for a conformance error that says what is required.
+"""
+function _required_ops_text(@nospecialize(X), @nospecialize(T))
+    lines = String[]
+    for op in _ops(X)
+        _hasdefault(X, op) && continue
+        f = try Base.invokelatest(op_function, X, Val(op)) catch; nothing end
+        Ns = _arities(X, op)
+        isempty(Ns) && (Ns = _arities(_family(X), op))
+        for N in Ns
+            A = R = nothing
+            for Y in (X, _family(X))
+                A === nothing || break
+                A = try Base.invokelatest(op_args, Y, Val(op), T, Val(N)) catch; nothing end
+                R = try Base.invokelatest(op_ret, Y, Val(op), T, Val(N)) catch; nothing end
+            end
+            sig = "$op(::$T" * (A isa DataType ? join(", ::$a" for a in A.parameters) : ", …") * ")" * (R === nothing ? "" : "::$R")
+            have = String[]
+            if f isa Function
+                for m in methods(f)
+                    ps = Base.unwrap_unionall(m.sig).parameters
+                    length(ps) >= 2 && typeintersect(T, ps[2]) !== Union{} && ps[2] !== Any && push!(have, string(m))
+                end
+            end
+            push!(lines, "`$sig`: " * (isempty(have) ? "no method" : "not at the declared argument types; existing: " * join(first(have, 3), "; ")))
+        end
+    end
+    return join(lines, "\n  ")
+end
+
 "Arities declared for an operation (the number of arguments after `r`)."
 function _arities(@nospecialize(X), op::Symbol)
     out = Int[]
@@ -1151,13 +1183,15 @@ function _implement_oneline(mod::Module, traits::Vector{Any}, Tex, Rdecl; pexs =
                                      "or write a projection that materializes it"))
             end
         else
-        throw(ImplementError("no field of $Tex conforms to $(join(string.(Xs), ", ")) and $Tex has no methods for its operations " *
-                             "(fields: $(join(("$n::$(fieldtype(T, i))" for (i, n) in enumerate(fns)), ", "))); " *
-                             "name a field `data`, write `project(t) = …`, or implement the operations"))
+        throw(ImplementError("$Tex does not conform to $(join(string.(Xs), ", ")): it does not implement " *
+                             "the operations, and no field of it conforms " *
+                             "(fields: $(join(("$n::$(fieldtype(T, i))" for (i, n) in enumerate(fns)), ", "))). Required:\n  " *
+                             join((_required_ops_text(X, T) for X in Xs), "\n  ") *
+                             "\nImplement these for $Tex, or forward to a field whose type conforms (`@implement $(traits[1]) $Tex by field`)"))
         end
     else
         throw(ImplementError("several fields of $Tex conform to $(join(string.(Xs), ", ")): $(join(string.(fns[conforming]), ", ")). " *
-                             "Name one `data`, or write `@implement $(traits[1]) $Tex project(t) = t.field`"))
+                             "Name one `data`, or choose one: `@implement $(traits[1]) $Tex by field`"))
     end
     FT = fieldtype(T, fld)
     fsym = QuoteNode(fns[fld])

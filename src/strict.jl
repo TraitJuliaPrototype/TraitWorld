@@ -39,13 +39,48 @@ struct PirateError <: Exception
     caller::Any
     later::Bool                  # found only after the definition (the method was deleted again)
 end
+"A type or signature for a message: printed by bound and key, cut at `n` characters."
+function _short(@nospecialize(x), n::Int = 140)
+    t = sprint(show, x; context = :compact => true)
+    return length(t) <= n ? t : first(t, n - 1) * "…"
+end
+"The trait-world code a protected CodeInstance serves: the first caller, walking up its backedges, that is a method of a trait module."
+function _trait_root(@nospecialize(ci))
+    ci isa Core.CodeInstance || return nothing
+    seen = Base.IdSet{Any}()
+    todo = Any[ci.def isa Core.MethodInstance ? ci.def : ci.def.def]
+    while !isempty(todo) && length(seen) < 500
+        mi = pop!(todo)
+        mi isa Core.MethodInstance || continue
+        mi in seen && continue
+        push!(seen, mi)
+        m = mi.def
+        m isa Method && is_trait_world(m.module) && return mi
+        isdefined(mi, :backedges) || continue
+        for x in mi.backedges
+            x isa Core.CodeInstance && push!(todo, x.def isa Core.MethodInstance ? x.def : x.def.def)
+            x isa Core.MethodInstance && push!(todo, x)
+        end
+    end
+    return nothing
+end
+"Whether `m`'s function belongs to the core of a known split-core pair (where a delegate is the answer)."
+function _split_core_function(m::Method)
+    ft = Base.unwrap_unionall(m.sig).parameters[1]
+    mod = ft isa DataType ? Base.moduleroot(ft.name.module) : nothing
+    mod === nothing && return false
+    return any(c -> c == string(nameof(mod)), first.(KNOWN_DELEGATES))
+end
 function Base.showerror(io::IO, e::PirateError)
-    print(io, "PirateError: strict mode refuses ", e.method, ", defined by ", e.definer,
-          ": it would change what trait-world code computes at ", e.sig, " (", e.caller, "), and ",
-          e.definer, " owns neither the function nor a type in that signature. ",
-          "Turn strict mode off (`TraitWorld.strict!(false)`) to follow it as plain Julia does",
-          ", or declare the package a delegate of the owner it implements (`TraitWorld.delegate!(Core => Impl)`).")
-    e.later && print(io, " (found after the definition by the safety net; the method was deleted again)")
+    m = e.method
+    root = _trait_root(e.caller)
+    print(io, "PirateError: strict mode refuses `", m.name, "` for ", _short(Base.unwrap_unionall(m.sig).parameters[2:end]),
+          ", defined by ", e.definer, ".\n  It would change what trait-world code computes",
+          root === nothing ? "" : " in `$(root.def isa Method ? root.def.name : root)` ($(_short(root.specTypes)))",
+          ", through the call at ", _short(e.sig), ".\n  ", e.definer, " owns neither the function nor a type in that signature (a pirate).\n  ",
+          _split_core_function(m) ? "If the package implements the core that owns the function, declare it a delegate (`TraitWorld.delegate!(Core => Impl)`); otherwise t" : "T",
+          "urn strict mode off (`TraitWorld.strict!(false)`) to follow the method as plain Julia does, or define it where a type it is for is owned.")
+    e.later && print(io, "\n  (found after the definition by the safety net; the method was deleted again)")
 end
 
 "Code the mode protects: compiled by facts (Julia's owner `:facts`), or a trait module's."
@@ -210,6 +245,7 @@ const _STRICT_STATS = zeros(4)
 "Strict mode's part of the image hook: the image's methods that would break trait-world facts."
 function _strict_image_refusals(ms::Vector{Any})
     STRICT[] || return Any[]
+    _image_known_delegates!(ms)        # before the check: the image's own package may be a known delegate
     out = Any[]
     _OWNER_MEMO[] = IdDict{Module,Any}()          # owners cannot change while one image's methods are scanned
     try
@@ -248,6 +284,31 @@ function _strict_init!()
     empty!(DELEGATES)
     return nothing
 end
+"""
+Register the known split-core delegates among the packages of an image's methods, while it activates:
+the package is not among the loaded modules yet, so `_strict_known_delegates!` (after the load)
+would come too late for its own methods.
+"""
+function _image_known_delegates!(ms::Vector{Any})
+    seen = Base.IdSet{Module}()
+    for m in ms
+        m isa Method || continue
+        r = Base.moduleroot(m.module)
+        r in seen && continue
+        push!(seen, r)
+        nm = string(nameof(r))
+        for (c, i) in KNOWN_DELEGATES
+            i == nm || continue
+            cm = _loaded_root(c)
+            cm === nothing && continue
+            ds = get!(() -> Any[], DELEGATES, owner(cm))
+            o = owner(r)
+            o in ds || push!(ds, o)
+        end
+    end
+    return nothing
+end
+
 "Register the known split-core delegates whose packages are loaded (after each top-level load)."
 function _strict_known_delegates!()
     for (c, i) in KNOWN_DELEGATES
