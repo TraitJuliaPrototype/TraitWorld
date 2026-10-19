@@ -47,25 +47,14 @@ end
 "The cache owner of the definition checks' inference: none of their results reaches the code that runs."
 struct _CheckOwner end
 """
-The interpreter of the definition checks (return types, kept trait objects): plain inference
-rules, in its own cache, so that checking a worker before any value exists compiles nothing the
-program runs.
+The interpreter of the definition checks (return types, kept trait objects): Julia's native
+interpreter with plain inference rules, in a cache of its own, so that checking a worker before any
+value exists compiles nothing the program runs. Being Julia's own interpreter, its compiler code
+runs in the compiler's world (Base reflection does so for a `NativeInterpreter`): loading packages
+never invalidates it. A custom interpreter's compiler code was compiled again after big loads
+(3.7 s for a forwarding conformance after CSV, DataFrames and CairoMakie).
 """
-struct _CheckInterp <: CC.AbstractInterpreter
-    world::UInt
-    inf_params::CC.InferenceParams
-    opt_params::CC.OptimizationParams
-    inf_cache::Vector{CC.InferenceResult}
-    codegen::IdDict{Core.CodeInstance,Core.CodeInfo}
-end
-_check_interp(world::UInt = Base.get_world_counter()) =
-    _CheckInterp(world, CC.InferenceParams(), CC.OptimizationParams(), CC.InferenceResult[], IdDict{Core.CodeInstance,Core.CodeInfo}())
-CC.InferenceParams(i::_CheckInterp) = i.inf_params
-CC.OptimizationParams(i::_CheckInterp) = i.opt_params
-CC.get_inference_world(i::_CheckInterp) = i.world
-CC.get_inference_cache(i::_CheckInterp) = i.inf_cache
-CC.cache_owner(::_CheckInterp) = _CheckOwner()
-CC.codegen_cache(i::_CheckInterp) = i.codegen
+_check_interp(world::UInt = Base.get_world_counter()) = CC.NativeInterpreter(world; facts = false, owner = _CheckOwner())
 "Keywords for reflection by the definition checks: their own interpreter."
 _check_kw(world::UInt = Base.get_world_counter()) = (; world, interp = _check_interp(world))
 
