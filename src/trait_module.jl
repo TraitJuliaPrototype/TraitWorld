@@ -769,6 +769,21 @@ function _check_entries_intact(mod::Module, fname)
     return nothing
 end
 
+"Define `crossing(EntryPos{typeof(f), pos, nargs})` in `mod` as a constant, as `needed` (redefined only when it changes)."
+function _fix_crossing!(mod::Module, @nospecialize(f), pos::Int, nargs::Int)
+    P = EntryPos{typeof(f),pos,nargs}
+    C = crossing_at(f, pos, nargs)
+    m = Base._which(Tuple{typeof(crossing),P}; raise = false)
+    if m !== nothing && Base.unwrap_unionall(m.method.sig).parameters[2] === P
+        Base.invokelatest(crossing, P()) === C && return nothing
+        m.method.module === mod || ccall(:jl_generating_output, Cint, ()) == 0 || return nothing
+    elseif C === nothing
+        return nothing                                  # the fallback computes `nothing` too, once per call site's compilation
+    end
+    Core.eval(mod, :($TraitWorld.crossing(::$P) = $C))
+    return nothing
+end
+
 """
 A trait position of an entry, noted where its worker is defined. Once the module is
 complete, `needed` is fixed for it; a definition after that (at the prompt) updates it.
@@ -787,6 +802,7 @@ there, as a constant, so that an entry folds for a known type. Redefined only wh
 """
 function _fix_needed!(mod::Module, @nospecialize(f), pos::Int, nargs::Int)
     P = EntryPos{typeof(f),pos,nargs}
+    _fix_crossing!(mod, f, pos, nargs)
     L = Tuple{traits_at(f, pos, nargs)...}
     m = Base._which(Tuple{typeof(needed),P}; raise = false)
     if m !== nothing && Base.unwrap_unionall(m.method.sig).parameters[2] === P

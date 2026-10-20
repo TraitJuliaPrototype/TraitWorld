@@ -2,8 +2,8 @@
     BaseTraits
 
 Traits for Base's concepts, loaded with TraitWorld: the trait world's standard library, as
-Rust's `core::iter` and Swift's `Sequence` ship with their languages (traits reference §18,
-"BaseTraits"). `using TraitWorld` brings its names into scope.
+Rust's `core::iter` and Swift's `Sequence` ship with their languages (traits reference
+§10.1–10.4). `using TraitWorld` brings its names into scope.
 
 Version 0 has what heterogeneous collections need:
 - `HasLength`, `Iterable{T}`, `Indexable{T}`, `MutableIndexable{T}`, `Resizable`, `Keyed{K, V}`:
@@ -11,9 +11,10 @@ Version 0 has what heterogeneous collections need:
   types. Base's own containers conform through Base's existing methods, declared here, for
   families through Base's abstract types: `AbstractArray`, `AbstractVector`, `Vector`,
   `AbstractDict`.
-- `DynamicItems{X}(v)` and `DynamicValues{X}(d)`: a user's container seen with items
-  `Dynamic{X}`, wrapping each element when it is read. No copy: reads and writes go to the
-  user's container.
+- A function bounded by `Iterable{Shape}` and the like takes a user's container whose items are
+  not `Dynamic{Shape}` directly: its entry translates it into a view with items `Dynamic{Shape}`,
+  `DynamicItems{X}(v)` or `DynamicValues{X}(d)`, which wraps each element when it is read. No copy:
+  reads and writes go to the user's container. The views can also be made explicitly.
 - `retain!(f, xs)`: keeps the items for which `f` is `true`, in place.
 
 The owner of these traits is TraitWorld. As their owner it declares Base's types' conformance
@@ -162,6 +163,37 @@ Base.show(io::IO, d::DynamicValues{X}) where {X} = print(io, "DynamicValues{", X
 @implement HasLength D where {D <: DynamicValues}
 @implement Iterable D where {D <: DynamicValues}
 @implement Keyed D where {D <: DynamicValues}
+
+# --- the crossing: a user's container taken by a bound with dynamic items ------------------------------
+
+# A function bounded by `Iterable{Shape}` (`Indexable`, `MutableIndexable`, `Keyed{K, Shape}`,
+# `Iterable{Pair{K, Shape}}`) takes a user's vector or dictionary whose items are not `Dynamic{Shape}`:
+# its entry translates it by its bound into the view (traits reference §10.3). Items of a type that
+# cannot hold a conforming value refuse the container at the entry; otherwise a non-conforming item
+# fails when it is read.
+TraitWorld.crossed(::Type{Y}, v::AbstractVector) where {Y} = _may_hold(Y, eltype(v)) ? DynamicItems{Y}(v) : nothing
+TraitWorld.crossed(::Type{Y}, d::AbstractDict) where {Y} = _may_hold(Y, valtype(d)) ? DynamicValues{Y}(d) : nothing
+"""
+Whether items declared `E` can be values that conform to `Y`: `Any`, an abstract type, a `Union`
+with such a member, or a concrete type that conforms. Not a `Dynamic` of another trait. Kept per
+pair and session once true (a flag), so a call pays a load.
+"""
+@inline _may_hold(::Type{Y}, ::Type{E}) where {Y,E} = E === Any || _hold_flag(Y, E)[] === TraitWorld._SESSION[] ||
+    Base.inferencebarrier(_may_hold_slow)(Y, E, _hold_flag(Y, E))::Bool
+@generated _hold_flag(::Type{Y}, ::Type{E}) where {Y,E} = :($(Ref{UInt}(0)))
+function _may_hold_slow(@nospecialize(Y), @nospecialize(E), flag::Base.RefValue{UInt})
+    ok = false
+    for u in Base.uniontypes(E)
+        if u isa DataType && u <: Dynamic
+            continue                                      # a Dynamic of another trait does not cross
+        elseif !isconcretetype(u) || conforms(u, Y)
+            ok = true
+            break
+        end
+    end
+    ok && (flag[] = TraitWorld._SESSION[])
+    return ok
+end
 
 # --- algorithms ---------------------------------------------------------------------------------
 

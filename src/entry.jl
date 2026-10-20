@@ -194,10 +194,148 @@ specialized: for a known type it folds to the views' construction.
     t isa Dynamic && return opened(t)                  # a dynamic value is opened: its worker is selected by dispatch
     t isa TObj && return Base.inferencebarrier(_rule3_error)(typeof(p), t)
     v = _assemble(needed(p), t)
+    # a container crosses with its items seen as `Dynamic{Y}` where the bounds ask for that and it
+    # does not meet them as it is (traits reference §10.3): folded for a known type
+    c = crossing(p)
+    if c isa Crossing && _crosses(c, p, v, t)
+        w = crossed(_citem(c), t)
+        if w !== nothing
+            vw = _assemble(needed(p), w)
+            keeps(KeepOf{F}()) && vw isa TObj && return _with_object(vw, w)
+            return vw
+        end
+    end
     # a function that may keep its trait objects gets the whole user's object, also of an immutable
     # type (boxed); every other function holds its parts (`keeps` folds to a constant)
     keeps(KeepOf{F}()) && !ismutable(t) && v isa TObj && return _with_object(v, t)
     return v
+end
+
+"""
+    Crossing{Y, R}
+
+What the bounds at an entry position ask of a container's items: the trait `Y` of the dynamic
+items they fix (`Iterable{Shape}`, `Keyed{String, Shape}`: `Shape`), and `R`, per bounded method at
+the position, the tuple of the parameter tags (`PTag`) its bound requires. A value meeting one of
+them as it is never crosses.
+"""
+struct Crossing{Y,R} end
+_citem(::Crossing{Y}) where {Y} = Y
+_creqs(::Crossing{Y,R}) where {Y,R} = R
+Base.Experimental.@max_methods 1 function crossing end
+"""
+    crossing(EntryPos{F, pos, nargs}())
+
+The `Crossing` of a position, or `nothing` where no bound there fixes a parameter to a dynamic
+value, or the bounds fix it to dynamic values of different traits. A method per crossing position
+is defined with `needed` (`_fix_crossing!`), when the trait module is complete; until then, and
+everywhere else, this fallback: no crossing.
+"""
+crossing
+crossing(::EntryPos) = nothing
+"""
+    crossed(Y, x)
+
+`x` seen with its items as `Dynamic{Y}`, the value a container crosses as (BaseTraits:
+`DynamicItems`, `DynamicValues`), or `nothing` when `x` does not cross.
+"""
+crossed(::Type, @nospecialize(x)) = nothing
+"""
+Whether a value `t` crosses at a position of crossing `c`: it does not meet the bounds as it is
+(its trait object `v`), and its view does. Decided once per crossing and type, and kept in a flag
+(0 not known, 1 as it is, 2 crosses): a family member's trait object (every Base container) has a
+type known only when it is built, so the test would otherwise run at each call.
+"""
+@inline function _crosses(c::Crossing, p::EntryPos, v, t::T) where {T}
+    flag = _cross_flag(typeof(c), T)
+    d = flag[]
+    d == 0x00 && (d = _cross_decide(c, p, v, t, flag)::UInt8)   # machinery: a guard for verify_main
+    return d == 0x02
+end
+@generated _cross_flag(::Type{C}, ::Type{T}) where {C,T} = :($(Ref{UInt8}(0x00)))
+@machinery @noinline function _cross_decide(c::Crossing, p::EntryPos, v, t::T, flag::Base.RefValue{UInt8}) where {T}
+    R = _creqs(c)
+    d = 0x01
+    if !_satisfies_rt(typeof(v)::Type, R)
+        w = crossed(_citem(c), t)
+        w === nothing && return 0x01                      # not kept: `crossed` may say yes once more types conform
+        _satisfies_rt(typeof(_assemble(needed(p), w))::Type, R) && (d = 0x02)
+    end
+    flag[] = d
+    return d
+end
+"""
+`_satisfies` for a type known only at run time, written with builtins only, so that it has no
+run-time site (`verify_main`): a union's members are reached through its fields.
+"""
+function _satisfies_rt(TO::Type, R::Type)
+    (TO isa DataType && TO <: TObj) || return false
+    have = getfield(TO, :parameters)[1]
+    for req in getfield(R::DataType, :parameters)
+        ok = true
+        for tag in getfield(req::DataType, :parameters)
+            ok = ok && _union_has(have, tag)
+        end
+        ok && return true
+    end
+    return false
+end
+function _union_has(@nospecialize(u), @nospecialize(x))
+    while u isa Union
+        (getfield(u, :a) === x || (getfield(u, :a) isa Union && _union_has(getfield(u, :a), x))) && return true
+        u = getfield(u, :b)
+    end
+    return u === x
+end
+"Whether trait object type `TO` meets one of the tag sets in `R` (a tuple of tuples of `PTag`s)."
+@generated function _satisfies(::Type{TO}, ::Type{R}) where {TO,R}
+    (TO isa DataType && TO <: TObj) || return false
+    have = Base.uniontypes(TO.parameters[1])
+    for req in (R::DataType).parameters
+        all(t -> any(h -> h === t, have), (req::DataType).parameters) && return true
+    end
+    return false
+end
+"The trait `Y` of a `Dynamic{Y}` inside a fixed parameter value (`Dynamic{Shape}`, `Pair{String, Dynamic{Shape}}`), or `nothing`."
+function _dyn_inside(@nospecialize(v))
+    v isa DataType || return nothing
+    v.name === Base.typename(Dynamic) && return v.parameters[1]
+    for q in v.parameters
+        y = _dyn_inside(q)
+        y === nothing || return y
+    end
+    return nothing
+end
+"The `Crossing` of position `pos` of `f`'s bounded methods with `nargs` arguments, or `nothing`."
+function crossing_at(@nospecialize(f), pos::Int, nargs::Int)
+    reqs = Any[]
+    ys = Any[]
+    for m in methods(f)
+        sig = Base.unwrap_unionall(m.sig)
+        sig isa DataType || continue
+        ps = sig.parameters::Core.SimpleVector
+        n = length(ps) - 1
+        isva = n >= 1 && Base.isvarargtype(ps[end])
+        fixed = isva ? n - 1 : n
+        if nargs == -1
+            isva || continue
+        else
+            (isva ? nargs >= fixed : nargs == fixed) || continue
+        end
+        p = pos <= fixed ? ps[pos + 1] : isva ? Base.unwrapva(ps[end]) : continue
+        q = Base.unwrap_unionall(p)
+        (q isa DataType && q.name === Base.typename(TObj)) || continue
+        T = q.parameters[1]
+        lb = T isa TypeVar ? T.lb : T
+        tags = Any[x for x in Base.uniontypes(lb) if _isptag(x)]
+        push!(reqs, Tuple{tags...})
+        for tg in tags
+            y = _dyn_inside((tg::DataType).parameters[3])
+            y === nothing || _hasid(ys, y) || push!(ys, y)
+        end
+    end
+    length(ys) == 1 || return nothing
+    return Crossing{ys[1],Tuple{reqs...}}()
 end
 
 "A function type as a value to dispatch on, for `keeps`."

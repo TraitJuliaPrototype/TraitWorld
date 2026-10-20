@@ -83,6 +83,8 @@ implementation found by the slow path (generic, family) for this world only.
             lo, hi = max(lo, w), min(hi, w)
         end
     end
+    # a position where containers may cross (`crossing`) takes the entry's own path, which crosses them
+    _in_world(w, crossing, p) === nothing || (tabled = false)
     tabled || b === NOTRAIT || (b = _UNTABLED)
     (lo <= w <= hi) || (lo = hi = w)
     @lock _LOCK begin

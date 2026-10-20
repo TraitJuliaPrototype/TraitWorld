@@ -129,3 +129,77 @@ end
     @test Base.Compiler.dynamic_candidates(F) == Any[O.O1, O.O2, O.O3, O.O4]
     @test sum(O.tag(Dynamic{O.Tag}(x)) for x in (O.O1(), O.O5(), O.O6())) == 12   # beyond the split: the fallback
 end
+
+# The crossing (traits reference §10.3): a function bounded with dynamic items takes the user's
+# container itself; its entry translates it by its bound into the view.
+toplevel(quote
+    @trait_module module BTCross
+    using TraitWorld
+    using ..BTCells: Cell, isnum, weight
+    export countc, keepc!, valsc, lookc, which_one, firstc, sumw
+    countc(xs::Iterable{Cell}) = (n = 0; for c in xs; n += isnum(c); end; n)
+    keepc!(xs::(MutableIndexable{Cell}, Resizable)) = retain!(isnum, xs)
+    valsc(d::Iterable{Pair{String, Cell}}) = (n = 0; for (k, c) in d; n += isnum(c); end; n)
+    lookc(d::Keyed{String, Cell}, k::String) = weight(d[k])
+    which_one(xs::Iterable{Int}) = :ints                  # a container meeting a bound as it is never crosses
+    which_one(xs::Iterable{Cell}) = :cells
+    function firstc(xs::Indexable{Cell})                   # reads item 1, then item 2
+        a = weight(xs[1])
+        b = weight(xs[2])
+        return a + b
+    end
+    sumw(xs::Iterable{Cell}) = (s = 0; for c in xs; s += weight(c); end; s)
+    end
+    abstract type BTAbs end
+    struct BTA <: BTAbs; n::Int; end
+    BTCells.isnum(::BTA) = true
+    BTCells.weight(a::BTA) = a.n
+    @implement BTCells.Cell BTA
+    cross_untyped(f, x) = f(x)                              # a caller that does not know the type
+end)
+
+@testset "BaseTraits: the crossing, a user's container taken directly" begin
+    C = Main.BTCross
+    v = Any[1, "ab", 3, "c", 5]
+    @test C.countc(v) == 3                                   # Vector{Any}
+    @test C.countc(Main.BTAbs[Main.BTA(1), Main.BTA(2)]) == 2    # an abstract element type
+    @test C.countc([1, 2, 3]) == 3                           # a concrete element type that conforms
+    @test C.countc(Union{Int,String}[1, "x"]) == 1           # a Union
+    @test C.countc(Dynamic{Main.BTCells.Cell}[Dynamic{Main.BTCells.Cell}(1)]) == 1   # already dynamic items: as it is
+    @test_throws TraitBoundError C.countc([1.5, 2.5])        # items that cannot conform: refused at the entry
+    # writes reach the user's vector, which keeps the user's objects
+    C.keepc!(v)
+    @test v == Any[1, 3, 5]
+    b = Main.BTBox(4)
+    u = Any[b, "x"]
+    C.keepc!(u)
+    @test length(u) == 1 && u[1] === b
+    # a Dict{String,Any}: its pairs, and keyed access
+    dd = Dict{String, Any}("a" => 1, "b" => "xyz")
+    @test C.valsc(dd) == 1 && C.lookc(dd, "b") == 3
+    # bounds met as they are win
+    @test C.which_one([1, 2]) === :ints && C.which_one(Any[1, "a"]) === :cells
+    # an item that does not conform fails when it is read, after the items before it
+    e = try C.firstc(Any[1, 2.5]); nothing catch err; err end
+    @test e isa TraitBoundError && occursin("Float64", sprint(showerror, e))
+    @test C.firstc(Any[1, "ab", 2.5]) == 3                   # never reads item 3
+    # an untyped caller crosses too
+    @test Base.invokelatest(Main.cross_untyped, C.sumw, Any[2, "abc"]) == 5
+    @test Base.invokelatest(Main.cross_untyped, C.sumw, Any[2, "abc"]) == 5
+    # the explicit view still works, and costs the same path
+    @test C.countc(DynamicItems{Main.BTCells.Cell}(Any[1, "a"])) == 1
+end
+
+toplevel(quote
+    cross_main(args::Vector{String}) = (v = Any[1, "a", 2]; println(Core.stdout, BTCross.countc(v), " ", BTCross.lookc(Dict{String,Any}("k" => 3), "k")); 0)
+    explicit_main(args::Vector{String}) = (v = Any[1, "a", 2]; println(Core.stdout, BTCross.countc(DynamicItems{BTCells.Cell}(v))); 0)
+end)
+# verify_main does not list a family member's workers yet (Base's containers and the views are
+# family members; lowering L-11, L-14): the crossing adds no hole of its own beyond those
+@testset "BaseTraits: verify_main and the crossing" begin
+    @test Base.invokelatest(getglobal(Main, :cross_main), String[]) == 0
+    holes(m) = filter(h -> !h.errorpath, Base.invokelatest(verify_main, getglobal(Main, m), (Vector{String},)).holes)
+    cr = holes(:cross_main)
+    @test !any(h -> h.callee in (TraitWorld.crossed, TraitWorld._satisfies, TraitWorld._cross_decide), cr)
+    @test Set(h.kind for h in cr) ⊆ Set(h.kind for h in holes(:explicit_main))
+end
