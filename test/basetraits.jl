@@ -186,6 +186,12 @@ end)
     # an untyped caller crosses too
     @test Base.invokelatest(Main.cross_untyped, C.sumw, Any[2, "abc"]) == 5
     @test Base.invokelatest(Main.cross_untyped, C.sumw, Any[2, "abc"]) == 5
+    # once decided, a crossing container is not assembled as it is (under `all`, a Dict{String,Any}
+    # fails the Iterable family's check, and its slow path cost 2.7 ms per call)
+    big = Dict{String, Any}(string(i) => i for i in 1:1000)
+    allocs(f, x) = @allocated f(x)
+    allocs(C.valsc, big); allocs(C.valsc, big)
+    @test allocs(C.valsc, big) < 1000
     # the explicit view still works, and costs the same path
     @test C.countc(DynamicItems{Main.BTCells.Cell}(Any[1, "a"])) == 1
 end

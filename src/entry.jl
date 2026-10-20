@@ -193,17 +193,18 @@ specialized: for a known type it folds to the views' construction.
 @inline function enter(p::EntryPos{F}, t) where {F}
     t isa Dynamic && return opened(t)                  # a dynamic value is opened: its worker is selected by dispatch
     t isa TObj && return Base.inferencebarrier(_rule3_error)(typeof(p), t)
-    v = _assemble(needed(p), t)
     # a container crosses with its items seen as `Dynamic{Y}` where the bounds ask for that and it
-    # does not meet them as it is (traits reference §10.3): folded for a known type
+    # does not meet them as it is (traits reference §10.3); once decided for its type, it is not
+    # assembled as it is first (a container whose family check failed would take the slow path)
     c = crossing(p)
+    if c isa Crossing && _cross_known(c, t) == 0x02
+        vw = _cross_into(c, p, t)
+        vw === nothing || return vw
+    end
+    v = _assemble(needed(p), t)
     if c isa Crossing && _crosses(c, p, v, t)
-        w = crossed(_citem(c), t)
-        if w !== nothing
-            vw = _assemble(needed(p), w)
-            keeps(KeepOf{F}()) && vw isa TObj && return _with_object(vw, w)
-            return vw
-        end
+        vw = _cross_into(c, p, t)
+        vw === nothing || return vw
     end
     # a function that may keep its trait objects gets the whole user's object, also of an immutable
     # type (boxed); every other function holds its parts (`keeps` folds to a constant)
@@ -240,6 +241,16 @@ crossing(::EntryPos) = nothing
 `DynamicItems`, `DynamicValues`), or `nothing` when `x` does not cross.
 """
 crossed(::Type, @nospecialize(x)) = nothing
+"The container `t` as it crosses: the trait object of its view, or `nothing` if it has none."
+@inline function _cross_into(c::Crossing, p::EntryPos{F}, t) where {F}
+    w = crossed(_citem(c), t)
+    w === nothing && return nothing
+    vw = _assemble(needed(p), w)
+    keeps(KeepOf{F}()) && vw isa TObj && return _with_object(vw, w)
+    return vw
+end
+"The decision kept for crossing `c` and `t`'s type: 0 not known, 1 as it is, 2 crosses."
+@inline _cross_known(c::Crossing, t::T) where {T} = _cross_flag(typeof(c), T)[]
 """
 Whether a value `t` crosses at a position of crossing `c`: it does not meet the bounds as it is
 (its trait object `v`), and its view does. Decided once per crossing and type, and kept in a flag
