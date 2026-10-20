@@ -932,7 +932,36 @@ function _keys_implement(mod::Module, args)
 end
 
 macro implement(args...)
-    return _latest(_implement_expand, __module__, __source__.file, Any[args...])
+    ex = _latest(_implement_expand, __module__, __source__.file, Any[args...])
+    return _latest(_at_declaration, ex, __source__)
+end
+"""
+The records an `@implement` defines (its `implementation` and `projection` methods) carry the
+declaration's file and line, so that the dynamic values' candidates are registered in declaration
+order (`_note_conformances!`), whatever order a package image's methods come back in.
+"""
+@machinery function _at_declaration(@nospecialize(ex), src::LineNumberNode)
+    ex isa Expr || return ex
+    if ex.head === :escape || ex.head === :block || ex.head === :toplevel
+        return Expr(ex.head, Any[_at_declaration(a, src) for a in ex.args]...)
+    elseif ex.head === :(=) && _is_record_def(ex.args[1])
+        # a short definition quoted in this file has this file's line in its body: the method's line
+        body = ex.args[2]
+        body isa Expr && body.head === :block && (body = Expr(:block, Any[a isa LineNumberNode ? src : a for a in body.args]...))
+        return Expr(:block, src, Expr(:(=), ex.args[1], body))
+    end
+    return ex
+end
+function _is_record_def(@nospecialize(lhs))
+    while lhs isa Expr && lhs.head === :where
+        lhs = lhs.args[1]
+    end
+    (lhs isa Expr && lhs.head === :call) || return false
+    f = lhs.args[1]
+    (f isa Expr && f.head === :. && length(f.args) == 2) || return false
+    n = f.args[2]
+    n isa QuoteNode && (n = n.value)
+    return n === :implementation || n === :projection
 end
 
 # The expansion of `@implement`, and the checks its expansion runs, are compiled under the facts

@@ -38,8 +38,9 @@ end)
         @test Base.invokelatest(getglobal(Main, :vdyn_main), String[]) == 0
         r = Base.invokelatest(verify_main, getglobal(Main, :vdyn_main), (Vector{String},))
         @test !any(h -> !h.errorpath, r.holes)
-        # two sites on dynamic values (an operation, and an entry called with the opened value), two types each
-        @test count(p -> p.first === :dynamic, r.targets) == 4
+        # three sites on dynamic values, two types each: an operation; the opening of the value, which
+        # holds the user's object (a trait object is made from it); the entry called with the opened value
+        @test count(p -> p.first === :dynamic, r.targets) == 6
     finally
     end
 end

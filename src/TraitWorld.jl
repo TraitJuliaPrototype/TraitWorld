@@ -76,6 +76,10 @@ if ccall(:jl_generating_output, Cint, ()) == 1 && get(ENV, "JULIA_TW_KEEP_COMPIL
 end
 include("strict.jl")
 include("frames.jl")
+# the trait world's standard library: traits for Base's concepts (traits reference §18)
+include("BaseTraits.jl")
+using .BaseTraits
+export BaseTraits, HasLength, Iterable, Indexable, MutableIndexable, Resizable, Keyed, DynamicItems, DynamicValues, retain!
 
 # ---------------------------------------------------------------------------
 # Precompile the machinery itself: macro expansion, registration, checks,

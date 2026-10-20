@@ -332,22 +332,67 @@ code that computes it (whose native code a load may invalidate).
 """
     Dynamic{X}
 
-A value of any type conforming to trait `X`, kept beyond a call and reached
-through `X`'s operations (note "Dynamic values"). It keeps a trait object of
-`X`: made from one inside a trait module, `Dynamic{X}(t)`, or by storing one
-where a `Dynamic{X}` is declared, so its type decides it. An operation of `X`
-on it dispatches on the trait object inside and asserts the declared result
-type; passed to a function bounded by `X`, it is opened, and the worker for
-its representation runs.
+A value of any type conforming to trait `X`, kept beyond a call and reached through `X`'s
+operations (note "Dynamic values"). It holds the user's object (traits reference §10; lowering
+§13): the view of `X` for the object's type is made when an operation runs, folded where the type
+is one of the call site's candidates. Made from a value, `Dynamic{X}(x)`, or from a trait object
+inside a trait module, `Dynamic{X}(t)`, or by storing one where a `Dynamic{X}` is declared.
+A trait object whose views hold only parts of an immutable value (no whole object to hold), and a
+new receiver value of a constructor operation, are held as trait objects instead.
+An operation of `X` on it is split over the candidate types at the call site and asserts the
+declared result type; passed to a function bounded by `X`, it is opened, and the worker for its
+key runs.
 """
 struct Dynamic{X}
-    t::Any
+    t::Any            # the user's object, or (see above) a trait object
     function Dynamic{X}(t::TObj{T}) where {X,T}
         _carries_static(T, X) || Base.inferencebarrier(_dyn_refuse)(X, T)
         tn = _narrow(X, t)               # the trait object is the user's object: a kept value follows its fields
-        CC.register_dynamic_candidate!(_family_of(X), typeof(tn))   # a candidate of the call-site splits (part (D))
-        return new{X}(tn)
+        o = _tobj_object(tn)
+        if o === nothing                 # only parts of an immutable value: keep the trait object
+            _register_candidate!(_family_of(X), typeof(tn))   # a candidate of the call-site splits (part (D))
+            return new{X}(tn)
+        end
+        _NoteCandidate{_family_of(X)}()(o)
+        return new{X}(o)
     end
+    @inline function Dynamic{X}(x) where {X}
+        v = _assemble(_family_list(X), x)
+        v === NOTRAIT && _dyn_nonconforming(X, x)
+        _register_candidate!(_family_of(X), typeof(x))
+        return new{X}(x)
+    end
+    "A dynamic value holding the trait object `t` itself (a new receiver value of a constructor operation)."
+    function Dynamic{X}(::Val{:hold}, t::TObj) where {X}
+        _register_candidate!(_family_of(X), typeof(t))
+        return new{X}(t)
+    end
+    "A dynamic value holding `x`, checked to conform by the caller (`@dynamic_of`): reached by `invoke`, so `x` keeps its box."
+    Dynamic{X}(::Val{:checked}, @nospecialize(x)) where {X} = new{X}(x)
+end
+@noinline _dyn_nonconforming(@nospecialize(X), @nospecialize(x)) = throw(TraitBoundError("a $(typeof(x)) does not conform to $X"))
+"The user's object a trait object reads (that of its first view), or `nothing` when its views hold only parts."
+@inline _tobj_object(t::TObj) = _viewobject(getfield(t, :views)[1])
+"Registers the type of a dynamic value's object as a candidate of `F`'s call-site splits (called with an object of unknown type)."
+struct _NoteCandidate{F} end
+@inline (::_NoteCandidate{F})(o) where {F} = _register_candidate!(F, typeof(o))
+"""
+The flag of a candidate type `C` of family `F`: the session in which it was registered. One flag per
+pair, a constant of the code that makes such a `Dynamic`, so that making one registers the type once
+per session instead of searching the registry each time (157 ns with 64 candidates, E-125). A flag
+saved in a package image holds another session's stamp, so the type is registered again, once.
+"""
+@generated _cand_flag(::Type{F}, ::Type{C}) where {F,C} = :($(Ref{UInt}(0)))
+@inline function _register_candidate!(::Type{F}, ::Type{C}) where {F,C}
+    flag = _cand_flag(F, C)
+    flag[] === _SESSION[] && return nothing
+    Base.inferencebarrier(_register_candidate_slow!)(F, C, flag)
+    return nothing
+end
+@noinline function _register_candidate_slow!(@nospecialize(F), @nospecialize(C), flag::Base.RefValue{UInt})
+    CC.register_dynamic_candidate!(F, C)
+    flag[] = _SESSION[]
+    return nothing
 end
 """
 A dynamic value of `X` keeps only the views of `X` and its supertraits: what its operations and
@@ -381,22 +426,108 @@ Dynamic{X}(d::Dynamic{X}) where {X} = d
 Base.convert(::Type{Dynamic{X}}, t::TObj) where {X} = Dynamic{X}(t)
 @noinline _dyn_refuse(@nospecialize(X), @nospecialize(T)) =
     throw(ArgumentError("a trait object carrying $(join(string.(Base.uniontypes(_decode_traits(T))), ", ")) cannot be kept as a Dynamic{$X}"))
-"The trait object a dynamic value keeps: what a bound opens."
-@inline opened(d::Dynamic) = getfield(d, :t)
+"""
+The trait object of a dynamic value: what a bound opens, and what its operations run on. Made
+from the user's object, as `Dynamic{X}(x)` would keep it (`_dyn_tobj`), or the trait object it holds.
+"""
+@inline opened(d::Dynamic{X}) where {X} = _Open{X}()(getfield(d, :t))
+"Opening a dynamic value's object: as a value of its own type, so a call with an object of unknown type dispatches on the object alone."
+struct _Open{X} end
+@inline (::_Open{X})(t::TObj) where {X} = t
+@inline (::_Open{X})(x) where {X} = _dyn_tobj(X, x)
+"""
+An operation `f` on a dynamic value of `X`, as the function a call-site split calls with the value's
+object first (`Compiler.split_call`): `f` on the object's trait object. One method per arity up to
+six, so a recursion through dynamic values passes no varargs tuple.
+"""
+struct _DynOp{X,F}
+    f::F
+end
+@inline _dynop(::Type{X}, f::F) where {X,F} = _DynOp{X,F}(f)
+@inline (op::_DynOp{X})(t) where {X} = op.f(_Open{X}()(t))
+@inline (op::_DynOp{X})(t, a) where {X} = op.f(_Open{X}()(t), a)
+@inline (op::_DynOp{X})(t, a, b) where {X} = op.f(_Open{X}()(t), a, b)
+@inline (op::_DynOp{X})(t, a, b, c) where {X} = op.f(_Open{X}()(t), a, b, c)
+@inline (op::_DynOp{X})(t, a, b, c, e) where {X} = op.f(_Open{X}()(t), a, b, c, e)
+@inline (op::_DynOp{X})(t, a, b, c, e, g) where {X} = op.f(_Open{X}()(t), a, b, c, e, g)
+@inline (op::_DynOp{X})(t, a, b, c, e, g, h) where {X} = op.f(_Open{X}()(t), a, b, c, e, g, h)
+@inline (op::_DynOp{X})(t, args...) where {X} = op.f(_Open{X}()(t), args...)
+"""
+The user's object a dynamic value holds: what a view over the user's container stores back
+(BaseTraits' `DynamicItems`). An `ArgumentError` if the value holds only the parts its trait sees.
+"""
+@inline function _dyn_object(d::Dynamic)
+    t = getfield(d, :t)
+    t isa TObj || return t
+    return Base.inferencebarrier(_dyn_object_slow)(t)
+end
+function _dyn_object_slow(t::TObj)
+    o = _tobj_object(t)
+    o === nothing && throw(ArgumentError("this dynamic value holds the parts its trait sees, not the user's object"))
+    return o
+end
+"What a dynamic value's identity is: the user's object, or the trait object where it holds one without an object."
+@inline function _dyn_identity(d::Dynamic)
+    t = getfield(d, :t)
+    t isa TObj || return t
+    o = Base.inferencebarrier(_tobj_object)(t)
+    return o === nothing ? t : o
+end
+"""
+    DynamicOf{X}()
+
+The function `x -> Dynamic{X}(x)` as a value of its own type. Called with a value of unknown type,
+it dispatches on that value alone, through the call site's cache. A constructor call `Dynamic{X}(x)`
+passes the type `Dynamic{X}` as the function, which the per-site cache does not serve (compiler §3.2):
+100 ns against 25 at a run-time site.
+"""
+struct DynamicOf{X} end
+@inline (::DynamicOf{X})(x) where {X} = Dynamic{X}(x)
+"""
+    @dynamic_of X x
+
+`Dynamic{X}(x)` for a value `x` of unknown type, split over `X`'s candidate types at the call site
+(`Compiler.split_call`): for a candidate the conformance folds to a constant and the user's object
+is held as it is, already boxed; any other type is dispatched (`DynamicOf{X}`). Written out at the
+call, since a function taking `x` would be a run-time site of trait code. What a view over a user's
+container does at each read (BaseTraits' `DynamicItems`).
+"""
+macro dynamic_of(X, x)
+    TW = TraitWorld
+    v = gensym(:x)
+    return esc(quote
+        let $v = $x
+            $TW.CC.split_call($TW._family_of($X), Bool, $TW._ConformsTo{$X}(), $v)::Bool || $TW._dyn_nonconforming($X, $v)
+            # an invoke at the method's own signature: a fact, so the call is inlined and `x` is held in
+            # the box it came in (a call at `Any` would be a run-time site, and a call at the narrowed
+            # type would box it again)
+            invoke($TW.Dynamic{$X}, Tuple{Val{:checked}, Any}, Val(:checked), $v)::$TW.Dynamic{$X}
+        end
+    end)
+end
+"Whether `x` conforms to `X`, registering its type as a candidate (the check `@dynamic_of` splits; folded for a candidate)."
+struct _ConformsTo{X} end
+@inline function (::_ConformsTo{X})(x) where {X}
+    _assemble(_family_list(X), x) === NOTRAIT && return false
+    _register_candidate!(_family_of(X), typeof(x))
+    return true
+end
 
 "The trait family of `X`, a constant of the specialized caller (the key of the call-site splits)."
 @generated _family_of(::Type{X}) where {X} = :($(_family(X)))
 
 """
-Register the trait-object types a `Dynamic` keeps for the implementations declared since the last call
-(methods of `implementation` at a concrete type), as candidates of the call-site splits: inferred
-along the path `Dynamic{X}(x)` takes, in the checks' own cache. A type whose trait object is not
-inferred concretely is left out (its values are registered when made). Called after each
+Register the types of the implementations declared since the last call, at concrete types, as
+candidates of the call-site splits of dynamic values (`Compiler.register_dynamic_candidate!`):
+types with their own methods (`implementation` records) and types that forward (`projection`
+records). Each batch in declaration order (file, then line), so a session that loads a package
+splits over the same first candidates as the code its image compiled. Called after each
 declaration (`_bump!`) and when a package is loaded (images do not run top-level code again).
 """
 @machinery function _note_conformances!()
     try
-        for m in methods(implementation)
+        new = Any[]
+        for rec in (implementation, projection), m in methods(rec)
             (@lock _CAND_LOCK m in _CAND_SEEN) && continue
             @lock _CAND_LOCK push!(_CAND_SEEN, m)
             sig = Base.unwrap_unionall(m.sig)
@@ -405,14 +536,11 @@ declaration (`_bump!`) and when a package is loaded (images do not run top-level
             (A isa DataType && A <: Type && B isa DataType && B <: Type) || continue
             XA, T = A.parameters[1], B.parameters[1]
             (T isa DataType && isconcretetype(T)) || continue
-            F = _family(XA)
-            TO = try
-                Base.infer_return_type(_dyn_tobj, Tuple{Type{F}, T}; _check_kw_at(Tuple{T})...)
-            catch
-                Any
-            end
-            (TO isa DataType && isconcretetype(TO) && TO <: TObj) || continue
-            CC.register_dynamic_candidate!(F, TO)
+            push!(new, (string(m.file), Int(m.line), _family(XA), T))
+        end
+        sort!(new; by = x -> (x[1], x[2]))
+        for (_, _, F, T) in new
+            CC.register_dynamic_candidate!(F, T)
         end
     catch
     end
@@ -420,17 +548,17 @@ declaration (`_bump!`) and when a package is loaded (images do not run top-level
 end
 const _CAND_SEEN = Base.IdSet{Any}()
 const _CAND_LOCK = ReentrantLock()
-"The trait object `Dynamic{X}(x)` keeps, for inference of its type (the same steps)."
-function _dyn_tobj(::Type{X}, x) where {X}
-    v = _assemble(TraitList{Tuple{_family(X)}}(), x)
+"The trait object `Dynamic{X}(x)` opens to: its views of `X` and `X`'s supertraits, the whole object kept."
+@inline function _dyn_tobj(::Type{X}, x) where {X}
+    v = _assemble(_family_list(X), x)
     ismutable(x) || (v = _with_object(v, x))
     return _narrow(X, v)
 end
 
 # equal when they keep the same trait object: same representation type, same implementation, egal data
-Base.:(==)(a::Dynamic{X}, b::Dynamic{X}) where {X} = getfield(a, :t) === getfield(b, :t)
-Base.hash(d::Dynamic, h::UInt) = hash(getfield(d, :t), hash(:TraitWorldDynamic, h))
-Base.show(io::IO, d::Dynamic{X}) where {X} = print(io, "Dynamic{", X, "} at ", _represented(typeof(getfield(d, :t))))
+Base.:(==)(a::Dynamic{X}, b::Dynamic{X}) where {X} = _dyn_identity(a) === _dyn_identity(b)
+Base.hash(d::Dynamic, h::UInt) = hash(_dyn_identity(d), hash(:TraitWorldDynamic, h))
+Base.show(io::IO, d::Dynamic{X}) where {X} = print(io, "Dynamic{", X, "} at ", _represented(typeof(opened(d))))
 _represented(@nospecialize(T)) = T <: TObj ? join(unique([sprint(_show_key, v.parameters[3]) for v in T.parameters[2].parameters]), ", ") : string(T)
 @inline _dyn_assert(x, ::Type{S}) where {S} = x::S
 
@@ -551,8 +679,8 @@ field_isrep(@nospecialize(X), @nospecialize(f)) = false
 @noinline _nofield(@nospecialize(T), s::Symbol) =
     throw(ArgumentError("`t.$s`: no trait this trait object carries declares a field `$s`"))
 @noinline _readonly(@nospecialize(X), s::Symbol) = throw(ArgumentError("field `$s` of $X is `const`: read-only"))
-Base.getproperty(d::Dynamic, s::Symbol) = getproperty(getfield(d, :t), s)
-Base.setproperty!(d::Dynamic, s::Symbol, x) = setproperty!(getfield(d, :t), s, x)
+Base.getproperty(d::Dynamic, s::Symbol) = getproperty(opened(d), s)
+Base.setproperty!(d::Dynamic, s::Symbol, x) = setproperty!(opened(d), s, x)
 
 Base.Experimental.@max_methods 1 function _fieldpos end
 @doc "`_fieldpos(X, Val(f))`: the position of declared field `f` among trait `X`'s fields (methods added by @trait)." _fieldpos

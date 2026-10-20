@@ -239,8 +239,10 @@ end
 @implement Indexable{T} where {T <: Tuple}
 end
 using .Caps
+using .Caps: HasLength, Iterable, Indexable      # TraitWorld exports BaseTraits' traits of these names
 @trait_module module Gen
 using TraitWorld, ..Caps
+using ..Caps: HasLength, Iterable, Indexable      # BaseTraits (exported by TraitWorld) has traits of these names
 export GTable, gcol, gn, gfirst, gmean, gsum
 @trait GTable{R} begin
     gn(r::R)::Int
@@ -350,6 +352,7 @@ end
     toplevel(quote
         @trait_module module SubSuper
         using TraitWorld, ..Caps
+        using ..Caps: HasLength, Iterable, Indexable
         g(t::HasLength) = "length"
         g(t::Indexable) = "indexable"
         end
@@ -483,6 +486,7 @@ end
     toplevel(quote
         @trait_module module RHelp
         using TraitWorld, ..Caps
+        using ..Caps: HasLength, Iterable, Indexable
         helper2(t::Iterable, x) = sum(t) + x
         outer2(t::Iterable, b::Bool) = helper2(t, b ? 1 : 2.0)
         end
@@ -524,6 +528,7 @@ end
     toplevel(quote
         @trait_module module SupDef
         using TraitWorld, ..Caps
+        using ..Caps: HasLength, Iterable, Indexable
         @trait Indexable2{R} <: HasLength begin
             Base.getindex(r::R, i::Int)::eltype(R)
             lastel(r::R)::eltype(R) = r[length(r)]
@@ -830,3 +835,4 @@ include("strict.jl")
 include("verify_dynamic.jl")
 include("certificate.jl")
 include("redeclare.jl")
+include("basetraits.jl")

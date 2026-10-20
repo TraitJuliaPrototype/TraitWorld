@@ -360,7 +360,7 @@ of its trait, which dispatch on it.
 """
 function _note_dyn_made!(cx::_Walk, @nospecialize(D), @nospecialize(T))
     (D isa DataType && D <: Dynamic && length(D.parameters) == 1) || return nothing
-    (T isa DataType && T <: TObj && isconcretetype(T)) || return nothing
+    (T isa DataType && isconcretetype(T)) || return nothing      # the user's object, or a trait object it holds
     v = get!(() -> Any[], cx.dyn_made, _family(D.parameters[1]))
     T in v || push!(v, T)
     return nothing
@@ -393,7 +393,10 @@ end
 function _dyn_op_family_(src, sptypes, @nospecialize(a))
     a isa Core.SSAValue || return nothing
     st = src.code[a.id]
-    Meta.isexpr(st, :call) && length(st.args) >= 3 || return nothing
+    Meta.isexpr(st, :call) && length(st.args) >= 2 || return nothing
+    o = _dyn_opener(src, sptypes, st)
+    o === nothing || return _family(typeof(o).parameters[1])
+    length(st.args) >= 3 || return nothing
     g = st.args[1]
     g isa GlobalRef && (g = isdefined(g.mod, g.name) ? getglobal(g.mod, g.name) : nothing)
     g === Core.getfield || return nothing
@@ -403,6 +406,26 @@ function _dyn_op_family_(src, sptypes, @nospecialize(a))
     D = _argT(src, sptypes, st.args[2])
     (D isa DataType && D <: Dynamic && length(D.parameters) == 1) || return nothing
     return _family(D.parameters[1])
+end
+"The `_Open{X}()` a call statement applies (a dynamic value opened to a trait object), or `nothing`."
+function _dyn_opener(src, sptypes, @nospecialize(st))
+    Meta.isexpr(st, :call) || return nothing
+    fv = _constval(src, sptypes, st.args[1])
+    fv === nothing && return nothing
+    f = something(fv)
+    return f isa _Open ? f : nothing
+end
+"Whether `a` is a dynamic value opened to a trait object (else it is the value's object)."
+_dyn_opened(src, sptypes, @nospecialize(a)) = a isa Core.SSAValue && _dyn_opener(src, sptypes, src.code[a.id]) !== nothing
+"The trait object type a dynamic value of family `X` holding a `T` opens to."
+function _dyn_opened_type(@nospecialize(X), @nospecialize(T))
+    T <: TObj && return T
+    TO = try
+        Base.infer_return_type(_dyn_tobj, Tuple{Type{X}, T}; _check_kw_at(Tuple{T})...)
+    catch
+        Any
+    end
+    return TO isa DataType && isconcretetype(TO) ? TO : nothing
 end
 
 "An entry's code at narrower argument types, for analysis only."
@@ -817,7 +840,7 @@ function _scan(mi::Core.MethodInstance, cx::_Walk)
                     # an operation on a dynamic value: its targets are the implementations of X whose trait
                     # objects the program keeps in dynamic values, resolved after the walk
                     site(:trait, i, :dynamic, ats)
-                    push!(cx.dyn_ops, (sites[end], X, f, ats[2:end], mi))
+                    push!(cx.dyn_ops, (sites[end], X, f, ats[2:end], mi, _dyn_opened(src, sptypes, _ssa_root(src, st.args[2]))))
                 elseif rc === nothing
                     ts = _bounded_targets(f, ats, world)
                     ts === nothing ? hole(:dispatch, i, f, ats) : site(:bounded, i, f, ats, ts)
@@ -906,9 +929,11 @@ function verify_main(@nospecialize(f), @nospecialize(argtypes::Tuple = ()); comp
         # operations on dynamic values: one target per trait object type the program keeps in a
         # dynamic value of the operation's trait; new targets can make new dynamic values, so repeat
         grown = false
-        for (s, X, f, rest, smi) in cx.dyn_ops
+        for (s, X, f, rest, smi, isopen) in cx.dyn_ops
             haskey(level, smi) || continue
-            for T in get(cx.dyn_made, X, Any[])
+            for T0 in get(cx.dyn_made, X, Any[])
+                T = isopen ? _dyn_opened_type(X, T0) : T0
+                T === nothing && continue
                 t = _target_mi(Tuple{typeof(f), T, rest...}, world)
                 (t === nothing || t in s.targets) && continue
                 push!(s.targets, t)
@@ -921,7 +946,7 @@ function verify_main(@nospecialize(f), @nospecialize(argtypes::Tuple = ()); comp
             haskey(level, smi) || continue
             combos = Vector{Any}[Any[]]
             for (ch, X) in zip(choices, dynfam)
-                opts = X === nothing ? ch : get(cx.dyn_made, X, Any[])
+                opts = X === nothing ? ch : Any[T for T in (_dyn_opened_type(X, T0) for T0 in get(cx.dyn_made, X, Any[])) if T !== nothing]
                 combos = Vector{Any}[Any[cmb..., x] for cmb in combos for x in opts]
             end
             for cmb in combos

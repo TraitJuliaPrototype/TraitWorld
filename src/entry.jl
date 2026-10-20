@@ -627,19 +627,7 @@ dynamic_fn(::Type{A}, ::Type{S}, f) where {A,S} = f isa DynamicFn{A,S} ? f : COb
 "The trait list of `X`'s family, computed from `X` alone when the caller is specialized (a constant, so code compiled by facts needs no run-time site for it)."
 @generated _family_list(::Type{X}) where {X} = :($(TraitList{Tuple{_family(X)}}()))
 
-"""
-    Dynamic{X}(x)
-
-A dynamic value of a trait-world value `x` that conforms to `X` but is no trait object: a
-library's own type (an integrator handed to callbacks as `Dynamic{IntegratorView}`).
-"""
-function Dynamic{X}(x) where {X}
-    x isa TObj && return Dynamic{X}(x::TObj)
-    v = _assemble(_family_list(X), x)
-    v === NOTRAIT && throw(TraitBoundError("a $(typeof(x)) does not conform to $X"))
-    ismutable(x) || (v = _with_object(v, x))           # kept: the whole value, also of an immutable type
-    return Dynamic{X}(v)
-end
+# `Dynamic{X}(x)` for a value that is no trait object is an inner constructor of `Dynamic` (core.jl).
 
 # --- results like the input (note "Results like the input") -----------------------
 
@@ -742,7 +730,7 @@ function _dyn_like(d::Dynamic{X}, x) where {X}
     t = opened(d)
     v = getfield(t, :views)[1]
     isempty(getfield(v, :fs)) || throw(TraitBoundError("$X declares fields, so a new value of its receiver type alone does not conform"))
-    return Dynamic{X}(TObj(map(w -> _selfview(typeof(w).parameters[1], getfield(w, :w), x), getfield(t, :views))))
+    return Dynamic{X}(Val(:hold), TObj(map(w -> _selfview(typeof(w).parameters[1], getfield(w, :w), x), getfield(t, :views))))
 end
 
 # --- membership (note "Traits as abstract types") ----------------------------------

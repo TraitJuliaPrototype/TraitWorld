@@ -311,7 +311,9 @@ macro trait(header, block = nothing)
             # Julia's call-site split (`Compiler.split_call`, part D), called with the operation's own
             # arguments: a fixed arity, so a recursion through dynamic values (a scene graph, a tree),
             # where Julia does not inline the cycle's members, passes no varargs tuple (boxed per call)
-            rhs = :($TW.CC.split_call($TW._family_of($X__), $retx, $(d.fexpr), $TW.opened(dyn), $(syms...))::$retx)
+            # The split is over the dynamic value's object: the user's object, whose candidates are the
+            # declared implementations' types (or a trait object it holds instead, lowering §13)
+            rhs = :($TW.CC.split_call($TW._family_of($X__), $retx, $TW._dynop($X__, $(d.fexpr)), getfield(dyn, :t), $(syms...))::$retx)
         end
         # inferred again at every call site (`@constprop :aggressive`): each caller splits the call over
         # the candidates known when it is compiled

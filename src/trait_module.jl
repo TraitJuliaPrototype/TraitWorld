@@ -198,8 +198,20 @@ function _dyn_arg(mod::Module, a)
         return Expr(a.head, Any[_dyn_arg(mod, x) for x in a.args]...)
     elseif a.head === :(::) && length(a.args) == 2 && a.args[2] isa Expr && a.args[2].head === :curly && !_istraitname(mod, a.args[2].args[1])
         return Expr(:(::), a.args[1], _dyn_type(mod, a.args[2]))
+    elseif a.head === :(::) && length(a.args) == 2 && a.args[2] isa Expr && (a.args[2].head === :curly || a.args[2].head === :tuple)
+        return Expr(:(::), a.args[1], _dyn_bound(mod, a.args[2]))
     end
     return a
+end
+"""
+A bound's parameters are types, values of the trait's associated types: a trait's name there means
+its dynamic value, as in a container (`xs::Iterable{Shape}` is `Iterable{Dynamic{Shape}}`, the
+items of any conforming type). The bound's own name stays a bound.
+"""
+function _dyn_bound(mod::Module, b::Expr)
+    b.head === :tuple && return Expr(:tuple, Any[(x isa Expr && x.head === :curly) ? _dyn_bound(mod, x) : x for x in b.args]...)
+    _istraitname(mod, b.args[1]) || return b
+    return Expr(:curly, b.args[1], Any[(p isa Expr && p.head === :(<:)) ? p : _dyn_type(mod, p) for p in b.args[2:end]]...)
 end
 function _dyn_body(mod::Module, x)
     x isa Expr || return x
