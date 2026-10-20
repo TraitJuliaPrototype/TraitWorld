@@ -705,7 +705,9 @@ function _family_conformance_methods(@nospecialize(Xex), Tpat, wheres)
     reg = gensym(:family_builders)
     return Any[
         :(const $reg = Ref($TW.IdDict{Any,Any}())),
-        :($TW._family_registry(::Val{$(QuoteNode(reg))}) = $reg),      # found again after an image loads
+        # found again after an image loads; keyed by the declaring module too: gensym counters restart in
+        # each process, so a name made while one image was built can recur in another package's
+        :($TW._family_registry(::Val{$(QuoteNode(reg))}, ::Val{Symbol(join(fullname(@__MODULE__), "."))}) = $reg),
         Expr(:(=), Expr(:where, :($TW.conformance(::$TW.As{$Xex}, u::$Tpat)), wheres...),
              :($TW._conf_family($reg, $Xex, u)))]
 end

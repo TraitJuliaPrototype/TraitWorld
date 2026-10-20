@@ -298,7 +298,7 @@ function _attributed_bound(@nospecialize(v))
     return (X, v.name === Base.typename(Compiled) ? :compiled : :dynamic)
 end
 
-function _classify(mod::Module, a, unbounded::Vector{Symbol} = Symbol[])
+function _classify(mod::Module, a, unbounded::Vector{Symbol} = Symbol[]; attr_bounds::Bool = true)
     if a isa Expr && a.head === :macrocall && a.args[1] === Symbol("@specialize")
         error("@trait_module: `@specialize` is retired; write the attribute in the bound, `f::Compiled{Callable{A, S}}`, " *
               "or let the caller choose with `compiled_for(f)`")
@@ -306,12 +306,12 @@ function _classify(mod::Module, a, unbounded::Vector{Symbol} = Symbol[])
     if a isa Symbol
         return _Arg(a, nothing, :untyped, Any[], nothing, nothing, nothing)
     elseif a isa Expr && a.head === :...
-        inner = _classify(mod, a.args[1], unbounded)
+        inner = _classify(mod, a.args[1], unbounded; attr_bounds)
         inner.kind === :trait && return _Arg(inner.name, inner.ann, :vararg_trait, inner.traits, nothing, nothing, inner.M)
         inner.kind in (:callable, :callables) && error("@trait_module: a vararg of `Callable` is not supported")
         return _Arg(a, nothing, :vararg, Any[], nothing, nothing, nothing)
     elseif a isa Expr && a.head === :kw
-        x = _classify(mod, a.args[1], unbounded)
+        x = _classify(mod, a.args[1], unbounded; attr_bounds)
         return _Arg(x.name, x.ann, x.kind, x.traits, x.A, x.S, x.M, a.args[2], false)
     elseif a isa Expr && a.head === :(::)
         name, ann = length(a.args) == 2 ? (a.args[1], a.args[2]) : (gensym(:arg), a.args[1])
@@ -333,7 +333,8 @@ function _classify(mod::Module, a, unbounded::Vector{Symbol} = Symbol[])
         end
         v = _tryeval(mod, ann)
         cp = _callable_params(v)
-        ab = _attributed_bound(v)
+        # in a method of an operation's function, `Dynamic{X}` is a type (traits reference §3.1)
+        ab = attr_bounds ? _attributed_bound(v) : nothing
         if cp !== nothing
             return _Arg(name, ann, :callable, Any[], cp[1], cp[2], cp[3])
         elseif ab !== nothing
@@ -487,7 +488,8 @@ function _rewrite_fdef(mod::Module, ex)
         rawargs = rawargs[2:end]
     end
     unbounded = Symbol[w for w in wheres if w isa Symbol]
-    args = [_classify(mod, a, unbounded) for a in rawargs]
+    attr_bounds = !_is_operation_function(mod, fname)
+    args = [_classify(mod, a, unbounded; attr_bounds) for a in rawargs]
     kws = [_classify_kw(mod, p, unbounded) for p in kwparams]
     istraitdef = any(x -> x.kind in (:trait, :callable, :callables, :vararg_trait), args) ||
                  any(x -> x.kind in (:trait, :callable), kws)

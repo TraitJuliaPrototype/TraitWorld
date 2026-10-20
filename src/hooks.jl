@@ -121,9 +121,10 @@ function _family_records()
     out = Any[]
     for m in methods(_family_registry)
         sig = Base.unwrap_unionall(m.sig)
-        V = sig.parameters[2]
-        (V isa DataType && V <: Val) || continue
-        reg = Base.invokelatest(_family_registry, V())
+        length(sig.parameters) == 3 || continue
+        V, M = sig.parameters[2], sig.parameters[3]
+        (V isa DataType && V <: Val && M isa DataType && M <: Val) || continue
+        reg = Base.invokelatest(_family_registry, V(), M())
         for (U, b) in reg[]
             b isa Builder || continue
             X = _family(typeof(b).parameters[1].parameters[1].parameters[1])

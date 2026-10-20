@@ -299,6 +299,10 @@ macro trait(header, block = nothing)
         N = length(d.args)
         argtypes = [_subst_params(t, pnames, name, :K__) for (_, t) in d.args]
         first_decl && push!(out, :($TW.op_function(::Type{$name}, ::Val{$key}) = $(d.fexpr)))
+        # once per function: two traits may declare one function (`Indexable` and `Keyed`: `getindex`)
+        first_decl && push!(out, :(if !$TW.is_operation_function($(d.fexpr))
+                                       $TW.is_operation_function(::typeof($(d.fexpr))) = true
+                                   end))
         push!(out, :($TW.op_args(::Type{$name}, ::Val{$key}, ::Type{K__}, ::Val{$N}) where {K__} =
                          (let $Rsym = $TW._impl(K__); Tuple{$(argtypes...)}; end)))
         push!(out, :($TW.op_ret(::Type{$name}, ::Val{$key}, ::Type{K__}, ::Val{$N}) where {K__} =

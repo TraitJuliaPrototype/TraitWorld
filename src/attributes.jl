@@ -108,8 +108,16 @@ struct _DynField{X,f} end
 "A declared field written on a held object of unknown type."
 struct _DynFieldSet{X,f} end
 @inline (::_DynFieldSet{X,f})(o, y) where {X,f} = (setproperty!(_Open{X}()(o), f, y); nothing)   # a `@const` field raises
-"A declared field's type at the erased key: `Any` where it is declared with the receiver type (`Self`), unknown there."
-_erased_ft(::Type{T}) where {T} = T === ErasedSelf ? Any : T
+"A declared field's type at the erased key: `Any` where it is declared with the receiver type (`Self`), or names a parameter a `Dynamic{X}` leaves open, unknown there."
+_erased_ft(::Type{T}) where {T} = (T === ErasedSelf || _has_open(T)) ? Any : T
+"""
+A parameter a `Dynamic{X}` leaves open (`Dynamic{IntegratorView}` for `IntegratorView{T, P}`), at its
+erased key: a type no value has, so that a type naming it (`Vector{OpenParam}`) is known to be unknown.
+"""
+struct OpenParam end
+"Whether `T` names `OpenParam` anywhere."
+_has_open(@nospecialize(T)) = T === OpenParam || (T isa DataType && any(_has_open, T.parameters)) ||
+    (T isa Union && (_has_open(T.a) || _has_open(T.b)))
 @inline _fget(::Type{X}, ::Val{f}, w::ErasedWit, v, ::Type{K}) where {X,f,K} =
     CC.split_call(_family_of(X), _erased_ft(field_type(X, Val(f), K)), _DynField{X,f}(), getfield(v, :o))::_erased_ft(field_type(X, Val(f), K))
 
@@ -261,3 +269,15 @@ function _warn_hidden_attributes(mod::Module)
     end
     return nothing
 end
+
+Base.Experimental.@max_methods 1 function is_operation_function end
+"""
+    is_operation_function(f)
+
+Whether `f` is an operation's function (methods added by `@trait`). In its methods an argument
+declared `Dynamic{X}` keeps the type's meaning (traits reference §3.1): those methods implement
+operations, so they are not bounded functions.
+"""
+is_operation_function(@nospecialize(f)) = false
+"Whether the function a definition names is an operation's function."
+_is_operation_function(mod::Module, @nospecialize(fname)) = (f = _tryeval(mod, fname); f !== nothing && is_operation_function(f))

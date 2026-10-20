@@ -758,7 +758,7 @@ end
     u = Base.unwrap_unionall(X)
     (u isa DataType && u <: Trait) || return :(ErasedKey{Tuple{},Nothing})
     ps = (u::DataType).parameters
-    vals = Any[(ps[i] isa TypeVar ? Any : ps[i]) for i in 1:(length(ps)::Int)-1]
+    vals = Any[(ps[i] isa TypeVar ? :OpenParam : ps[i]) for i in 1:(length(ps)::Int)-1]
     return :(ErasedKey{Tuple{$(vals...)},Nothing})
 end
 
