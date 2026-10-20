@@ -22,10 +22,10 @@ The owner of these traits is TraitWorld. As their owner it declares Base's types
 """
 @trait_module module BaseTraits
 using ..TraitWorld
-using ..TraitWorld: _dyn_object, @dynamic_of
+using ..TraitWorld: _dyn_object, @dynamic_of, TObj
 
 export HasLength, Iterable, Indexable, MutableIndexable, Resizable, Keyed,
-       DynamicItems, DynamicValues, retain!
+       DynamicItems, DynamicValues, CompiledItems, CompiledValues, retain!
 
 # --- the traits ------------------------------------------------------------------------------
 
@@ -164,6 +164,100 @@ Base.show(io::IO, d::DynamicValues{X}) where {X} = print(io, "DynamicValues{", X
 @implement Iterable D where {D <: DynamicValues}
 @implement Keyed D where {D <: DynamicValues}
 
+# --- a user's container, its items seen as trait objects at their own keys --------------------------------
+
+"""
+    CompiledItems{X}(v)
+
+The vector `v`, its items seen through `X` as `Compiled` values: each item is read as its trait object
+at its own key (traits reference §10.3). For a concrete item type the trait object's type is known
+and the code over the items is compiled for it; for an abstract one each item's key is selected when
+it is read. `v` is read and written, never copied. An item that does not conform raises
+`TraitBoundError` when it is read.
+"""
+struct CompiledItems{X, V <: AbstractVector}
+    data::V
+end
+CompiledItems{X}(v::V) where {X, V <: AbstractVector} = CompiledItems{X, V}(v)
+"The type of an item of type `E` seen through `X` at its own key: its trait object's type where it is known."
+function _compiled_item_type(::Type{X}, ::Type{E}) where {X, E}
+    if isconcretetype(E)
+        T = Base.promote_op(_item_tobj, Type{X}, E)
+        T isa DataType && T <: TObj && isconcretetype(T) && return T
+    end
+    # not known: `Any` (a view's trait set still says its items are seen through `X`: `_encode_traits`)
+    return Any
+end
+"An item read at its own key."
+@inline _citem(::Type{X}, ::Type{E}, x) where {X, E} = x
+"The trait object of an item at its own key, or an error if it does not conform."
+@inline function _item_tobj(::Type{X}, x) where {X}
+    v = TraitWorld._assemble(TraitWorld._family_list(X), x)
+    v === TraitWorld.NOTRAIT && TraitWorld._dyn_nonconforming(X, x)
+    return v
+end
+Base.eltype(::Type{CompiledItems{X, V}}) where {X, V} = _compiled_item_type(X, eltype(V))
+Base.parent(d::CompiledItems) = d.data
+Base.length(d::CompiledItems) = length(d.data)
+Base.size(d::CompiledItems) = size(d.data)
+# an item of unknown type: `_item_tobj` is a run-time site, the item's key selected when it is read
+Base.@propagate_inbounds Base.getindex(d::CompiledItems{X, V}, i::Int) where {X, V} = _citem(X, eltype(V), _item_tobj(X, d.data[i]))
+Base.@propagate_inbounds function Base.setindex!(d::CompiledItems, x::TObj, i::Int)
+    d.data[i] = _object_of(x)
+    return d
+end
+"The user's object a trait object reads, to store back into the user's container."
+function _object_of(x::TObj)
+    o = TraitWorld._tobj_object(x)
+    o === nothing && throw(ArgumentError("this trait object holds the parts its trait sees, not the user's object, so it cannot be stored"))
+    return o
+end
+@inline function Base.iterate(d::CompiledItems{X, V}, i::Int = 1) where {X, V}
+    i > length(d.data) && return nothing
+    return (_citem(X, eltype(V), _item_tobj(X, @inbounds d.data[i])), i + 1)
+end
+Base.resize!(d::CompiledItems, n::Int) = (resize!(d.data, n); d)
+Base.show(io::IO, d::CompiledItems{X}) where {X} = print(io, "CompiledItems{", X, "} of a ", typeof(d.data))
+
+@implement HasLength D where {D <: CompiledItems}
+@implement Iterable D where {D <: CompiledItems}
+@implement Indexable D where {D <: CompiledItems}
+@implement MutableIndexable D where {D <: CompiledItems}
+@implement Resizable D where {D <: CompiledItems{<:Any, <:Vector}}
+
+"""
+    CompiledValues{X}(d)
+
+The dictionary `d`, its values seen through `X` as `Compiled` values, as `CompiledItems` sees a vector's
+items: `Keyed{K, …}` and `Iterable{Pair{K, …}}`. `d` is not copied.
+"""
+struct CompiledValues{X, D <: AbstractDict}
+    data::D
+end
+CompiledValues{X}(d::D) where {X, D <: AbstractDict} = CompiledValues{X, D}(d)
+Base.keytype(::Type{CompiledValues{X, D}}) where {X, D} = keytype(D)
+Base.valtype(::Type{CompiledValues{X, D}}) where {X, D} = _compiled_item_type(X, valtype(D))
+Base.eltype(::Type{CompiledValues{X, D}}) where {X, D} = Pair{keytype(D), _compiled_item_type(X, valtype(D))}
+Base.parent(d::CompiledValues) = d.data
+Base.length(d::CompiledValues) = length(d.data)
+Base.getindex(d::CompiledValues{X, D}, k) where {X, D} = _citem(X, valtype(D), _item_tobj(X, d.data[k]))
+Base.haskey(d::CompiledValues, k) = haskey(d.data, k)
+@inline function Base.iterate(d::CompiledValues{X, D}) where {X, D}
+    kr = iterate(keys(d.data)); vr = iterate(values(d.data))
+    (kr === nothing || vr === nothing) && return nothing
+    return (getfield(kr, 1) => _citem(X, valtype(D), _item_tobj(X, getfield(vr, 1))), (getfield(kr, 2), getfield(vr, 2)))
+end
+@inline function Base.iterate(d::CompiledValues{X, D}, s) where {X, D}
+    kr = iterate(keys(d.data), getfield(s, 1)); vr = iterate(values(d.data), getfield(s, 2))
+    (kr === nothing || vr === nothing) && return nothing
+    return (getfield(kr, 1) => _citem(X, valtype(D), _item_tobj(X, getfield(vr, 1))), (getfield(kr, 2), getfield(vr, 2)))
+end
+Base.show(io::IO, d::CompiledValues{X}) where {X} = print(io, "CompiledValues{", X, "} of a ", typeof(d.data))
+
+@implement HasLength D where {D <: CompiledValues}
+@implement Iterable D where {D <: CompiledValues}
+@implement Keyed D where {D <: CompiledValues}
+
 # --- the crossing: a user's container taken by a bound with dynamic items ------------------------------
 
 # A function bounded by `Iterable{Shape}` (`Indexable`, `MutableIndexable`, `Keyed{K, Shape}`,
@@ -171,8 +265,23 @@ Base.show(io::IO, d::DynamicValues{X}) where {X} = print(io, "DynamicValues{", X
 # its entry translates it by its bound into the view (traits reference §10.3). Items of a type that
 # cannot hold a conforming value refuse the container at the entry; otherwise a non-conforming item
 # fails when it is read.
-TraitWorld.crossed(::Type{Y}, v::AbstractVector) where {Y} = _may_hold(Y, eltype(v)) ? DynamicItems{Y}(v) : nothing
-TraitWorld.crossed(::Type{Y}, d::AbstractDict) where {Y} = _may_hold(Y, valtype(d)) ? DynamicValues{Y}(d) : nothing
+#
+# Which view (traits reference §10.2's table): items of a concrete type that conforms are `Compiled`
+# (`CompiledItems`), items of an abstract type `Dynamic` (`DynamicItems`), unless the bound's attribute
+# says otherwise (`Iterable{Compiled{Shape}}`, `Iterable{Dynamic{Shape}}`). Items already `Dynamic{Y}`
+# meet the bound as they are (they carry their attribute).
+TraitWorld.crossed(::Type{Y}, a::Symbol, v::AbstractVector) where {Y} = _cross_view(Y, a, eltype(v)) === :compiled ? CompiledItems{Y}(v) :
+    _cross_view(Y, a, eltype(v)) === :dynamic ? DynamicItems{Y}(v) : nothing
+TraitWorld.crossed(::Type{Y}, a::Symbol, d::AbstractDict) where {Y} = _cross_view(Y, a, valtype(d)) === :compiled ? CompiledValues{Y}(d) :
+    _cross_view(Y, a, valtype(d)) === :dynamic ? DynamicValues{Y}(d) : nothing
+"How items of type `E` cross into a bound of item trait `Y` with attribute `a`: `:compiled`, `:dynamic`, or `:no`."
+@inline function _cross_view(::Type{Y}, a::Symbol, ::Type{E}) where {Y, E}
+    E <: Dynamic && return :no                          # `Dynamic{Y}` meets as it is; another trait's does not cross
+    _may_hold(Y, E) || return :no
+    a === :dynamic && return :dynamic
+    a === :compiled && return :compiled
+    return isconcretetype(E) ? :compiled : :dynamic
+end
 """
 Whether items declared `E` can be values that conform to `Y`: `Any`, an abstract type, a `Union`
 with such a member, or a concrete type that conforms. Not a `Dynamic` of another trait. Kept per

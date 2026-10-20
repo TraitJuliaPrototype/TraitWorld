@@ -211,7 +211,44 @@ Julia cannot specialize the call and passes the trait object boxed.)
 struct PTag{F,i,v} end
 _isptag(@nospecialize(X)) = X isa DataType && X <: PTag
 
-"The trait set of trait instances: their families, and a tag per parameter they fix (the receiver type excluded)."
+"""
+    Through{Y, A}
+
+A bound's item parameter that names a trait (traits reference §10.2): items seen through `Y`, with
+the attribute `A` the bound gives them (`:default`, `:compiled`, `:dynamic`). In a worker's bound it is
+the value of the parameter's tag; a trait object whose item type is `Dynamic{Y}` or a trait object
+carrying `Y` has the tag for every `A`, so one worker takes `Compiled` and `Dynamic` items alike.
+"""
+struct Through{Y,A} end
+"The item parameter `p` with each `Dynamic{Y}`, or trait object type carrying `Y`, replaced by `Through{Y, A}`; the variants, one per such `Y`."
+function _through_variants(@nospecialize(p), @nospecialize(A))
+    u = Base.unwrap_unionall(p)
+    u isa DataType || return Any[]
+    # `Dynamic` by name: this runs in generators, in a world before `Dynamic` is defined
+    if p isa DataType && p.name.name === :Dynamic && p.name.module === TraitWorld
+        return Any[Through{p.parameters[1],A}]
+    elseif u.name === Base.typename(TObj)          # a trait object, or "any trait object carrying Y" (`TObj{T} where T >: Y`)
+        Ts = u.parameters[1]
+        out = Any[]
+        for Y in Base.uniontypes(Ts isa TypeVar ? Ts.lb : Ts)
+            (_isptag(Y) || !(Y isa Type) || !is_trait(Y)) && continue
+            push!(out, Through{_family(Y),A})
+        end
+        return out
+    end
+    p isa DataType || return Any[]
+    out = Any[]
+    ps = p.parameters
+    for (i, q) in enumerate(ps)
+        for v in _through_variants(q, A)
+            args = Any[ps...]
+            args[i] = v
+            push!(out, Core.apply_type(p.name.wrapper, args...))
+        end
+    end
+    return out
+end
+"The trait set of trait instances: their families, and a tag per parameter they fix (the receiver type excluded); for an item type seen through a trait, its `Through` tags too."
 function _encode_traits(insts)
     ms = Any[]
     for X in insts
@@ -220,14 +257,48 @@ function _encode_traits(insts)
         u = Base.unwrap_unionall(X)
         u isa DataType || continue
         ps = u.parameters
+        Yc = _compiled_view_item(ps[end])
         for i in 1:length(ps)-1
             p = ps[i]
             p isa TypeVar && continue
             t = PTag{F,i,p}
             any(m -> m === t, ms) || push!(ms, t)
+            for A in (:default, :compiled, :dynamic)
+                vs = _through_variants(p, A)
+                Yc === nothing || append!(vs, _any_variants(p, Through{Yc,A}))
+                for v in vs
+                    tv = PTag{F,i,v}
+                    any(m -> m === tv, ms) || push!(ms, tv)
+                end
+            end
         end
     end
     return Union{ms...}
+end
+"""
+The item trait of BaseTraits' `CompiledItems{Y}` or `CompiledValues{Y}` at a key, whose items of an
+abstract type are read at their own keys but declared `Any`; else `nothing`. By name: this runs in
+generators, in a world before BaseTraits is defined.
+"""
+function _compiled_view_item(@nospecialize(K))
+    K isa DataType || return nothing
+    # a `Dynamic` trait object of such a view keeps the item trait in its erased key (by name, as above)
+    K.name.name === :ErasedKey && K.name.module === TraitWorld && return K.parameters[2] === Nothing ? nothing : K.parameters[2]
+    (K.name.name === :CompiledItems || K.name.name === :CompiledValues) && nameof(K.name.module) === :BaseTraits || return nothing
+    return K.parameters[1]
+end
+"The item parameter `p` with `Any` (at the top, or as a type's parameter) replaced by `t`."
+function _any_variants(@nospecialize(p), @nospecialize(t))
+    p === Any && return Any[t]
+    p isa DataType || return Any[]
+    out = Any[]
+    for (i, q) in enumerate(p.parameters)
+        q === Any || continue
+        args = Any[p.parameters...]
+        args[i] = t
+        push!(out, Core.apply_type(p.name.wrapper, args...))
+    end
+    return out
 end
 
 """
@@ -685,10 +756,10 @@ end
 "The erased key of `Dynamic{X}`: the parameter values `X` fixes, `Any` for an open one."
 @generated function _erased_key_of(::Type{X}) where {X}
     u = Base.unwrap_unionall(X)
-    (u isa DataType && u <: Trait) || return :(ErasedKey{Tuple{}})
+    (u isa DataType && u <: Trait) || return :(ErasedKey{Tuple{},Nothing})
     ps = (u::DataType).parameters
     vals = Any[(ps[i] isa TypeVar ? Any : ps[i]) for i in 1:(length(ps)::Int)-1]
-    return :(ErasedKey{Tuple{$(vals...)}})
+    return :(ErasedKey{Tuple{$(vals...)},Nothing})
 end
 
 Base.Experimental.@max_methods 1 function _fieldpos end

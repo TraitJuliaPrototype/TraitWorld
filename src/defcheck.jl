@@ -23,9 +23,18 @@ struct ParamOpen end
 function _archparam(::Type{Archetype{X,P}}, @nospecialize(Y), p::Symbol, i::Int) where {X,P}
     if Y === X && i <= length(P.parameters)
         v = P.parameters[i]
-        v === ParamOpen || return v
+        v === ParamOpen || return _arch_through(v)
     end
     return ParamArchetype{Y,p}
+end
+"An item position at an archetype (`Through{Shape, A}`, also inside `Pair{String, …}`): items are trait objects of `Shape` at its archetype."
+function _arch_through(@nospecialize(v))
+    v isa DataType || return v
+    v.name === Base.typename(Through) && return archetype_tobj(v.parameters[1])
+    isempty(v.parameters) && return v
+    ps = Any[_arch_through(q) for q in v.parameters]
+    all(i -> ps[i] === v.parameters[i], eachindex(ps)) && return v
+    return Core.apply_type(v.name.wrapper, ps...)
 end
 
 "The witness of an archetype's view: an operation answers with a value of its declared type, nothing more."

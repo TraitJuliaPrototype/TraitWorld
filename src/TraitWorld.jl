@@ -80,7 +80,8 @@ include("frames.jl")
 # the trait world's standard library: traits for Base's concepts (traits reference §18)
 include("BaseTraits.jl")
 using .BaseTraits
-export BaseTraits, HasLength, Iterable, Indexable, MutableIndexable, Resizable, Keyed, DynamicItems, DynamicValues, retain!
+export BaseTraits, HasLength, Iterable, Indexable, MutableIndexable, Resizable, Keyed, DynamicItems, DynamicValues,
+       CompiledItems, CompiledValues, retain!
 
 # ---------------------------------------------------------------------------
 # Precompile the machinery itself: macro expansion, registration, checks,

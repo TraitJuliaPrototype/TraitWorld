@@ -59,6 +59,13 @@ toplevel(quote
         f::Dynamic{Callable{Tuple{Float64},Float64}}
     end
     kind_hidden(s::Dynamic{Shape}) = TraitWorld.is_dynamic(s) ? :dynamic : :compiled
+    # item positions (traits reference §10.2): each item's attribute when it is read
+    ikinds(ms::Iterable{Shape}) = (r = Symbol[]; for m in ms; push!(r, kind(m)); end; r)
+    ikinds_c(ms::Iterable{Compiled{Shape}}) = (r = Symbol[]; for m in ms; push!(r, kind(m)); end; r)
+    ikinds_d(ms::Iterable{Dynamic{Shape}}) = (r = Symbol[]; for m in ms; push!(r, kind(m)); end; r)
+    iarea(ms::Iterable{Shape}) = (s = 0.0; for m in ms; s += area(m); end; s)
+    kkind(d::Keyed{String, Shape}, k::String) = kind(d[k])
+    export ikinds, ikinds_c, ikinds_d, iarea, kkind
     end
 end)
 
@@ -180,6 +187,20 @@ end)
         @test b.f(1.0) == 2.0
         @test cm(b.f, 1.0) == 2.0 && cm_kind(b.f) === :dynamic
         @test_throws MethodError b.f(1)                               # the signature is checked
+    end
+    @testset "items: each item's attribute when it is read" begin
+        cs = [ACircle(1.0), ACircle(2.0)]
+        as = Any[ACircle(1.0), ASquare(2.0)]
+        @test ikinds(cs) == [:compiled, :compiled]                     # a concrete item type: Compiled
+        @test ikinds(as) == [:dynamic, :dynamic]                       # an abstract one: Dynamic
+        @test ikinds_c(as) == [:compiled, :compiled]                   # `Iterable{Compiled{Shape}}`: each opened when read
+        @test ikinds_d(cs) == [:dynamic, :dynamic]                     # `Iterable{Dynamic{Shape}}`
+        ds = Dynamic{AttrG.Shape}[Dynamic{AttrG.Shape}(c) for c in cs]
+        @test ikinds_c(ds) == [:dynamic, :dynamic]                     # stored Dynamic items carry their attribute
+        @test iarea(cs) == iarea(Any[cs...]) == iarea(ds) == 5pi        # results never change
+        @test kkind(Dict("a" => ACircle(1.0)), "a") === :compiled
+        @test kkind(Dict{String, Any}("a" => ACircle(1.0)), "a") === :dynamic
+        @test_throws TraitBoundError ikinds_c(Any[ACircle(1.0), 1])     # an item that does not conform: when read
     end
     @testset "an attribute on a function neither exported nor public warns (rule 8)" begin
         @test_logs (:warn, r"neither exported nor public") match_mode = :any toplevel(quote

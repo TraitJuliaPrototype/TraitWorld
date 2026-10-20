@@ -20,17 +20,19 @@ its key, whatever its caller knew of its type. Never the type of a value.
 abstract type Compiled{X} end
 
 """
-    ErasedKey{P}
+    ErasedKey{P, Y}
 
 The key of a `Dynamic` trait object: the trait's parameter values `P` (a tuple type, in order),
-and nothing of the user's type. A worker is compiled once per erased key.
+and nothing of the user's type. A worker is compiled once per erased key. `Y` is the item trait of
+a container view whose items of an abstract type are read at their own keys (BaseTraits'
+`CompiledItems{Y}`), else `Nothing`: its trait set keeps saying how its items are seen.
 """
-struct ErasedKey{P} end
+struct ErasedKey{P,Y} end
 "What `Self` names at an erased key: the receiver's type is not known there."
 struct ErasedSelf end
-_impl(::Type{ErasedKey{P}}) where {P} = ErasedSelf
+_impl(::Type{ErasedKey{P,Y}}) where {P,Y} = ErasedSelf
 "Parameter `i` of a trait at an erased key (`param` methods added by `@trait`)."
-_erasedparam(::Type{ErasedKey{P}}, i::Int) where {P} = fieldtype(P, i)
+_erasedparam(::Type{ErasedKey{P,Y}}, i::Int) where {P,Y} = fieldtype(P, i)
 """
 The witness of a view at the erased key: an operation, or a field read, is split over the
 candidate types at the call site, on the user's object the view holds.
@@ -43,7 +45,8 @@ function _erased_view_type(@nospecialize(Xi))
     ps = u.parameters
     n = length(ps)::Int
     vals = Any[ps[i] for i in 1:n-1]
-    E = ErasedKey{Tuple{vals...}}
+    Yc = _compiled_view_item(ps[n])
+    E = ErasedKey{Tuple{vals...},Yc === nothing ? Nothing : Yc}
     Xe = Core.apply_type(u.name.wrapper, vals..., E)
     return View{Xe,ErasedWit,E,0,Tuple{}}
 end

@@ -231,12 +231,12 @@ that crosses at the position (traits §10.3), the view it crosses as.
     # assembled as it is first (a container whose family check failed would take the slow path)
     c = crossing(p)
     if c isa Crossing && _cross_known(c, t) == 0x02
-        w = crossed(_citem(c), t)
+        w = crossed(_citem(c), _cattr(c), t)
         w === nothing || return _assemble(needed(p), w), w
     end
     v = _assemble(needed(p), t)
     if c isa Crossing && _crosses(c, p, v, t)
-        w = crossed(_citem(c), t)
+        w = crossed(_citem(c), _cattr(c), t)
         w === nothing || return _assemble(needed(p), w), w
     end
     return v, t
@@ -250,9 +250,11 @@ items they fix (`Iterable{Shape}`, `Keyed{String, Shape}`: `Shape`), and `R`, pe
 the position, the tuple of the parameter tags (`PTag`) its bound requires. A value meeting one of
 them as it is never crosses.
 """
-struct Crossing{Y,R} end
+struct Crossing{Y,R,A} end
 _citem(::Crossing{Y}) where {Y} = Y
 _creqs(::Crossing{Y,R}) where {Y,R} = R
+"The attribute the bound gives the items: `:default`, `:compiled` or `:dynamic`."
+_cattr(::Crossing{Y,R,A}) where {Y,R,A} = A
 Base.Experimental.@max_methods 1 function crossing end
 """
     crossing(EntryPos{F, pos, nargs}())
@@ -270,10 +272,10 @@ crossing(::EntryPos) = nothing
 `x` seen with its items as `Dynamic{Y}`, the value a container crosses as (BaseTraits:
 `DynamicItems`, `DynamicValues`), or `nothing` when `x` does not cross.
 """
-crossed(::Type, @nospecialize(x)) = nothing
+crossed(::Type, ::Symbol, @nospecialize(x)) = nothing
 "The container `t` as it crosses: the trait object of its view, or `nothing` if it has none."
 @inline function _cross_into(c::Crossing, p::EntryPos{F}, t) where {F}
-    w = crossed(_citem(c), t)
+    w = crossed(_citem(c), _cattr(c), t)
     w === nothing && return nothing
     vw = _assemble(needed(p), w)
     keeps(KeepOf{F}()) && vw isa TObj && return _with_object(vw, w)
@@ -298,7 +300,7 @@ end
     R = _creqs(c)
     d = 0x01
     if !_satisfies_rt(typeof(v)::Type, R)
-        w = crossed(_citem(c), t)
+        w = crossed(_citem(c), _cattr(c), t)
         w === nothing && return 0x01                      # not kept: `crossed` may say yes once more types conform
         _satisfies_rt(typeof(_assemble(needed(p), w))::Type, R) && (d = 0x02)
     end
@@ -337,10 +339,10 @@ end
     end
     return false
 end
-"The trait `Y` of a `Dynamic{Y}` inside a fixed parameter value (`Dynamic{Shape}`, `Pair{String, Dynamic{Shape}}`), or `nothing`."
+"The item position inside a fixed parameter value (`Through{Shape, A}`, `Pair{String, Through{Shape, A}}`): `(Shape, A)`, or `nothing`."
 function _dyn_inside(@nospecialize(v))
     v isa DataType || return nothing
-    v.name === Base.typename(Dynamic) && return v.parameters[1]
+    v.name === Base.typename(Through) && return (v.parameters[1], v.parameters[2])
     for q in v.parameters
         y = _dyn_inside(q)
         y === nothing || return y
@@ -375,8 +377,8 @@ function crossing_at(@nospecialize(f), pos::Int, nargs::Int)
             y === nothing || _hasid(ys, y) || push!(ys, y)
         end
     end
-    length(ys) == 1 || return nothing
-    return Crossing{ys[1],Tuple{reqs...}}()
+    length(unique(Any[y[1] for y in ys])) == 1 || return nothing
+    return Crossing{ys[1][1],Tuple{reqs...},ys[1][2]}()
 end
 
 "A function type as a value to dispatch on, for `keeps`."

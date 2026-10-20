@@ -209,14 +209,28 @@ function _dyn_arg(mod::Module, a)
     return a
 end
 """
-A bound's parameters are types, values of the trait's associated types: a trait's name there means
-its dynamic value, as in a container (`xs::Iterable{Shape}` is `Iterable{Dynamic{Shape}}`, the
-items of any conforming type). The bound's own name stays a bound.
+A bound's parameters are types, values of the trait's associated types: a trait's name there is an
+item position (traits reference §10.2), `xs::Iterable{Shape}`, items seen through `Shape`, each
+`Compiled` or `Dynamic` by its type; `Iterable{Compiled{Shape}}` and `Iterable{Dynamic{Shape}}` set
+the attribute. Lowered to `Through{Shape, A}` (`:default`, `:compiled`, `:dynamic`), also inside
+another parameter (`Pair{String, Shape}`). The bound's own name stays a bound.
 """
 function _dyn_bound(mod::Module, b::Expr)
     b.head === :tuple && return Expr(:tuple, Any[(x isa Expr && x.head === :curly) ? _dyn_bound(mod, x) : x for x in b.args]...)
     _istraitname(mod, b.args[1]) || return b
-    return Expr(:curly, b.args[1], Any[(p isa Expr && p.head === :(<:)) ? p : _dyn_type(mod, p) for p in b.args[2:end]]...)
+    return Expr(:curly, b.args[1], Any[(p isa Expr && p.head === :(<:)) ? p : _item_param(mod, p) for p in b.args[2:end]]...)
+end
+"An item parameter: a trait's name, or `Compiled{X}`/`Dynamic{X}`, as `Through{X, A}`; inside a type's parameters too."
+function _item_param(mod::Module, p)
+    if _istraitname(mod, p)
+        return :($TraitWorld.Through{$p, :default})
+    elseif p isa Expr && p.head === :curly && length(p.args) == 2 && _isattribute(mod, p.args[1]) && _istraitname(mod, p.args[2])
+        a = _tryeval(mod, p.args[1]) === Compiled ? :compiled : :dynamic
+        return :($TraitWorld.Through{$(p.args[2]), $(QuoteNode(a))})
+    elseif p isa Expr && p.head === :curly
+        return Expr(:curly, p.args[1], Any[(q isa Expr && q.head === :(<:)) ? q : _item_param(mod, q) for q in p.args[2:end]]...)
+    end
+    return p
 end
 function _dyn_body(mod::Module, x)
     x isa Expr || return x
