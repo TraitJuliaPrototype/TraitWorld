@@ -107,12 +107,6 @@ end
 
 struct _PCProj; v::Vector{Float64}; end
 @implement _PC.PCT _PCProj project(t) = t.v
-struct _PCDyn; v::Vector{Float64}; end
-@implement _PC.PCT _PCDyn dynamic begin
-    project(t) = t.v
-    pn(r) = length(r)
-    pv(r, i) = r[end - i + 1]
-end
 struct _PCOwn; n::Int; end
 @implement _PC.PCT{_PCOwn} begin
     pn(r) = r.n
@@ -140,8 +134,8 @@ PrecompileTools.@compile_workload begin
     v = [1.0, 2.0]
     _PCF.pfsum(_PCFA("a", v)); _PCF.pfsum(_PCFB(1, v))
     for x in Any[_PCFA("a", v), _PCFB(1, v)]; _PCF.pfsum(x); end
-    _PC.pcsum(v); _PC.pcsum(_PCProj(v)); _PC.pcsum(_PCDyn(v)); _PC.pcsum(_PCOwn(2)); _PC.pcsum(_PCOne(v))
-    # untyped calls: the table of declared implementations (untyped.jl), its slow path included
+    _PC.pcsum(v); _PC.pcsum(_PCProj(v)); _PC.pcsum(_PCOwn(2)); _PC.pcsum(_PCOne(v))
+    # untyped calls: `Dynamic` values, the workers at the erased key
     for x in Any[v, _PCProj(v), _PCOwn(2), _PCOne(v)]; _PC.pcsum(x); end
     macroexpand(TraitWorld, :(@implement _PC.PCT _PCTwo by data))
     _PC.pcboth(v, _PCProj(v))

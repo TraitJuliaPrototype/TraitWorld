@@ -1338,6 +1338,8 @@ function _implement_projection(mod::Module, head, rest; field::Int = 0, fmap = n
     length(rest) == 1 || error("@implement: expected `project(t) = …` or a begin … end block after the type")
     body = rest[1]
     dynamic = :dynamic in flags
+    dynamic && throw(ImplementError("`dynamic` is not part of the language (traits reference §5.9): pass the value as a " *
+                                    "`Dynamic{X}`, bound the position with `Dynamic{X}`, or declare `@dynamic` in the trait"))
     copies = :copies in flags
     defs = body isa Expr && body.head === :block ? _defs(body) : Any[body]
     pdefs = filter(d -> d isa Expr && d.args[1] isa Expr && d.args[1].args[1] === :project, defs)

@@ -54,10 +54,9 @@ struct Ramp; base::Vector{Float64}; n::Int; end
     col(r, i) = r.base .* i
 end
 struct Reversed; cols::Vector{Vector{Float64}}; end
-@implement ColTable Reversed dynamic begin
-    project(t) = t.cols
-    ncols(r) = length(r)
-    col(r, i) = r[end - i + 1]
+@implement ColTable Reversed begin                       # (was `dynamic`, removed: traits reference §5.9)
+    ncols(r) = length(r.cols)
+    col(r, i) = r.cols[end - i + 1]
 end
 
 @testset "M1: the note's example" begin
@@ -68,9 +67,17 @@ end
     @test meandiff(m, r, 1) == 0.0
     @test colmean([[1.0, 3.0]], 1) == 2.0                    # a representation is its own projection
     @test colrange([1.0 5.0; 3.0 2.0], 1) == 2.0
-    # a default reaches the dynamic operations, never the representation's implementation
-    @test value(TObj((TraitWorld._selfview(ColTable, TraitWorld.proj_witness(ColTable, Reversed,
-                     TraitWorld._proj(ColTable, Reversed)), [[1.0], [2.0]]),)), 1, 1) == 2.0
+    # `dynamic` is not part of the language (traits reference §5.9): refused at the declaration
+    e = try toplevel(quote
+        struct RevD; cols::Vector{Vector{Float64}}; end
+        @implement ColTable RevD dynamic begin
+            project(t) = t.cols
+            ncols(r) = length(r)
+            col(r, i) = r[1]
+        end
+    end); nothing catch err; err end
+    while e isa LoadError; e = e.error; end
+    @test e isa ImplementError && occursin("not part of the language", sprint(showerror, e))
     @test total(Reversed([[1.0, 2.0], [10.0, 20.0]]), 2) == total([[1.0, 2.0], [10.0, 20.0]], 2)
     @test_throws MethodError colmean(42, 1)                  # no projection: as in plain Julia
 end
