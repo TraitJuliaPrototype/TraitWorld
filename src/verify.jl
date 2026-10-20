@@ -609,7 +609,8 @@ function _scan(mi::Core.MethodInstance, cx::_Walk)
     alts = Dict{Int,Vector{Any}}()      # SSA id => the concrete types an entry step can produce
     notrait = false                     # some user type reaching an entry has none of its traits
     for i in eachindex(src.code)
-        st = src.code[i]
+        st = _as_split_call(src, src.code[i])
+        st === nothing && continue
         rc = _runtime_closure(src, sptypes, st)
         if rc !== nothing
             kind, ats = rc
@@ -871,6 +872,28 @@ function _scan(mi::Core.MethodInstance, cx::_Walk)
     end
     return _Scan(invokes, sites, throws, returns)
 end
+
+"""
+A split's last branch through its table (compiler §4.3), read as the call it stands for: the call through
+the pointer, `foreigncall(fp, R, (Any, Any, A...), 0, :ccall, f, x, args...)` with `fp` from
+`jl_split_table_ptr`, is the call `f(x, args...)`; the lookup itself is no call (`nothing`). Any other
+statement as it is.
+"""
+function _as_split_call(src, @nospecialize(st))
+    Meta.isexpr(st, :foreigncall) || return st
+    fp = st.args[1]
+    _ccall_name(fp) === :jl_split_table_ptr && return nothing
+    if fp isa Core.SSAValue
+        d = src.code[fp.id]
+        if Meta.isexpr(d, :foreigncall) && _ccall_name(d.args[1]) === :jl_split_table_ptr
+            n = length(st.args[3]::Core.SimpleVector)
+            return Expr(:call, st.args[6:5+n]...)
+        end
+    end
+    return st
+end
+_ccall_name(@nospecialize(x)) = x isa QuoteNode ? x.value :
+    (Meta.isexpr(x, :tuple) && !isempty(x.args) && x.args[1] isa QuoteNode) ? x.args[1].value : x
 
 _isvalid(ci::Core.CodeInstance, world::UInt) = ci.min_world <= world <= ci.max_world
 
