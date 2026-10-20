@@ -258,7 +258,7 @@ function _decode_traits(@nospecialize(lb))
     pats = Any[]
     for F in ms
         (_isptag(F) || !is_trait(F)) && continue
-        u = Base.unwrap_unionall(F)
+        u = Base.unwrap_unionall(F)::DataType
         np = length(u.parameters)
         args = Any[]
         vars = TypeVar[]
@@ -266,8 +266,8 @@ function _decode_traits(@nospecialize(lb))
             v = nothing
             if i < np
                 for m in ms
-                    if _isptag(m) && m.parameters[1] === F && m.parameters[2] == i && !(m.parameters[3] isa TypeVar)
-                        v = m.parameters[3]
+                    if _isptag(m) && (mp = (m::DataType).parameters; mp[1] === F && mp[2] === i && !(mp[3] isa TypeVar))
+                        v = mp[3]
                         break
                     end
                 end
@@ -290,7 +290,7 @@ function _decode_traits(@nospecialize(lb))
 end
 
 @generated function _traitset(::Type{V}) where {V<:Tuple}
-    return _encode_traits(Any[p.parameters[1] for p in V.parameters])
+    return _encode_traits(Any[(p::DataType).parameters[1] for p in (V::DataType).parameters])
 end
 @inline TObj(views::Tuple) = TObj{_traitset(typeof(views)),typeof(views)}(views)
 
@@ -324,6 +324,11 @@ _carries(@nospecialize(T), @nospecialize(X)) = any(Y -> Y <: X, Base.uniontypes(
 `_carries` at types known to the compiler, as a constant: a pure computation on types (no method
 table read), made by a generator, so compiled code holds its answer and no edge to the reflective
 code that computes it (whose native code a load may invalidate).
+
+The generators' own code is compiled into the image like any plain code, so it is written fully
+typed (the types it reflects on asserted: `::DataType`, `::Int`): fully typed code is invalidated
+only by stakeholders and pirates. Untyped, `length(u.parameters)` left an edge at `Colon(::Int,
+::Any)`, which Unitful matches, and a package loaded before TraitWorld made the image's code invalid.
 """
 @generated _carries_static(::Type{T}, ::Type{X}) where {T,X} = _carries(T, X)
 
@@ -729,7 +734,7 @@ _cdecl(@nospecialize(T)) = isbitstype(T) && sizeof(T) > 0 ? T : isconcretetype(T
 # world, as a direct call does; the pointer's thunk is a world-checked call-site cache. (A plain
 # `@cfunction` runs in the latest world, as a callback from C must.)
 @generated function _fptr(::Type{A}, ::Type{S}, ::Type{F}) where {A,S,F}
-    ats = map(_cdecl, A.parameters)
+    ats = Any[_cdecl(a) for a in (A::DataType).parameters]
     return Expr(:cfunction, Ptr{Cvoid}, QuoteNode(_CallWrap{S}()), _ctype(S),
                 :(Core.svec($(Ref{F}), $(ats...))), QuoteNode(:caller_world))
 end
@@ -741,8 +746,9 @@ Erased{A,S}(f::F) where {A,S,F} = Erased{A,S}(_PtrCell(_fptr(A, S, F)), f)
     return p
 end
 @generated function (e::Erased{A,S})(args...) where {A,S}
-    length(A.parameters) <= 6 || return :(error("Erased: at most 6 arguments"))
-    ats = map(_ctype, A.parameters)
+    aps = (A::DataType).parameters
+    length(aps) <= 6 || return :(error("Erased: at most 6 arguments"))
+    ats = Any[_ctype(a) for a in aps]
     argex = [:(args[$i]) for i in 1:length(ats)]
     return quote
         Base.@_inline_meta
