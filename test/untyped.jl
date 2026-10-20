@@ -1,6 +1,7 @@
 # Calls from code that does not know the argument's type: the value is `Dynamic` (traits reference
 # §6.6), and the entry compiled once at `Any` calls the worker at the erased key, compiled once for
-# every type (lowering §9.2). (The table of declared implementations, untyped.jl, is off the path.)
+# every type (lowering §9.2). A value the caller converts with `compiled_for` takes the table of
+# declared implementations (untyped.jl): one lookup by its type, then the code for its key.
 # Runs inside runtests.jl, or alone.
 using Test, TraitWorld
 isdefined(Main, :toplevel) || (toplevel(ex) = Core.eval(Main, ex isa Expr && ex.head === :block ? Expr(:toplevel, ex.args...) : ex))
@@ -66,6 +67,20 @@ erased_workers(f) = [mi for m in methods(f) if TraitWorld._isworker(m) for mi in
     @test_throws MethodError untyped(Any[42])
 end
 
+@testset "untyped calls of Compiled values: the table" begin
+    xs = Any[UA("a", [1.0, 2.0]), UB(1, [3.0, 4.0]), UC(0, [5.0, 6.0], 9), OV(2.5)]
+    cf(v) = (r = Float64[]; for x in v[1:3]; push!(r, UTab.sfirst(compiled_for(x))::Float64); end; r)
+    @test cf(xs) == [1.0, 3.0, 5.0]
+    @test UTab.otwice(compiled_for(xs[4])) == 5.0
+    @test UTab.ssum(compiled_for(xs[1]), 2) == 6.0
+    # served by the table: a pointer entry per type
+    ptypes(f) = [e.T for e in (@atomic TraitWorld._ptable(only(t for (g, n, t, p) in UTab.__tw_untyped__ if g === f)).entries)]
+    @test issubset([UA, UB, UC], ptypes(UTab.sfirst))
+    @test OV in ptypes(UTab.otwice)
+    # a type without an implementation: the entry's own path, as plain Julia
+    @test_throws MethodError UTab.sfirst(compiled_for(Any[42][1]))
+end
+
 # The table's worlds and the implementations it does not serve: a redefined operation, a type
 # declared after a call (an older world must not see it), a family member, a generic implementation.
 toplevel(quote
@@ -99,12 +114,16 @@ end)
 
 @testset "untyped calls: worlds, redefinitions, families, generic implementations" begin
     call1(v) = (r = Float64[]; for x in v; push!(r, UTab2.vtwice(x)::Float64); end; r)
+    cfcall(v) = (r = Float64[]; for x in v; push!(r, UTab2.vtwice(compiled_for(x))::Float64); end; r)   # compiled_for through the table
     xs = Any[V1(1.5)]
     @test call1(xs) == [3.0]
+    @test cfcall(xs) == [3.0]
     w = Base.get_world_counter()
     toplevel(:(UTab2.val1(v::V1) = 10 * v.x))                    # the operation redefined
     @test Base.invokelatest(call1, xs) == [30.0]
     @test Base.invoke_in_world(w, call1, xs) == [3.0]               # the older world: the old method
+    @test Base.invokelatest(cfcall, xs) == [30.0]
+    @test Base.invoke_in_world(w, cfcall, xs) == [3.0]
     # a type declared after the site was used: the older world has no implementation for it
     toplevel(quote
         struct V2; x::Float64; end

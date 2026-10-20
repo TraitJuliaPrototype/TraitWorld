@@ -218,12 +218,15 @@ type (`kn`, evaluated in the entry's body).
 end
 
 """
-Whether the untyped callers' table (`untyped.jl`) is on an entry's path. Not since `Compiled` and
-`Dynamic`: an untyped caller passes a `Dynamic` value, which the worker at the erased key serves.
-The table stays in the code; whether it serves `compiled_for` from untyped callers is a performance
-question to revisit (open issues, item 35, P1 and P2).
+Whether a value from a caller that does not know its type enters position `p` as `Compiled`:
+converted by `compiled_for`, or a plain value at a position whose attribute is `Compiled`. The
+table of declared implementations serves it (untyped.jl): one lookup by its type, then the code
+compiled for its key (lowering §9.2).
 """
-const _TABLE_ON_PATH = false
+@inline _tabled(p::EntryPos, @nospecialize(t)) =
+    t isa CompiledFor || (attribute(p) === :compiled && !(t isa Dynamic || t isa TObj || t isa WithDynamic))
+"The plain value a `compiled_for` holds, or the value itself."
+@inline _unconverted(@nospecialize(t)) = t isa CompiledFor ? getfield(t, :x) : t
 
 Base.Experimental.@max_methods 1 function result_params end
 "`result_params(X)`: the parameters of trait `X` that its operations' declared result types and its declared fields' types use (methods added by `@trait`)."

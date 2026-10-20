@@ -1,11 +1,12 @@
 # ---------------------------------------------------------------------------
-# Untyped calls: the table of declared implementations (plan step 3 (c), with step 4).
+# Untyped calls of `Compiled` values: the table of declared implementations (lowering §9.2).
 #
-# A caller that does not know an argument's type reaches the entry compiled at `Any`. There the
-# entry does not compile anything per user type: each entry position keeps a table from the user
-# type to its implementation's builder (data: the witnesses and the slots its views read), and
-# one dynamic call reaches a method of the entry specialized on the builders' types, which is
-# compiled once per key. The views are built from the builder's data, reading the user's object
+# A caller that does not know an argument's type reaches the entry compiled at `Any`. Its value is
+# `Dynamic` (traits reference §6.6), unless the caller converted it with `compiled_for` or the
+# position's attribute is `Compiled`. For those, each entry position keeps a table from the user
+# type to its implementation's builder (data: the witnesses and the slots its views read), and one
+# call through a pointer reaches a method of the entry specialized on the builders' types, which
+# is compiled once per key. The views are built from the builder's data, reading the user's object
 # at the slots' offsets. This is how Swift opens a value of a protocol type: per-type metadata is
 # data, the code is shared.
 #

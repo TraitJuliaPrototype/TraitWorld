@@ -587,9 +587,9 @@ function _rewrite_fdef(mod::Module, ex)
                                                   "methods to it only where it already has an entry of that shape (rule 3)")
         end
         nargs = nva == 0 ? length(args) : -1
-        # an entry of trait positions and ordinary arguments only reaches the table of declared
-        # implementations when its caller does not know the types (untyped.jl): compiled once
-        tabled = _TABLE_ON_PATH && nva == 0 && isempty(kws) && all(x -> x.kind in (:trait, :plain, :untyped), args) &&
+        # an entry of trait positions and ordinary arguments reaches the table of declared
+        # implementations for `Compiled` values whose caller does not know their types (untyped.jl)
+        tabled = nva == 0 && isempty(kws) && all(x -> x.kind in (:trait, :plain, :untyped), args) &&
                  any(x -> x.kind === :trait, args) &&
                  !any(w -> any(x -> x.kind === :plain && x.ann !== nothing && _uses(x.ann, _wherevar(w)), args), wheres)   # a holder binds no type variable
         eargs = Any[]
@@ -694,13 +694,17 @@ function _rewrite_fdef(mod::Module, ex)
             tag = gensym(Symbol(:tw_untyped_, fname isa Symbol ? fname : :f))
             tpos = [i for (i, x) in enumerate(args) if x.kind === :trait]
             bsyms = [gensym(:b) for _ in tpos]
-            known = foldl((a, b) -> :($a & $b), [:($TraitWorld._known_type($(args[i].name))) for i in tpos])
-            plainv = foldl((a, b) -> :($a & $b), [:(!($(args[i].name) isa $TraitWorld.Dynamic || $(args[i].name) isa $TraitWorld.TObj)) for i in tpos])
+            known = foldl((a, b) -> :($a | $b), [:($TraitWorld._known_type($(args[i].name))) for i in tpos])
+            served = foldl((a, b) -> :($a & $b), [:($TraitWorld._tabled($TraitWorld.EntryPos{typeof($fname),$i,$nargs}(), $(args[i].name))) for i in tpos])
+            # the values the table compiles for: a `compiled_for`'s held value, or the value
+            usyms = Dict(i => gensym(Symbol(args[i].name, :_u)) for i in tpos)
+            unwrap = Any[:($(usyms[i]) = $TraitWorld._unconverted($(args[i].name))) for i in tpos]
+            ucall = Any[haskey(usyms, i) ? usyms[i] : callnames[i] for i in eachindex(args)]
             wsym = gensym(:w)
             look = Any[:($wsym = Base.tls_world_age())]
             for (j, i) in enumerate(tpos)
                 push!(look, :($(bsyms[j]) = $TraitWorld._ubuilder($TraitWorld.EntryPos{typeof($fname),$i,$nargs}(),
-                                                                     $(Expr(:new, :($TraitWorld.XAny), args[i].name)), $wsym)))
+                                                                     $(Expr(:new, :($TraitWorld.XAny), usyms[i])), $wsym)))
             end
             found = foldl((a, b) -> :($a & $b), [:($(bsyms[j]) isa $TraitWorld.Builder) for j in eachindex(tpos)])
             if length(tpos) == 1
@@ -708,17 +712,19 @@ function _rewrite_fdef(mod::Module, ex)
                 i1 = tpos[1]
                 esym = gensym(:e)
                 nall = length(args)
-                tblock = :(if !($known) && $plainv
+                tblock = :(if !($known) && $served
+                               $(unwrap...)
                                $wsym = Base.tls_world_age()
                                $esym = $TraitWorld._pentry($TraitWorld.EntryPos{typeof($fname),$i1,$nargs}(), $tag(),
-                                                           $(Expr(:new, :($TraitWorld.XAny), args[i1].name)), $wsym, Val($nall))
+                                                           $(Expr(:new, :($TraitWorld.XAny), usyms[i1])), $wsym, Val($nall))
                                if getfield($esym, :fp) != C_NULL
-                                   return ccall(getfield($esym, :fp), Any, ($([:Any for _ in 0:nall]...),), getfield($esym, :fo), $(callnames...))
+                                   return ccall(getfield($esym, :fp), Any, ($([:Any for _ in 0:nall]...),), getfield($esym, :fo), $(ucall...))
                                end
                            end)
             else
-                holders = [Expr(:new, :($TraitWorld.XAny), x.name) for x in args]
-                tblock = :(if !($known) && $plainv
+                holders = [Expr(:new, :($TraitWorld.XAny), haskey(usyms, i) ? usyms[i] : x.name) for (i, x) in enumerate(args)]
+                tblock = :(if !($known) && $served
+                               $(unwrap...)
                                $(look...)
                                $found && return Base.inferencebarrier($tag())($(bsyms...), $(holders...))   # a dispatch, on the builders' types
                            end)
