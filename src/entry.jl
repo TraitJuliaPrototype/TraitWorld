@@ -65,10 +65,10 @@ is none) and the declared fields' values, read from the user's object. For a mut
 object they are what the object holds now; reads go through the object.
 """
 @generated function _parts(::Type{P}, t, r::Slot, fs::NTuple{N,Slot}) where {P,N}
-    ts = P.parameters
+    ts = (P::DataType).parameters        # fully typed, as the generators' code must be (see `_carries_static`)
     first = ts[1] === Nothing ? :nothing :
             :((getfield(r, :off) < 0 ? t : getfield(t, getfield(r, :idx)))::$(ts[1]))
-    rest = [:(getfield(t, getfield(fs[$i], :idx))::$(ts[i + 1])) for i in 1:N]
+    rest = Any[:(getfield(t, getfield(fs[$i], :idx))::$(ts[i + 1])) for i in 1:(N::Int)]
     return :(($first, $(rest...)))
 end
 "The type of a view's parts at key `K`."
@@ -542,8 +542,10 @@ end
 A type of the trait world, all the way down: `Base.Fix1(userf, x)` and
 `userf ∘ g` are Base's types around a function from above, so they are not.
 An abstract field could hold anything, so it is not either.
+Machinery: it runs once per function type at a trait module's first call, and its plain code had
+edges at abstract signatures (in `owner`, `is_trait_world`) that unrelated loads invalidate.
 """
-function _tw_type(@nospecialize(T), seen)
+@machinery function _tw_type(@nospecialize(T), seen)
     T isa DataType || return false
     T <: Dynamic && return true                         # made only from trait objects: its type decides it
     T in seen && return true
