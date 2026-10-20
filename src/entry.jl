@@ -822,6 +822,26 @@ end
 end
 Base.show(io::IO, d::Dynamic{C}) where {C<:Callable} = print(io, "Dynamic{", C, "}")
 
+"""
+    stored(Callable{A, S}, f)
+
+`f` as a library keeps it in a field, for calls at the signature `A` with result `S`: the
+caller's conversion and `Callable`'s default decide, as at a bound (traits reference §9).
+- By default, and for `with_dynamic(f)`: `Dynamic{Callable{A, S}}(f)`, of a type that does not depend
+  on the function, so the code that reads the field is compiled once.
+- For `compiled_for(f)`, and for a function of the trait world: `f` itself, so the code that reads
+  the field, compiled for the field's type, is compiled per function.
+- A `Dynamic{Callable{A, S}}` is kept as it is; one of another signature is refused (`TraitBoundError`).
+"""
+function stored(::Type{Callable{A,S}}, @nospecialize(f)) where {A,S}
+    f isa CompiledFor && return getfield(f, :x)
+    f isa WithDynamic && return Dynamic{Callable{A,S}}(getfield(f, :x))
+    f isa Dynamic{Callable{A,S}} && return f
+    f isa Dynamic && f isa Dynamic{<:Callable} && Base.inferencebarrier(_callable_mismatch)(typeof(f).parameters[1], A, S)
+    _from_trait_world(f) && return f
+    return Dynamic{Callable{A,S}}(f)
+end
+
 "The trait list of `X`'s family, computed from `X` alone when the caller is specialized (a constant, so code compiled by facts needs no run-time site for it)."
 @generated _family_list(::Type{X}) where {X} = :($(TraitList{Tuple{_family(X)}}()))
 

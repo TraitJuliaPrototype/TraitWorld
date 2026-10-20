@@ -12,7 +12,7 @@ module TraitWorld
 using PrecompileTools: PrecompileTools
 using Serialization: Serialization
 
-export Trait, Callable, TObj, Dynamic, Compiled, compiled_for, with_dynamic,
+export Trait, Callable, TObj, Dynamic, Compiled, compiled_for, with_dynamic, stored,
        @trait, @implement, @trait_module, @workload,
        TraitBoundError, TraitUseError, ImplementError, OwnershipError, verify_main, isclosed,
        @warn_on_abstract, @error_on_abstract, AbstractTypeError, check_concrete, check_definitions, conforms, withfields,

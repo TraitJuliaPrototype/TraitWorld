@@ -202,6 +202,16 @@ end)
         @test kkind(Dict{String, Any}("a" => ACircle(1.0)), "a") === :dynamic
         @test_throws TraitBoundError ikinds_c(Any[ACircle(1.0), 1])     # an item that does not conform: when read
     end
+    @testset "stored functions: the caller's conversion decides (traits §9)" begin
+        C = Callable{Tuple{Float64}, Float64}
+        sq(x) = x^2
+        d = stored(C, sq)
+        @test d isa Dynamic{C} && d(3.0) == 9.0                        # Callable's default: Dynamic
+        @test stored(C, compiled_for(sq)) === sq                       # Compiled: the function itself
+        @test stored(C, with_dynamic(sq)) isa Dynamic{C}
+        @test stored(C, d) === d                                       # a stored function of the signature carries
+        @test_throws TraitBoundError stored(C, Dynamic{Callable{Tuple{Int}, Int}}(sq))   # another signature: refused
+    end
     @testset "an attribute on a function neither exported nor public warns (rule 8)" begin
         @test_logs (:warn, r"neither exported nor public") match_mode = :any toplevel(quote
             @trait_module module AttrHidden
