@@ -488,7 +488,8 @@ _machinery_method(m::Method) = (m.module === Base.Compiler && m.name === :regist
     m.module === TraitWorld && m.name in
     (:_check_once, :_latest, :_conformance_slow, :_needed_slow, :_builder_for, :worker_problems, :_rule3_error,
      :_closed_miss, :_witness, :witness, :proj_lookup, :_no_worker_error, :_refuse_overrides, :_merge_dyn,
-     :_cross_decide)   # the crossing's decision, once per crossing and container type
+     :_cross_decide,   # the crossing's decision, once per crossing and container type
+     :_register_candidate_slow!)   # a type registered as a candidate, once per session (part (D)); a trimmed build has none
 
 const _ENTER = Ref{Any}(nothing)
 const _ENTER_CALLABLE = Ref{Any}(nothing)
