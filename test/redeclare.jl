@@ -1,5 +1,5 @@
 # A second declaration of an implementation in a session is refused, in every form (traits
-# reference §5.10): which operations a type's own methods and the defaults serve is fixed by the
+# reference §5.9): which operations a type's own methods and the defaults serve is fixed by the
 # declaration. Runs inside runtests.jl (it uses `Columns` and `ColTable` from there).
 using Test, TraitWorld
 
