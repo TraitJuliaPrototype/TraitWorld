@@ -157,6 +157,7 @@ end
 precompile(_on_package_load, (Base.PkgId,))
 precompile(_narrow_slow, (Any, TObj))
 precompile(_conf_family_slow, (Base.RefValue{IdDict{Any,Any}}, Any, Any))
+precompile(_param_agrees, (Any, Symbol, Any, Any))   # a stated parameter's check, run by the declaration's top-level code
 
 """
     @workload begin … end
