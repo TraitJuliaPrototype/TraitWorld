@@ -17,34 +17,16 @@ abstract type Trait end
 is_trait(@nospecialize(X)) = X isa Type && X !== Union{} && X <: Trait
 
 """
-    Callable{A, S, M}
+    Callable{A, S}
 
-The built-in trait for a function argument: called with arguments of the tuple
-type `A`, it returns an `S`. Any callable conforms; every call is checked. `M`
-is the mode the library sets as its default: `DynamicCall` (a pointer to the
-function's code, the worker compiled once per signature) or `CompiledCall`
-(a worker compiled per function type, outside the library's cache). A bound
-without `M` accepts either and supplies `DynamicCall`; the caller overrides per
-value with `compiled_call(f)` or `dynamic_call(f)`.
+The built-in trait for a function argument: called with arguments of the tuple type `A`, it
+returns an `S`. Any callable conforms; every call is checked. Its default attribute is `Dynamic`
+(traits reference §9): a function from plain code is erased to a pointer to its code compiled for
+`A`, and the worker is compiled once per signature; `Compiled{Callable{A, S}}` at the position, or
+`compiled_for(f)` at the call, compiles the worker per function type. Functions of the trait world
+are not affected by the default.
 """
-abstract type CallMode end
-struct DynamicCall <: CallMode end
-struct CompiledCall <: CallMode end
-abstract type Callable{A<:Tuple,S,M<:CallMode} end
-
-"""
-    compiled_call(f), dynamic_call(f), Callable{A, S, M}(f)
-
-The caller's choice of mode for one value, which wins over the bound's default;
-the entry strips the wrapper. The long form also fixes the signature, as
-FunctionWrappers does.
-"""
-struct CallAs{M<:CallMode,A,S,F}
-    f::F
-end
-compiled_call(f::F) where {F} = CallAs{CompiledCall,Nothing,Nothing,F}(f)
-dynamic_call(f::F) where {F} = CallAs{DynamicCall,Nothing,Nothing,F}(f)
-(::Type{Callable{A,S,M}})(f::F) where {A,S,M<:CallMode,F} = CallAs{M,A,S,F}(f)
+abstract type Callable{A<:Tuple,S} end
 
 "One trait's view of a value: the witness that says where its operations come from, and the key `K`."
 abstract type AbstractView{X,W,K} end
@@ -646,6 +628,7 @@ end
 Base.show(io::IO, t::TObj) = (print(io, "trait object "); _show_tobj(io, typeof(t)))
 "A key as a reader wants it: the receiver type, then the declared fields' types, `Vector{Float64}; u::Vector{Float64}, p::Params`."
 function _show_key(io::IO, @nospecialize(K))
+    K isa DataType && K <: ErasedKey && return print(io, "Dynamic")
     if K isa DataType && K <: Key && length(K.parameters) == 2
         I, F = K.parameters
         I === Nothing || (show(io, I); print(io, "; "))
@@ -684,8 +667,29 @@ field_isrep(@nospecialize(X), @nospecialize(f)) = false
 @noinline _nofield(@nospecialize(T), s::Symbol) =
     throw(ArgumentError("`t.$s`: no trait this trait object carries declares a field `$s`"))
 @noinline _readonly(@nospecialize(X), s::Symbol) = throw(ArgumentError("field `$s` of $X is `const`: read-only"))
-Base.getproperty(d::Dynamic, s::Symbol) = getproperty(opened(d), s)
-Base.setproperty!(d::Dynamic, s::Symbol, x) = setproperty!(opened(d), s, x)
+# a declared field of a dynamic value: split over its object, typed by the declared type at the
+# parameters the `Dynamic` fixes (lowering §13)
+Base.@constprop :aggressive @inline Base.getproperty(d::Dynamic{X}, s::Symbol) where {X} = _dyn_getprop(d, Val(s))
+Base.@constprop :aggressive @inline Base.setproperty!(d::Dynamic{X}, s::Symbol, x) where {X} = _dyn_setprop!(d, Val(s), x)
+@inline function _dyn_getprop(d::Dynamic{X}, ::Val{f}) where {X,f}
+    F = _family_of(X)
+    RT = field_type(F, Val(f), _erased_key_of(X))
+    return CC.split_call(F, RT, _DynField{F,f}(), getfield(d, :t))::RT
+end
+@inline function _dyn_setprop!(d::Dynamic{X}, ::Val{f}, x) where {X,f}
+    F = _family_of(X)
+    y = x::field_type(F, Val(f), _erased_key_of(X))
+    CC.split_call(F, Nothing, _DynFieldSet{F,f}(), getfield(d, :t), y)
+    return y
+end
+"The erased key of `Dynamic{X}`: the parameter values `X` fixes, `Any` for an open one."
+@generated function _erased_key_of(::Type{X}) where {X}
+    u = Base.unwrap_unionall(X)
+    (u isa DataType && u <: Trait) || return :(ErasedKey{Tuple{}})
+    ps = (u::DataType).parameters
+    vals = Any[(ps[i] isa TypeVar ? Any : ps[i]) for i in 1:(length(ps)::Int)-1]
+    return :(ErasedKey{Tuple{$(vals...)}})
+end
 
 Base.Experimental.@max_methods 1 function _fieldpos end
 @doc "`_fieldpos(X, Val(f))`: the position of declared field `f` among trait `X`'s fields (methods added by @trait)." _fieldpos
@@ -707,6 +711,10 @@ end
     K = _reptype(typeof(v))
     T = _fieldkeytype(X, Val(f), K)
     y = x::T
+    if getfield(v, :w) isa ErasedWit                          # at the erased key: split over the held object
+        CC.split_call(_family_of(X), Nothing, _DynFieldSet{X,f}(), getfield(v, :o), y)
+        return y
+    end
     _isheld(v) && Base.inferencebarrier(_readonly)(X, f)     # the check at `@implement` refuses writable fields on immutable types
     _storefield(T, v, getfield(v, :fs)[_fieldpos(X, Val(f))], y)
     return y
@@ -791,12 +799,16 @@ An operation call on a trait object: check the arguments against the
 declaration, run the implementation the witness names, assert the result to
 the declared type. Everything folds for a known view type.
 """
-@inline function opcall(::Type{X}, ::Val{op}, f::F, t::TObj, args::Vararg{Any,N}) where {X,op,F,N}
+@inline function opcall(::Type{X}, ::Val{op}, f::F, t::TObj, args0::Vararg{Any,N}) where {X,op,F,N}
     v = viewof(t, X)
     K = _reptype(typeof(v))
+    args = _seams(op_args(X, Val(op), K, Val(N)), args0)     # a trait object where `Dynamic{Y}` is declared
     args isa op_args(X, Val(op), K, Val(N)) || throw(TraitArgumentError(X, op, K, args))
+    RT = op_ret(X, Val(op), K, Val(N))
+    # at the erased key (a `Dynamic` trait object): the call-site split over the held object
+    getfield(v, :w) isa ErasedWit && return _erased_op(X, f, RT, v, args...)
     x = _dispatch(X, Val(op), f, getfield(v, :w), _rep(v), t, args...)
-    return x::op_ret(X, Val(op), K, Val(N))
+    return x::RT
 end
 
 # A default receives the whole trait object, with its supertraits' views, so it
@@ -823,7 +835,7 @@ end
 """
 The pointer of an `Erased`, in a mutable cell: a package image resets a mutable struct's `Ptr`
 fields to null (an immutable one's it saves as the old session's address, which crashes when
-called), so a value kept in an image (`const D = dynamic_fn(…)`) finds null in a new session and
+called), so a value kept in an image (`const D = Dynamic{Callable{A, S}}(f)`) finds null in a new session and
 makes its pointer again, once. A load and a compare per call; compiled code cannot fold the
 address in as a constant.
 """
@@ -912,7 +924,7 @@ function _show_cobj_type(io::IO, @nospecialize(T))
     print(io, "Callable{")
     show(io, A); print(io, ", "); show(io, S)
     print(io, "} at ")
-    F <: Erased ? print(io, "DynamicCall") : show(io, F)
+    F <: Erased ? print(io, "Dynamic") : show(io, F)
 end
 
 """

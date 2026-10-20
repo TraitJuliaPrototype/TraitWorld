@@ -188,7 +188,23 @@ function _concreteness_policy(block)
     return policy, Expr(:block, args...)
 end
 
+"The trait's default attribute from a line `@dynamic` in its body (traits reference §3.8), removed from it."
+function _dynamic_default(block)
+    block isa Expr && block.head === :block || return false, block
+    dyn = false
+    args = Any[]
+    for ex in block.args
+        if ex isa Expr && ex.head === :macrocall && ex.args[1] === Symbol("@dynamic") && all(a -> a isa LineNumberNode, ex.args[2:end])
+            dyn = true
+        else
+            push!(args, ex)
+        end
+    end
+    return dyn, Expr(:block, args...)
+end
+
 macro trait(header, block = nothing)
+    dyn, block = _dynamic_default(block)
     policy, block = _concreteness_policy(block)
     header, block, fieldparams = _keys_form(header, block)
     name, Rsym, supers, params = _parse_trait_header(header)
@@ -197,12 +213,15 @@ macro trait(header, block = nothing)
     np = length(pnames)
     out = Any[:(Core.@__doc__ abstract type $name{$(pnames...), $Rsym} <: $TW.Trait end)]
     policy === :none || push!(out, :($TW.trait_concreteness(::Type{$name}) = $(QuoteNode(policy))))
+    dyn && push!(out, :($TW.default_attribute(::Type{$name}) = :dynamic))
     if np > 0
         push!(out, :($TW.trait_params(::Type{$name}) = $(Tuple(pnames))))
         for (i, (p, b)) in enumerate(params)
             key = QuoteNode(p)
             # at an archetype: the value a bound fixes, else an opaque stand-in
             push!(out, :($TW.param(::Type{$name}, ::Val{$key}, ::Type{A}) where {A <: $TW.Archetype} = $TW._archparam(A, $name, $key, $i)))
+            # at the erased key (a `Dynamic` trait object): the value it carries
+            push!(out, :($TW.param(::Type{$name}, ::Val{$key}, ::Type{E}) where {E <: $TW.ErasedKey} = $TW._erasedparam(E, $i)))
             b === nothing || push!(out, :($TW.param_bound(::Type{$name}, ::Val{$key}) = $b))
         end
     end
@@ -261,6 +280,9 @@ macro trait(header, block = nothing)
                 any(ex -> ex isa Expr && ex.head === :(=) && ex.args[1] isa Symbol && ex.args[1] in pnames, block.args) ||
                 any(x -> _mentions(x[2], Rsym), fdecls)
     uses_self && push!(out, :($TW.trait_uses_self(::Type{$name}) = true))
+    # the parameters the operations' result types use: a `Dynamic` position must fix them
+    rps = Symbol[p for p in pnames if any(d -> _mentions(d.ret, p), decls) || any(x -> _mentions(x[2], p), fdecls)]
+    isempty(rps) || push!(out, :($TW.result_params(::Type{$name}) = $(Tuple(rps))))
     sigs = [(d.name, length(d.args)) for d in decls]
     length(unique(sigs)) == length(sigs) || error("@trait: an operation is declared twice with the same arity in `$name`")
     names = unique([d.name for d in decls])

@@ -184,32 +184,62 @@ needed(::EntryPos{F,pos,nargs}) where {F,pos,nargs} = Base.inferencebarrier(_nee
 @machinery _needed_slow(@nospecialize(F), pos::Int, nargs::Int) = TraitList{Tuple{traits_at(F.instance, pos, nargs)...}}()
 
 """
-    enter(EntryPos{F, pos, nargs}(), t)
+    enter(EntryPos{F, pos, nargs}(), t, Val(known))
 
 The trait object for argument `pos` of a call from ordinary code, or `NOTRAIT` if `t` has
-none of the traits the position needs. Not inlined, so that `verify_main` sees it, but
-specialized: for a known type it folds to the views' construction.
+none of the traits the position needs: `Compiled` (at its key) or `Dynamic` (at the erased key),
+decided once here (traits reference §6.6; lowering §8.2). `known` is `Compiler.known_type(t)`,
+evaluated in the entry's own body. Specialized: for a known type it folds to the views' construction.
 """
-@inline function enter(p::EntryPos{F}, t) where {F}
-    t isa Dynamic && return opened(t)                  # a dynamic value is opened: its worker is selected by dispatch
+@inline function enter(p::EntryPos{F}, t, ::Val{kn}) where {F,kn}
     t isa TObj && return Base.inferencebarrier(_rule3_error)(typeof(p), t)
+    # the caller's conversions always win
+    t isa CompiledFor && return _enter_compiled(p, getfield(t, :x))
+    t isa WithDynamic && return _enter_erased(p, getfield(t, :x))
+    # a dynamic value stays dynamic (rule 7): never opened at a bound
+    t isa Dynamic && return _enter_erased(p, _dyn_held(t))
+    _enters_dynamic(p, t, Val(kn)) && return _enter_erased(p, t)
+    return _enter_compiled(p, t)
+end
+"The trait object at its key of a plain value: a container crossing where the position asks (§13.1); the whole object kept where the worker may keep it."
+@inline function _enter_compiled(p::EntryPos{F}, t) where {F}
+    t isa TObj && return t                                   # a dynamic value holding a trait object (`_dyn_held`)
+    v, o = _enter_keyed(p, t)
+    # a function that may keep its trait objects gets the whole user's object, also of an immutable
+    # type (boxed); every other function holds its parts (`keeps` folds to a constant)
+    keeps(KeepOf{F}()) && !ismutable(o) && v isa TObj && return _with_object(v, o)
+    return v
+end
+"The trait object at the erased key of a plain value: its trait object at its key, erased, holding the user's object (or the crossed container's view)."
+@inline function _enter_erased(p::EntryPos{F}, t) where {F}
+    t isa TObj && return _erase(_narrow_to(p, t), t)
+    v, o = _enter_keyed(p, t)
+    v === NOTRAIT && return NOTRAIT
+    return _erase(v, o)
+end
+"What a dynamic value holds: the user's object, or a trait object where it holds one."
+@inline _dyn_held(d::Dynamic) = getfield(d, :t)
+"A trait object a dynamic value holds, as it is (its traits are those of the `Dynamic`)."
+@inline _narrow_to(p::EntryPos, t::TObj) = t
+"""
+The trait object at its key of `t`, and the object its views read: `t`, or where `t` is a container
+that crosses at the position (traits §10.3), the view it crosses as.
+"""
+@inline function _enter_keyed(p::EntryPos{F}, t) where {F}
     # a container crosses with its items seen as `Dynamic{Y}` where the bounds ask for that and it
     # does not meet them as it is (traits reference §10.3); once decided for its type, it is not
     # assembled as it is first (a container whose family check failed would take the slow path)
     c = crossing(p)
     if c isa Crossing && _cross_known(c, t) == 0x02
-        vw = _cross_into(c, p, t)
-        vw === nothing || return vw
+        w = crossed(_citem(c), t)
+        w === nothing || return _assemble(needed(p), w), w
     end
     v = _assemble(needed(p), t)
     if c isa Crossing && _crosses(c, p, v, t)
-        vw = _cross_into(c, p, t)
-        vw === nothing || return vw
+        w = crossed(_citem(c), t)
+        w === nothing || return _assemble(needed(p), w), w
     end
-    # a function that may keep its trait objects gets the whole user's object, also of an immutable
-    # type (boxed); every other function holds its parts (`keeps` folds to a constant)
-    keeps(KeepOf{F}()) && !ismutable(t) && v isa TObj && return _with_object(v, t)
-    return v
+    return v, t
 end
 
 """
@@ -464,8 +494,8 @@ end
 _hasid(v::Vector{Any}, @nospecialize(x)) = (for y in v; y === x && return true; end; false)
 
 "The trait objects of a vararg position, one per element, or `NOTRAIT` if an element has none of its traits."
-@noinline function enter_each(p::EntryPos, ts::Tuple)
-    vs = map(t -> enter(p, t), ts)
+@noinline function enter_each(p::EntryPos, ts::Tuple, ::Val{kn}) where {kn}
+    vs = map(t -> enter(p, t, Val(kn)), ts)
     any(v -> v === NOTRAIT, vs) && return NOTRAIT
     return vs
 end
@@ -477,13 +507,24 @@ A bounded keyword: if `k` was supplied, its value is translated for the traits `
 `TraitList`, from the bound) and replaced in the named tuple of supplied keywords; a value
 that conforms to none of them is refused at the entry.
 """
-@noinline function enter_kw(l::TraitList, f::F, k::Symbol, nt::NamedTuple) where {F}
+@noinline function enter_kw(l::TraitList, f::F, k::Symbol, nt::NamedTuple, @nospecialize(attr), ::Val{kn}) where {F,kn}
     haskey(nt, k) || return nt
     t = getfield(nt, k)
     t isa TObj && return nt
-    v = t isa Dynamic ? opened(t) : _assemble(l, t)
+    # as `enter`: the caller's conversion, a dynamic value carried, the attribute, the traits' default, `known`
+    dyn = t isa WithDynamic || t isa Dynamic ||
+          (!(t isa CompiledFor) && (attr === :dynamic || (attr !== :compiled &&
+                                    ((_any_dynamic_default(l) && !_from_trait_world(t)) || !kn))))
+    t isa CompiledFor && (t = getfield(t, :x))
+    t isa WithDynamic && (t = getfield(t, :x))
+    t isa Dynamic && (t = _dyn_held(t))
+    v = t isa TObj ? t : _assemble(l, t)
     v === NOTRAIT && Base.inferencebarrier(_kw_refused)(f, k, t, l)
-    keeps(KeepOf{F}()) && !(t isa Dynamic) && !ismutable(t) && v isa TObj && (v = _with_object(v, t))
+    if dyn
+        v = _erase(v, t)
+    elseif keeps(KeepOf{F}()) && !ismutable(t) && v isa TObj
+        v = _with_object(v, t)
+    end
     return merge(nt, NamedTuple{(k,)}((v,)))
 end
 @noinline _kw_refused(@nospecialize(f), k::Symbol, @nospecialize(t), @nospecialize(l)) =
@@ -491,9 +532,9 @@ end
                           "$(join(string.(typeof(l).parameters[1].parameters), ", "))"))
 
 "A `Callable` keyword: wrapped like a positional one if supplied."
-@noinline function enter_kw_callable(::Type{A}, ::Type{S}, @nospecialize(M), k::Symbol, nt::NamedTuple) where {A,S}
+@noinline function enter_kw_callable(::Type{A}, ::Type{S}, @nospecialize(attr), k::Symbol, nt::NamedTuple, ::Val{kn}) where {A,S,kn}
     haskey(nt, k) || return nt
-    return merge(nt, NamedTuple{(k,)}((enter_callable(A, S, M, getfield(nt, k)),)))
+    return merge(nt, NamedTuple{(k,)}((enter_callable(A, S, attr, getfield(nt, k), Val(kn)),)))
 end
 
 "The trait patterns each worker of `f` needs at position `pos` (`StateVector{Float64, R}`), one list per method."
@@ -709,71 +750,77 @@ edges at abstract signatures (in `owner`, `is_trait_world`) that unrelated loads
 end
 
 """
-    enter_callable(A, S, M, f)
+    enter_callable(A, S, attr, f, Val(known))
 
-A function handed down from ordinary code, for a `Callable{A, S, M}` argument.
-The mode comes from the value's wrapper (`compiled_call(f)`, `dynamic_call(f)`)
-if there is one, else from the bound (`M`, or `DynamicCall` when the bound
-leaves it open). Functions from the trait world are always passed as
-themselves; a function from above is erased to a pointer under `DynamicCall`.
+A function handed down for a `Callable{A, S}` argument, as a `CObj`: `Compiled` (the function itself,
+the worker compiled per function type) or `Dynamic` (erased to a pointer, the worker compiled once
+per signature). The caller's conversion wins (`compiled_for(f)`, `with_dynamic(f)`); a
+`Dynamic{Callable{A, S}}` is carried; else the bound's attribute (`attr`); else `Callable`'s
+default, `Dynamic`, for a function whose type is not of the trait world; else whether the caller knew
+the function's type (`known`, evaluated in the entry's body). In a closed build nothing is erased.
 """
-@noinline function enter_callable(::Type{A}, ::Type{S}, @nospecialize(M), @nospecialize(f)) where {A,S}
+@noinline function enter_callable(::Type{A}, ::Type{S}, @nospecialize(attr), @nospecialize(f), ::Val{kn}) where {A,S,kn}
     f isa CObj{A,S} && return f
-    if f isa CallAs
-        W = typeof(f)
-        FA, FS = W.parameters[2], W.parameters[3]
-        (FA === Nothing || (FA === A && FS === S)) || Base.inferencebarrier(_callas_mismatch)(FA, FS, A, S)
-        M = W.parameters[1]
-        f = f.f
+    if f isa Dynamic && typeof(f).parameters[1] <: Callable
+        c = getfield(f, :t)
+        c isa CObj{A,S} || Base.inferencebarrier(_callable_mismatch)(typeof(f).parameters[1], A, S)
+        return c
     end
-    M === nothing && (M = DynamicCall)
+    if f isa CompiledFor
+        f = getfield(f, :x); attr = :compiled
+    elseif f isa WithDynamic
+        f = getfield(f, :x); attr = :dynamic
+    elseif attr === nothing
+        attr = _from_trait_world(f) ? (kn ? :compiled : :dynamic) : :dynamic
+    end
     CLOSED_WORLD[] && return CObj{A,S}(f)          # every function is known: no erasure
     T = typeof(f)
     if Base.issingletontype(T)
         # functions that capture nothing (Base's `abs2`, a closure without state): one wrapper per type
-        key = (A, S, M, T)
+        key = (A, S, attr, T)
         c = get(_CALLABLE[], key, nothing)               # copy-on-write: read without the lock
         c === nothing || return c
-        c = _wrap_callable(A, S, M, f)
+        c = _wrap_callable(A, S, attr, f)
         @lock _LOCK begin
             d = copy(_CALLABLE[]); d[key] = c; _CALLABLE[] = d
         end
         return c
     end
-    return _wrap_callable(A, S, M, f)
+    return _wrap_callable(A, S, attr, f)
 end
 const _CALLABLE = Ref(Dict{Any,Any}())           # copy-on-write
-@noinline _callas_mismatch(@nospecialize(FA), @nospecialize(FS), @nospecialize(A), @nospecialize(S)) =
-    throw(TraitBoundError("a function wrapped for the signature $FA -> $FS was passed where Callable{$A, $S} is expected"))
-function _wrap_callable(::Type{A}, ::Type{S}, @nospecialize(M), @nospecialize(f)) where {A,S}
-    (M === CompiledCall || _from_trait_world(f)) && return CObj{A,S}(f)
-    return CObj{A,S}(Erased{A,S}(f))
-end
+@noinline _callable_mismatch(@nospecialize(C), @nospecialize(A), @nospecialize(S)) =
+    throw(TraitBoundError("a Dynamic{$C} was passed where Callable{$A, $S} is expected"))
+_wrap_callable(::Type{A}, ::Type{S}, attr::Symbol, @nospecialize(f)) where {A,S} =
+    attr === :compiled ? CObj{A,S}(f) : CObj{A,S}(Erased{A,S}(f))
 
 "A function argument with several `Callable` bounds: one `CObj` per signature."
-function enter_callables(sigs::Tuple, @nospecialize(f))
+function enter_callables(sigs::Tuple, @nospecialize(f), ::Val{kn}) where {kn}
     f isa CMulti && return f
-    f isa CallAs && (M = typeof(f).parameters[1]; f = f.f; sigs = map(s -> (s[1], s[2], M), sigs))
-    return CMulti(map(s -> enter_callable(s[1], s[2], s[3], f), sigs))
+    return CMulti(map(s -> enter_callable(s[1], s[2], s[3], f, Val(kn)), sigs))
 end
 
 """
-    DynamicFn{A, S}
+    Dynamic{Callable{A, S}}(f)
 
-A function in `DynamicCall` mode as a value of fixed type: a pointer to its code compiled for
-`A`, its result asserted to `S`. What a library stores in a field for a function from above
-(`Callable` in `DynamicCall` mode is already the dynamic value of a function, note "Dynamic
-values"): its type does not depend on the function.
+`f` as a dynamic value of `Callable{A, S}`: a pointer to its code compiled for `A`, its result asserted
+to `S`, of a type that does not depend on the function. What a library stores in a field for a
+function from above (a model's right-hand side, a callback). Calling it is the checked call.
 """
-const DynamicFn{A,S} = CObj{A,S,Erased{A,S}}
-"""
-    dynamic_fn(A, S, f) -> DynamicFn{A, S}
-
-`f` as a dynamic call at the signature `A -> S`, made in ordinary code: the boundary's
-translation of a `Callable` bound in `DynamicCall` mode, for a library that stores the
-function (a model's right-hand side, a callback).
-"""
-dynamic_fn(::Type{A}, ::Type{S}, f) where {A,S} = f isa DynamicFn{A,S} ? f : CObj{A,S}(Erased{A,S}(f isa CallAs ? f.f : f))
+function (::Type{Dynamic{C}})(f) where {C<:Callable}
+    u = Base.unwrap_unionall(C)
+    A, S = u.parameters
+    f isa Dynamic{C} && return f
+    f isa CompiledFor && (f = getfield(f, :x))
+    f isa WithDynamic && (f = getfield(f, :x))
+    c = f isa CObj{A,S,Erased{A,S}} ? f : CObj{A,S}(Erased{A,S}(f))
+    return Dynamic{C}(Val(:checked), c)
+end
+(::Type{Dynamic{C}})(f::Dynamic{C}) where {C<:Callable} = f
+@inline function (d::Dynamic{Callable{A,S}})(args...) where {A,S}
+    return (getfield(d, :t)::CObj{A,S,Erased{A,S}})(args...)
+end
+Base.show(io::IO, d::Dynamic{C}) where {C<:Callable} = print(io, "Dynamic{", C, "}")
 
 "The trait list of `X`'s family, computed from `X` alone when the caller is specialized (a constant, so code compiled by facts needs no run-time site for it)."
 @generated _family_list(::Type{X}) where {X} = :($(TraitList{Tuple{_family(X)}}()))

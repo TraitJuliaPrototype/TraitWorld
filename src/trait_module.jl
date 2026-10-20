@@ -64,6 +64,7 @@ _prologue() = Any[:(Base.Experimental.@compiler_options facts=true),     # Julia
                   :(const __tw_extended__ = Set{Any}()),          # other modules' functions given workers here
                   :(const __tw_methods_seen__ = Base.IdSet{Method}()),
                   :(const __tw_positions__ = Any[]),          # (function, position, nargs) of the entries' trait positions
+                  :(const __tw_attrs__ = Dict{Any,Symbol}()), # (function, position, nargs) => the attribute a bound declares there
                   :(const __tw_untyped__ = Any[]),            # (function, nargs, method object, trait positions) of tabled entries (untyped.jl)
                   :(const __tw_finished__ = Ref(false))]
 _epilogue() = :($TraitWorld._latest($TraitWorld._finish_module, @__MODULE__))
@@ -158,7 +159,7 @@ function _dynamic_fields(mod::Module, ex::Expr)
 end
 
 function _dyn_type(mod::Module, T)
-    T isa Expr && T.head === :curly && _tryeval(mod, T.args[1]) === Dynamic && return T
+    T isa Expr && T.head === :curly && (h0 = _tryeval(mod, T.args[1]); h0 === Dynamic || h0 === Compiled) && return T
     if T isa Symbol || (T isa Expr && T.head === :.)
         v = _tryeval(mod, T)
         return (v isa Type && is_trait(v)) ? :($TraitWorld.Dynamic{$T}) : T
@@ -180,6 +181,8 @@ function _dynamic_containers(mod::Module, ex::Expr)
     sig, body = ex.args[1], ex.args[2]
     return Expr(ex.head, _dyn_sig(mod, sig), _dyn_body(mod, body))
 end
+"Whether `x` names `Dynamic` or `Compiled`: an attribute on a bound (traits reference §6.1)."
+_isattribute(mod::Module, x) = (x isa Symbol || (x isa Expr && x.head === :.)) && (v = _tryeval(mod, x); v === Dynamic || v === Compiled)
 _istraitname(mod::Module, x) = (x isa Symbol || (x isa Expr && x.head === :.)) && (v = _tryeval(mod, x); v isa Type && is_trait(v))
 function _dyn_sig(mod::Module, s)
     s isa Expr || return s
@@ -196,6 +199,8 @@ function _dyn_arg(mod::Module, a)
     a isa Expr || return a
     if a.head === :parameters || a.head === :kw || a.head === :...
         return Expr(a.head, Any[_dyn_arg(mod, x) for x in a.args]...)
+    elseif a.head === :(::) && length(a.args) == 2 && a.args[2] isa Expr && a.args[2].head === :curly && _isattribute(mod, a.args[2].args[1])
+        return a                                     # `x::Dynamic{X}`, `x::Compiled{X}`: a bound with an attribute
     elseif a.head === :(::) && length(a.args) == 2 && a.args[2] isa Expr && a.args[2].head === :curly && !_istraitname(mod, a.args[2].args[1])
         return Expr(:(::), a.args[1], _dyn_type(mod, a.args[2]))
     elseif a.head === :(::) && length(a.args) == 2 && a.args[2] isa Expr && (a.args[2].head === :curly || a.args[2].head === :tuple)
@@ -251,32 +256,44 @@ struct _Arg
     traits::Vector{Any}
     A::Any
     S::Any
-    M::Any          # the Callable mode the bound names, or nothing (either mode, the default supplied)
+    M::Any          # the attribute the bound names, `:compiled` or `:dynamic`, or nothing (the default rule)
     default::Any    # a keyword's default, or nothing
     required::Bool  # a keyword without a default
 end
 _Arg(name, ann, kind, traits, A, S, M) = _Arg(name, ann, kind, traits, A, S, M, nothing, false)
 
-"The parameters of a `Callable` bound: `(A, S, M)`, with `M === nothing` when the bound leaves the mode open."
+"The parameters of a `Callable` bound, `Callable{A, S}`, with an attribute (`Compiled{Callable{A, S}}`, `Dynamic{Callable{A, S}}`): `(A, S, M)`, `M` the attribute or `nothing`."
 function _callable_params(@nospecialize(v))
+    M = nothing
+    if v isa DataType && (v.name === Base.typename(Compiled) || v.name === Base.typename(Dynamic))
+        M = v.name === Base.typename(Compiled) ? :compiled : :dynamic
+        v = v.parameters[1]
+    end
     v isa Type && v !== Union{} && v <: Callable || return nothing
     u = Base.unwrap_unionall(v)
     u isa DataType && u.name === Base.typename(Callable) || return nothing
-    A, S, M = u.parameters
+    A, S = u.parameters
     (A isa TypeVar || S isa TypeVar) && return nothing
-    return (A, S, M isa TypeVar ? nothing : M)
+    return (A, S, M)
+end
+"A trait bound with an attribute, `Compiled{X}` or `Dynamic{X}`: `(X, :compiled)` or `(X, :dynamic)`, else `nothing`."
+function _attributed_bound(@nospecialize(v))
+    v isa DataType && (v.name === Base.typename(Compiled) || v.name === Base.typename(Dynamic)) || return nothing
+    X = v.parameters[1]
+    is_trait(X) || return nothing
+    return (X, v.name === Base.typename(Compiled) ? :compiled : :dynamic)
 end
 
 function _classify(mod::Module, a, unbounded::Vector{Symbol} = Symbol[])
     if a isa Expr && a.head === :macrocall && a.args[1] === Symbol("@specialize")
-        error("@trait_module: `@specialize` is retired; write the mode in the bound, `f::Callable{A, S, CompiledCall}`, " *
-              "or let the caller choose with `compiled_call(f)`")
+        error("@trait_module: `@specialize` is retired; write the attribute in the bound, `f::Compiled{Callable{A, S}}`, " *
+              "or let the caller choose with `compiled_for(f)`")
     end
     if a isa Symbol
         return _Arg(a, nothing, :untyped, Any[], nothing, nothing, nothing)
     elseif a isa Expr && a.head === :...
         inner = _classify(mod, a.args[1], unbounded)
-        inner.kind === :trait && return _Arg(inner.name, inner.ann, :vararg_trait, inner.traits, nothing, nothing, nothing)
+        inner.kind === :trait && return _Arg(inner.name, inner.ann, :vararg_trait, inner.traits, nothing, nothing, inner.M)
         inner.kind in (:callable, :callables) && error("@trait_module: a vararg of `Callable` is not supported")
         return _Arg(a, nothing, :vararg, Any[], nothing, nothing, nothing)
     elseif a isa Expr && a.head === :kw
@@ -302,8 +319,12 @@ function _classify(mod::Module, a, unbounded::Vector{Symbol} = Symbol[])
         end
         v = _tryeval(mod, ann)
         cp = _callable_params(v)
+        ab = _attributed_bound(v)
         if cp !== nothing
             return _Arg(name, ann, :callable, Any[], cp[1], cp[2], cp[3])
+        elseif ab !== nothing
+            _check_dynamic_params(ab[1], ab[2], name)
+            return _Arg(name, ann, :trait, bound_traits(ab[1]), nothing, nothing, ab[2])
         elseif is_trait(v)
             return _Arg(name, ann, :trait, bound_traits(v), nothing, nothing, nothing)
         end
@@ -552,7 +573,7 @@ function _rewrite_fdef(mod::Module, ex)
         nargs = nva == 0 ? length(args) : -1
         # an entry of trait positions and ordinary arguments only reaches the table of declared
         # implementations when its caller does not know the types (untyped.jl): compiled once
-        tabled = nva == 0 && isempty(kws) && all(x -> x.kind in (:trait, :plain, :untyped), args) &&
+        tabled = _TABLE_ON_PATH && nva == 0 && isempty(kws) && all(x -> x.kind in (:trait, :plain, :untyped), args) &&
                  any(x -> x.kind === :trait, args) &&
                  !any(w -> any(x -> x.kind === :plain && x.ann !== nothing && _uses(x.ann, _wherevar(w)), args), wheres)   # a holder binds no type variable
         eargs = Any[]
@@ -560,14 +581,10 @@ function _rewrite_fdef(mod::Module, ex)
         callnames = Any[]
         for x in args
             nm = x.name
-            if x.kind === :trait && tabled
+            if x.kind === :trait
+                # `@nospecialize`: a typed caller inlines the entry, where `known_type` folds to `true`;
+                # an untyped caller reaches the one entry compiled at `Any`, where it is `false` (§6.6)
                 push!(eargs, :(@nospecialize($nm)))
-                push!(callnames, nm)
-            elseif x.kind === :trait
-                # specialized (as plain Julia's methods are): an untyped caller's one dynamic call reaches
-                # the entry compiled for the argument's type, where the implementation, the views and the
-                # worker's selection fold (a small method per function and type, never invalidated)
-                push!(eargs, nm)
                 push!(callnames, nm)
             elseif x.kind in (:callable, :callables)
                 push!(eargs, :(@nospecialize($nm)))
@@ -594,24 +611,29 @@ function _rewrite_fdef(mod::Module, ex)
         for (i, x) in enumerate(args)
             if x.kind === :trait
                 v = gensym(Symbol(x.name, :_view))
-                push!(stmts, :($v = $TraitWorld.enter($TraitWorld.EntryPos{typeof($fname),$i,$nargs}(), $(x.name))))
+                # `known_type` in the entry's own body: in a helper called with an `Any`-typed value it would be
+                # compiled for the value's type, where it folds to `true` (E-148)
+                push!(stmts, :($v = $TraitWorld.enter($TraitWorld.EntryPos{typeof($fname),$i,$nargs}(), $(x.name),
+                                                      Val($TraitWorld._known_type($(x.name))))))
                 fb = haskw ? :($TraitWorld.kwfallback($ntname, $fname, $(callnames...))) : :($TraitWorld.fallback($fname, $(callnames...)))
                 push!(stmts, :($v === $TraitWorld.NOTRAIT && return $fb))
                 push!(newnames, v)
             elseif x.kind === :vararg_trait
                 v = gensym(Symbol(x.name, :_views))
-                push!(stmts, :($v = $TraitWorld.enter_each($TraitWorld.EntryPos{typeof($fname),$i,-1}(), $(x.name))))
+                push!(stmts, :($v = $TraitWorld.enter_each($TraitWorld.EntryPos{typeof($fname),$i,-1}(), $(x.name),
+                                                           Val($TraitWorld._known_type($(x.name))))))
                 fb = haskw ? :($TraitWorld.kwfallback($ntname, $fname, $(callnames...))) : :($TraitWorld.fallback($fname, $(callnames...)))
                 push!(stmts, :($v === $TraitWorld.NOTRAIT && return $fb))
                 push!(newnames, Expr(:..., v))
             elseif x.kind === :callable
                 v = gensym(Symbol(x.name, :_fn))
-                push!(stmts, :($v = $TraitWorld.enter_callable($(x.A), $(x.S), $(x.M === nothing ? :nothing : x.M), $(x.name))))
+                push!(stmts, :($v = $TraitWorld.enter_callable($(x.A), $(x.S), $(QuoteNode(x.M)), $(x.name),
+                                                               Val($TraitWorld._known_type($(x.name))))))
                 push!(newnames, v)
             elseif x.kind === :callables
                 v = gensym(Symbol(x.name, :_fn))
-                sigs = Expr(:tuple, [Expr(:tuple, A, S, M === nothing ? :nothing : M) for (A, S, M) in x.traits]...)
-                push!(stmts, :($v = $TraitWorld.enter_callables($sigs, $(x.name))))
+                sigs = Expr(:tuple, [Expr(:tuple, A, S, QuoteNode(M)) for (A, S, M) in x.traits]...)
+                push!(stmts, :($v = $TraitWorld.enter_callables($sigs, $(x.name), Val($TraitWorld._known_type($(x.name))))))
                 push!(newnames, v)
             elseif x.kind === :vararg
                 push!(newnames, Expr(:..., x.name))
@@ -624,9 +646,10 @@ function _rewrite_fdef(mod::Module, ex)
             k = QuoteNode(x.name)
             if x.kind === :trait
                 tl = :($TraitWorld.TraitList{Tuple{$(x.traits...)}}())
-                push!(stmts, :($ntname = $TraitWorld.enter_kw($tl, $fname, $k, $ntname)))
+                push!(stmts, :($ntname = $TraitWorld.enter_kw($tl, $fname, $k, $ntname, $(QuoteNode(x.M)), Val($TraitWorld._known_type($ntname)))))
             else
-                push!(stmts, :($ntname = $TraitWorld.enter_kw_callable($(x.A), $(x.S), $(x.M === nothing ? :nothing : x.M), $k, $ntname)))
+                push!(stmts, :($ntname = $TraitWorld.enter_kw_callable($(x.A), $(x.S), $(QuoteNode(x.M)), $k, $ntname,
+                                                                       Val($TraitWorld._known_type($ntname)))))
             end
         end
         # the result goes back through `_out`: a trait object like an argument becomes a value of its caller's type
@@ -730,7 +753,7 @@ function _rewrite_fdef(mod::Module, ex)
     nargs_w = nva == 0 ? length(args) : -1
     for (i, x) in enumerate(args)
         x.kind in (:trait, :vararg_trait) || continue
-        push!(rest, :($TraitWorld._note_position(@__MODULE__, $fname, $i, $(x.kind === :vararg_trait ? -1 : nargs_w))))
+        push!(rest, :($TraitWorld._note_position(@__MODULE__, $fname, $i, $(x.kind === :vararg_trait ? -1 : nargs_w), $(QuoteNode(x.M)))))
     end
     key[1] !== mod && isdefined(mod, :__tw_extended__) && push!(mod.__tw_extended__, key)
     push!(rest, :($TraitWorld._bump!()))
@@ -769,6 +792,18 @@ function _check_entries_intact(mod::Module, fname)
     return nothing
 end
 
+"Define `attribute(EntryPos{typeof(f), pos, nargs})` in `mod` where a bound there declares one (`Compiled{X}`, `Dynamic{X}`)."
+function _fix_attribute!(mod::Module, @nospecialize(f), pos::Int, nargs::Int)
+    isdefined(mod, :__tw_attrs__) || return nothing
+    a = get(mod.__tw_attrs__, (f, pos, nargs), nothing)
+    a === nothing && return nothing
+    P = EntryPos{typeof(f),pos,nargs}
+    m = Base._which(Tuple{typeof(attribute),P}; raise = false)
+    m !== nothing && Base.unwrap_unionall(m.method.sig).parameters[2] === P && Base.invokelatest(attribute, P()) === a && return nothing
+    Core.eval(mod, :($TraitWorld.attribute(::$P) = $(QuoteNode(a))))
+    return nothing
+end
+
 "Define `crossing(EntryPos{typeof(f), pos, nargs})` in `mod` as a constant, as `needed` (redefined only when it changes)."
 function _fix_crossing!(mod::Module, @nospecialize(f), pos::Int, nargs::Int)
     P = EntryPos{typeof(f),pos,nargs}
@@ -788,10 +823,16 @@ end
 A trait position of an entry, noted where its worker is defined. Once the module is
 complete, `needed` is fixed for it; a definition after that (at the prompt) updates it.
 """
-function _note_position(mod::Module, @nospecialize(f), pos::Int, nargs::Int)
+function _note_position(mod::Module, @nospecialize(f), pos::Int, nargs::Int, attr::Union{Nothing,Symbol} = nothing)
     isdefined(mod, :__tw_positions__) || return nothing
     k = (f, pos, nargs)
     any(x -> x[1] === f && x[2] == pos && x[3] == nargs, mod.__tw_positions__) || push!(mod.__tw_positions__, k)
+    if attr !== nothing && isdefined(mod, :__tw_attrs__)
+        old = get(mod.__tw_attrs__, k, nothing)
+        old === nothing || old === attr || throw(TraitBoundError("`$f`, argument $pos: its methods declare different " *
+                                                                 "attributes there, $old and $attr; declare one"))
+        mod.__tw_attrs__[k] = attr
+    end
     mod.__tw_finished__[] && (_fix_needed!(mod, f, pos, nargs); _fix_keeps!(mod, f))
     return nothing
 end
@@ -803,6 +844,7 @@ there, as a constant, so that an entry folds for a known type. Redefined only wh
 function _fix_needed!(mod::Module, @nospecialize(f), pos::Int, nargs::Int)
     P = EntryPos{typeof(f),pos,nargs}
     _fix_crossing!(mod, f, pos, nargs)
+    _fix_attribute!(mod, f, pos, nargs)
     L = Tuple{traits_at(f, pos, nargs)...}
     m = Base._which(Tuple{typeof(needed),P}; raise = false)
     if m !== nothing && Base.unwrap_unionall(m.method.sig).parameters[2] === P
@@ -830,6 +872,7 @@ function _finish_module(mod::Module)
         mod.__tw_finished__[] = true
     end
     _refuse_overrides()
+    _warn_hidden_attributes(mod)
     isdefined(mod, :__tw_entries__) || return nothing
     # this module's functions, and other modules' functions it gave workers to
     ks = Any[k for k in keys(mod.__tw_entries__) if k[1] === mod]

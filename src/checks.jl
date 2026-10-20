@@ -130,6 +130,8 @@ function _worker_problems(@nospecialize(sig), seen, out, root::Bool)
             end
             # keeping a trait object where a Dynamic is declared (note "Dynamic values")
             _keeps_dynamic(f, ats, ex, src, sptypes) && continue
+            # the conversions (traits reference §6.6), and the test of a trait object's attribute
+            (f === compiled_for || f === with_dynamic || f === is_dynamic) && continue
             # a result like the input, which only the entry inverts
             (f === like || f === withfields || (f isa Type && f <: LikeResult) ||
              (f === Core.kwcall && length(ats) >= 3 && _CC.widenconst(ats[3]) === typeof(withfields))) && continue
@@ -149,6 +151,12 @@ function _worker_problems(@nospecialize(sig), seen, out, root::Bool)
                        f === Core._apply_iterate ? "splatted into a call" :
                        "passed to the builtin `$fname`"
                 push!(out, "$line: $what")
+                continue
+            end
+            # an operation called on a trait object: its other arguments are checked against the declaration
+            # at the call, where a trait object is accepted only for an argument declared `Dynamic{Y}`,
+            # converted to one (the seams, lowering §13)
+            if length(ats) >= 2 && _istobj(ats[2]) && (lb2 = _tobj_lb(ats[2]); lb2 !== nothing && _is_op(f, lb2))
                 continue
             end
             csig = Tuple{ats...}
@@ -217,6 +225,7 @@ objects' positions are declared `Dynamic`. The conversion checks the trait.
 function _keeps_dynamic(@nospecialize(f), ats::Vector{Any}, ex::Expr, src, sptypes)
     isdyn(@nospecialize(T)) = T isa Type && T !== Union{} && T <: Dynamic
     f isa Type && isdyn(f) && return true
+    f === with_dynamic && return true                     # a `Dynamic` trait object holds the user's object
     if f === Base.convert && length(ats) == 3
         A = ats[2]
         return A isa DataType && A <: Type && isdyn(A.parameters[1])

@@ -112,7 +112,7 @@ end
 function _hascallable(@nospecialize(T))
     T isa Union && return any(_hascallable, Base.uniontypes(T))
     T = Base.unwrap_unionall(T)
-    return T isa DataType && (T <: CObj || T <: CMulti || T <: Erased || T <: CallAs)
+    return T isa DataType && (T <: CObj || T <: CMulti || T <: Erased || T <: CompiledFor || T <: WithDynamic)
 end
 
 "Methods checked at their definition: their workers need no check per signature."

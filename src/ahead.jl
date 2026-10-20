@@ -142,8 +142,9 @@ end
                 # type reaches it by one dispatch, as plain Julia's code for a type
                 n += _ahead_entry!(mod, T, f, pos, nargs)
             end
-            # an entry not served by the table: the entry for `T` itself
-            if !tabled
+            # an entry not served by the table: the entry for `T` itself. Not since `Compiled` and
+            # `Dynamic`: every entry is `@nospecialize` at its trait positions (lowering §9.4)
+            if !tabled && _TABLE_ON_PATH
                 for m in methods(f)
                     _is_entry(m) || continue
                     ps = Base.unwrap_unionall(m.sig).parameters
