@@ -402,8 +402,11 @@ function _dyn_op_family_(src, sptypes, @nospecialize(a))
     g === Core.getfield || return nothing
     fld = st.args[3]
     fld isa QuoteNode && (fld = fld.value)
-    (fld === :t || fld === 1) || return nothing
     D = _argT(src, sptypes, st.args[2])
+    # the object a view at the erased key holds (a `Dynamic` trait object, lowering §13)
+    (fld === :o || fld === 2) && D isa DataType && D <: View && D.parameters[2] === ErasedWit &&
+        return _family(D.parameters[1])
+    (fld === :t || fld === 1) || return nothing
     (D isa DataType && D <: Dynamic && length(D.parameters) == 1) || return nothing
     return _family(D.parameters[1])
 end

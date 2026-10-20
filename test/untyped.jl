@@ -1,6 +1,6 @@
-# Calls from code that does not know the argument's type (untyped.jl, plan step 3 (c)): the entry
-# compiled once at `Any` finds the implementation's builder in its position's table and makes one
-# dynamic call to its method specialized on the builder, compiled once per key, not per type.
+# Calls from code that does not know the argument's type: the value is `Dynamic` (traits reference
+# §6.6), and the entry compiled once at `Any` calls the worker at the erased key, compiled once for
+# every type (lowering §9.2). (The table of declared implementations, untyped.jl, is off the path.)
 # Runs inside runtests.jl, or alone.
 using Test, TraitWorld
 isdefined(Main, :toplevel) || (toplevel(ex) = Core.eval(Main, ex isa Expr && ex.head === :block ? Expr(:toplevel, ex.args...) : ex))
@@ -33,10 +33,12 @@ toplevel(quote
     @implement UTab.Own OV
 end)
 
-"The specializations of the entry methods specialized on builders (the table path), by method."
-companions(f) = [mi for (g, n, tag, tpos) in UTab.__tw_untyped__ if g === f for m in methods(tag) for mi in Base.specializations(m) if mi isa Core.MethodInstance]
+"The specializations of `f`'s workers at the erased key (a `Dynamic` trait object)."
+erased_workers(f) = [mi for m in methods(f) if TraitWorld._isworker(m) for mi in Base.specializations(m)
+                     if mi isa Core.MethodInstance && mi.specTypes isa DataType && any(T -> T isa DataType && T <: TObj && TraitWorld._is_erased(T.parameters[2]),
+                                                          mi.specTypes.parameters[2:end])]
 
-@testset "untyped calls: the table of declared implementations" begin
+@testset "untyped calls: Dynamic, the worker at the erased key" begin
     xs = Any[UA("a", [1.0, 2.0]), UB(1, [3.0, 4.0]), UC(0, [5.0, 6.0], 9)]
     typed = [UTab.sfirst(xs[1]::UA), UTab.sfirst(xs[2]::UB), UTab.sfirst(xs[3]::UC)]
     # a loop, not a comprehension: `collect` infers its function at the first element's type
@@ -44,8 +46,8 @@ companions(f) = [mi for (g, n, tag, tpos) in UTab.__tw_untyped__ if g === f for 
     @test untyped(xs) == typed == [1.0, 3.0, 5.0]
     @test [UTab.ssum(x, 2) for x in xs] == [6.0, 14.0, 22.0]
     @test [UTab.scaled(x, 2.0) for x in xs] == [[2.0, 4.0], [6.0, 8.0], [10.0, 12.0]]
-    # three user types of one key: the specialized method is specialized once, on the builder
-    @test count(mi -> isconcretetype(mi.specTypes.parameters[2]), companions(UTab.sfirst)) == 1
+    # three user types: the worker is compiled once, at the erased key
+    @test length(erased_workers(UTab.sfirst)) == 1
     # a mutable object's current value is read
     xs[2].data = [30.0]
     @test UTab.sfirst(xs[2]) == 30.0
@@ -57,10 +59,10 @@ companions(f) = [mi for (g, n, tag, tpos) in UTab.__tw_untyped__ if g === f for 
         @implement UTab.Series UD
     end)
     @test Base.invokelatest(untyped, Any[Main.UD([7.0])]) == [7.0]
-    # reached only by untyped calls: no entry for the type, and the same specialized method
+    # reached only by untyped calls: no entry for the type, and the same worker
     entry = only(m for m in methods(UTab.sfirst) if TraitWorld._is_entry(m))
     @test !any(mi -> mi isa Core.MethodInstance && mi.specTypes.parameters[2] === Main.UD, collect(Base.specializations(entry)))
-    @test count(mi -> isconcretetype(mi.specTypes.parameters[2]), companions(UTab.sfirst)) == 1
+    @test length(erased_workers(UTab.sfirst)) == 1
     @test_throws MethodError untyped(Any[42])
 end
 

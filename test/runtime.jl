@@ -63,10 +63,10 @@ toplevel(quote
     @implement RT.Series2 PairsA
 end)
 
-"Bytes allocated by `f(x)` after a first call, measured inside a function."
-alloc1(f, x) = (f(x); @allocated f(x))
-"The trait object an entry builds for `x` at `f`'s first argument."
-tobj(f, x, nargs) = TraitWorld.enter(TraitWorld.EntryPos{typeof(f),1,nargs}(), x)
+"Bytes allocated by `f(x)` after a first call, measured in typed code (`@allocated f(x)` dispatches at run time, where the value is `Dynamic`)."
+alloc1(f::F, x::X) where {F,X} = (f(x); b0 = Base.gc_bytes(); f(x); Base.gc_bytes() - b0)
+"The trait object an entry builds for `x` at `f`'s first argument, for a caller that knows its type (`Compiled`)."
+tobj(f, x, nargs) = TraitWorld.enter(TraitWorld.EntryPos{typeof(f),1,nargs}(), x, Val(true))
 
 @testset "runtime as methods: conformances, entries, keys" begin
     v = [[1.0, 2.0], [3.0, 4.0]]

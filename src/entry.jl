@@ -871,6 +871,16 @@ A result like `t` with declared fields replaced; also on a result of `like`.
         u = us[i]
         v = getfield(res.t, :views)[1]
         X = _family(typeof(v).parameters[1])
+        if typeof(v).parameters[2] === ErasedWit
+            # a `Dynamic` trait object (lowering §11): the inverse needs the view at the held object's own
+            # key; a new receiver made by a constructor operation came back as a `Dynamic` of it
+            o = getfield(v, :o)
+            kt = o isa TObj ? o : _assemble(TraitList{Tuple{X}}(), o)
+            kt isa TObj && !(o isa TObj) && !ismutable(o) && (kt = _with_object(kt, o))
+            v = viewof(kt, X)
+            x = res.x isa Dynamic ? _dyn_object(res.x) : res.x
+            res = LikeResult(kt, x, res.f)
+        end
         if u isa Dynamic
             # a dynamic value in, a dynamic value of the same trait out
             o = _viewobject(v)

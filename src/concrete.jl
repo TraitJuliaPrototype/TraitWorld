@@ -132,6 +132,23 @@ end
 
 "Inlined code of the trait machinery itself (operations, views, checked calls), which is not the module's code."
 _machinery(frames) = any(n -> _frame_module(n) === TraitWorld, frames)
+"""
+Whether an abstract value is the object a `Dynamic` value or a `Dynamic` trait object holds (field `t`
+of a `Dynamic`, field `o` of a view at the erased key): abstract by declaration, as the operations on it
+are (traits reference §13), not a fault.
+"""
+function _declared_dynamic(src, sptypes, @nospecialize(a))
+    a isa Core.SSAValue || return false
+    d = src.code[a.id]
+    Meta.isexpr(d, :call) && length(d.args) >= 3 || return false
+    cl = _callee(src, sptypes, d.args[1])
+    (cl[1] === :const && cl[2] === Core.getfield) || return false
+    OT = _argT(src, sptypes, d.args[2])
+    fld = d.args[3] isa QuoteNode ? d.args[3].value : d.args[3]
+    OT isa DataType || return false
+    OT <: Dynamic && fld === :t && return true
+    return OT <: View && OT.parameters[2] === ErasedWit && fld === :o
+end
 
 const _OWN_SRC = dirname(@__FILE__)
 
@@ -463,6 +480,7 @@ function concrete_findings(@nospecialize(sig))
             end
             for a in uses
                 _isabstract(_argT(src, sptypes, a)) || continue
+                _declared_dynamic(src, sptypes, a) && continue
                 origin = String[]
                 _trace!(origin, tr, src, sptypes, mi, a, 12, Set{Any}())
                 push!(findings, AbstractFinding(_userline(src, mi, i), usestr, loops[i], origin))

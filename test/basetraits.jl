@@ -115,7 +115,9 @@ end
     C = Main.BTCells
     v = Any[i for i in 1:200]
     d = DynamicItems{C.Cell}(v)
-    allocs(f, x) = @allocated f(x)
+    # measured in typed code: Julia's `@allocated f(x)` calls through `Base.allocated(f, x)`, a dispatch
+    # at run time, where the value is `Dynamic` (traits reference §6.6)
+    allocs(f::F, x::X) where {F,X} = (b0 = Base.gc_bytes(); f(x); Base.gc_bytes() - b0)
     allocs(C.countnums, d); allocs(C.countnums, d)
     @test allocs(C.countnums, d) < 200                           # no allocation per item read (200 items)
     F = TraitWorld._family(C.Cell)
@@ -189,7 +191,9 @@ end)
     # once decided, a crossing container is not assembled as it is (under `all`, a Dict{String,Any}
     # fails the Iterable family's check, and its slow path cost 2.7 ms per call)
     big = Dict{String, Any}(string(i) => i for i in 1:1000)
-    allocs(f, x) = @allocated f(x)
+    # measured in typed code: Julia's `@allocated f(x)` calls through `Base.allocated(f, x)`, a dispatch
+    # at run time, where the value is `Dynamic` (traits reference §6.6)
+    allocs(f::F, x::X) where {F,X} = (b0 = Base.gc_bytes(); f(x); Base.gc_bytes() - b0)
     allocs(C.valsc, big); allocs(C.valsc, big)
     @test allocs(C.valsc, big) < 1000
     # the explicit view still works, and costs the same path

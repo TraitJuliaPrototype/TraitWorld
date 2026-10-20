@@ -7,9 +7,9 @@ isdefined(Main, :toplevel) || (toplevel(ex) = Core.eval(Main, ex isa Expr && ex.
 toplevel(quote
     @trait_module module AttrG
     using TraitWorld
-    export Shape, area, kind, kind_d, kind_c, pass, with_dyn, comp_of, total, kwkind, vkind,
+    export Shape, area, kind, kind_d, kind_c, pass, with_dyn, comp_of, atotal, kwkind, vkind,
            Visitor, visit, doit, PF, getd, setd!, SV, first_of, first_dyn, Model, mval, mkind, MyModel,
-           cm, cm_c, cm_kind, cmc_kind, Box
+           cm, cm_c, cm_kind, cmc_kind, AFBox
     public kind_hidden
     @trait Shape begin
         area(s::Shape)::Float64
@@ -20,7 +20,7 @@ toplevel(quote
     pass(s::Shape) = (kind(s), area(s))                 # a value keeps its attribute from worker to worker
     with_dyn(s::Shape) = kind(with_dynamic(s))
     comp_of(s::Dynamic{Shape}) = kind(compiled_for(s))
-    total(s::Shape) = 2 * area(s)
+    atotal(s::Shape) = 2 * area(s)
     kwkind(t::Shape; s::Shape) = kind(s)   # (with no bounded positional argument, the entry and the worker collide: a known gap)
     vkind(ss::Shape...) = kind(ss[1])
 
@@ -55,7 +55,7 @@ toplevel(quote
     cm_kind(f::Callable{Tuple{Float64},Float64}) = TraitWorld.is_dynamic(f) ? :dynamic : :compiled
     cmc_kind(f::Compiled{Callable{Tuple{Float64},Float64}}) = TraitWorld.is_dynamic(f) ? :dynamic : :compiled
 
-    struct Box
+    struct AFBox
         f::Dynamic{Callable{Tuple{Float64},Float64}}
     end
     kind_hidden(s::Dynamic{Shape}) = TraitWorld.is_dynamic(s) ? :dynamic : :compiled
@@ -117,7 +117,7 @@ end)
         @test a_pass_typed(c) == (:compiled, Float64(pi))
         @test a_pass_untyped(v) == (:dynamic, Float64(pi))
         @test a_dyn_typed(Dynamic{AttrG.Shape}(c)) === :dynamic         # a Dynamic is never opened at a bound
-        @test total(ASquare(2.0)) == 8.0 && a_untyped(Any[ASquare(2.0)]) === :dynamic
+        @test atotal(ASquare(2.0)) == 8.0 && a_untyped(Any[ASquare(2.0)]) === :dynamic
     end
     @testset "conversions always win (rule 5)" begin
         @test a_cf_untyped(v) === :compiled
@@ -176,7 +176,7 @@ end)
         @test a_cmc_closure(2.0) === :compiled
         @test a_cmc_wd(2.0) === :dynamic
         @test cm(x -> 3x, 2.0) == 6.0 && cm_c(x -> 3x, 2.0) == 6.0
-        b = Box(Dynamic{Callable{Tuple{Float64},Float64}}(x -> x + 1))
+        b = AFBox(Dynamic{Callable{Tuple{Float64},Float64}}(x -> x + 1))
         @test b.f(1.0) == 2.0
         @test cm(b.f, 1.0) == 2.0 && cm_kind(b.f) === :dynamic
         @test_throws MethodError b.f(1)                               # the signature is checked

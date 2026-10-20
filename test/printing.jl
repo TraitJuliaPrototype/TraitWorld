@@ -38,17 +38,20 @@ end
 
 HAS_PRINTERS && @testset "Printing by bound and representation" begin
     P = Main.PrintLib
-    bt = allframes(() -> P.boom([1.0, 2.0]))
+    # the function by a constant path: through a local variable (`P.boom`) the call is dispatched at run
+    # time, and the value is `Dynamic` there (traits reference §6.6)
+    bt = allframes(() -> Main.PrintLib.boom([1.0, 2.0]))
     @test occursin("PVec{Float64} at Vector{Float64}", bt)
+    @test occursin("PVec{Float64} at Dynamic", allframes(() -> P.boom([1.0, 2.0])))
     @test !occursin("TraitWorld.View{", bt) && !occursin("Impl{", bt)
-    bt2 = allframes(() -> P.apply(x -> 2x, [1.0]))
+    bt2 = allframes(() -> Main.PrintLib.apply(x -> 2x, [1.0]))
     @test occursin("Callable{Tuple{Float64}, Float64} at ", bt2)
     T = TraitWorld.TObj{TraitWorld._encode_traits(Any[P.PVec{Float64, Vector{Float64}}]),
                         Tuple{TraitWorld.View{P.PVec{Float64, Vector{Float64}}, TraitWorld.Impl{()}, Vector{Float64}, 0, Tuple{Vector{Float64}}}}}
     @test sprint(show, T) == "$(sprint(show, P.PVec)){Float64} at Vector{Float64}"
     @test sprint(show, TraitWorld.TObj) == "TraitWorld.TObj" || sprint(show, TraitWorld.TObj) == "TObj"   # not concrete: as Julia prints it
     E = TraitWorld.CObj{Tuple{Float64}, Float64, TraitWorld.Erased{Tuple{Float64}, Float64}}
-    @test sprint(show, E) == "Callable{Tuple{Float64}, Float64} at DynamicCall"
+    @test sprint(show, E) == "Callable{Tuple{Float64}, Float64} at Dynamic"
 end
 
 @testset "conforms(T, X): membership as a function" begin

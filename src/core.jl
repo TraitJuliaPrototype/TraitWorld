@@ -673,12 +673,12 @@ Base.@constprop :aggressive @inline Base.getproperty(d::Dynamic{X}, s::Symbol) w
 Base.@constprop :aggressive @inline Base.setproperty!(d::Dynamic{X}, s::Symbol, x) where {X} = _dyn_setprop!(d, Val(s), x)
 @inline function _dyn_getprop(d::Dynamic{X}, ::Val{f}) where {X,f}
     F = _family_of(X)
-    RT = field_type(F, Val(f), _erased_key_of(X))
+    RT = _erased_ft(field_type(F, Val(f), _erased_key_of(X)))
     return CC.split_call(F, RT, _DynField{F,f}(), getfield(d, :t))::RT
 end
 @inline function _dyn_setprop!(d::Dynamic{X}, ::Val{f}, x) where {X,f}
     F = _family_of(X)
-    y = x::field_type(F, Val(f), _erased_key_of(X))
+    y = x::_erased_ft(field_type(F, Val(f), _erased_key_of(X)))
     CC.split_call(F, Nothing, _DynFieldSet{F,f}(), getfield(d, :t), y)
     return y
 end
@@ -709,7 +709,7 @@ end
 @inline function fieldset!(::Type{X}, ::Val{f}, t::TObj, x) where {X,f}
     v = viewof(t, X)
     K = _reptype(typeof(v))
-    T = _fieldkeytype(X, Val(f), K)
+    T = _erased_ft(_fieldkeytype(X, Val(f), K))
     y = x::T
     if getfield(v, :w) isa ErasedWit                          # at the erased key: split over the held object
         CC.split_call(_family_of(X), Nothing, _DynFieldSet{X,f}(), getfield(v, :o), y)

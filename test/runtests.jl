@@ -42,7 +42,7 @@ describe(m::AbstractMatrix) = "a matrix"
 describe(t::ColTable) = "a table with $(ncols(t)) columns"
 describe(x) = "something else"
 colmap(f::Callable{Tuple{Float64},Float64}, t::ColTable, i::Int) = map(f, col(t, i))
-colsum(f::Callable{Tuple{Float64},Float64,CompiledCall}, t::ColTable, i::Int) = sum(f, col(t, i))
+colsum(f::Compiled{Callable{Tuple{Float64},Float64}}, t::ColTable, i::Int) = sum(f, col(t, i))
 end
 using .Columns
 
@@ -198,12 +198,12 @@ end
 
 @testset "Callable" begin
     @test colmap(x -> 2x, [[1.0, 2.0]], 1) == [2.0, 4.0]          # erased
-    @test colsum(abs2, [[1.0, 2.0]], 1) == 5.0                     # Base's function: always specialized
-    @test colsum(x -> x + 1, [[1.0, 2.0]], 1) == 5.0               # the bound's default: CompiledCall
+    @test colsum(abs2, [[1.0, 2.0]], 1) == 5.0                     # Base's function: not affected by Callable's @dynamic
+    @test colsum(x -> x + 1, [[1.0, 2.0]], 1) == 5.0               # the bound's attribute: Compiled
     @test_throws TypeError colmap(x -> 1, [[1.0, 2.0]], 1)       # a result of another type: an error, not widening
-    e = TraitWorld.enter_callable(Tuple{Float64}, Float64, nothing, x -> x)
+    e = TraitWorld.enter_callable(Tuple{Float64}, Float64, nothing, x -> x, Val(true))
     @test e.f isa TraitWorld.Erased
-    @test TraitWorld.enter_callable(Tuple{Float64}, Float64, nothing, sin).f === sin
+    @test TraitWorld.enter_callable(Tuple{Float64}, Float64, nothing, sin, Val(true)).f === sin
 end
 
 @testset "closures capturing a trait object are checked" begin
@@ -576,8 +576,8 @@ end
     end) === nothing
     @test Main.TwoPos.f([[1.0]], 1) == 1 && Main.TwoPos.f(1, [[1.0]]) == 2
     # 12. a Base wrapper around a function from above is from above
-    @test TraitWorld.enter_callable(Tuple{Float64}, Float64, nothing, Base.Fix1(*, 2.0)).f isa Base.Fix1
-    @test TraitWorld.enter_callable(Tuple{Float64}, Float64, nothing, Base.Fix1(userf2, 2.0)).f isa TraitWorld.Erased
+    @test TraitWorld.enter_callable(Tuple{Float64}, Float64, nothing, Base.Fix1(*, 2.0), Val(true)).f isa Base.Fix1
+    @test TraitWorld.enter_callable(Tuple{Float64}, Float64, nothing, Base.Fix1(userf2, 2.0), Val(true)).f isa TraitWorld.Erased
 end
 
 @testset "review: a pirate behind a catch; a closed world in a session" begin
@@ -644,28 +644,28 @@ using .KW
     @test_throws MethodError ncols_sum(m, 42)
 end
 
-# --- poc3 M2: Callable modes ---------------------------------------------------------------------
+# --- poc3 M2: Callable, Compiled and Dynamic ---------------------------------------------------------------------
 @trait_module module CM
 using TraitWorld, ..Columns
 export cmap, csum, cboth
 cmap(f::Callable{Tuple{Float64},Float64}, t::ColTable, i::Int) = map(f, col(t, i))                   # default: dynamic
-csum(f::Callable{Tuple{Float64},Float64,CompiledCall}, t::ColTable, i::Int) = sum(f, col(t, i))      # default: compiled
+csum(f::Compiled{Callable{Tuple{Float64},Float64}}, t::ColTable, i::Int) = sum(f, col(t, i))        # attribute: Compiled
 cboth(f::(Callable{Tuple{Float64},Float64}, Callable{Tuple{Int},Int}), x::Float64, n::Int) = (f(x), f(n))
 end
 using .CM
 userdbl(x) = 2x
-@testset "poc3 M2: Callable modes" begin
+@testset "poc3 M2: Callable, Compiled and Dynamic" begin
     v = [[1.0, 2.0]]
     @test cmap(userdbl, v, 1) == [2.0, 4.0] && csum(userdbl, v, 1) == 6.0
-    @test TraitWorld.enter_callable(Tuple{Float64}, Float64, nothing, userdbl).f isa TraitWorld.Erased
-    @test TraitWorld.enter_callable(Tuple{Float64}, Float64, CompiledCall, userdbl).f === userdbl
-    @test TraitWorld.enter_callable(Tuple{Float64}, Float64, DynamicCall, compiled_call(userdbl)).f === userdbl   # the value wins
-    @test TraitWorld.enter_callable(Tuple{Float64}, Float64, CompiledCall, dynamic_call(userdbl)).f isa TraitWorld.Erased
-    @test TraitWorld.enter_callable(Tuple{Float64}, Float64, nothing, Callable{Tuple{Float64},Float64,DynamicCall}(userdbl)).f isa TraitWorld.Erased
-    @test_throws TraitBoundError TraitWorld.enter_callable(Tuple{Float64}, Float64, nothing, Callable{Tuple{Int},Int,DynamicCall}(userdbl))
-    @test cmap(compiled_call(userdbl), v, 1) == [2.0, 4.0] && csum(dynamic_call(userdbl), v, 1) == 6.0
-    @test csum(abs2, v, 1) == 5.0                                  # Base's function: a compiled call whatever the default
-    @test cboth(dynamic_call(x -> x + one(x)), 1.5, 2) == (2.5, 3)
+    @test TraitWorld.enter_callable(Tuple{Float64}, Float64, nothing, userdbl, Val(true)).f isa TraitWorld.Erased   # Callable's @dynamic
+    @test TraitWorld.enter_callable(Tuple{Float64}, Float64, :compiled, userdbl, Val(true)).f === userdbl
+    @test TraitWorld.enter_callable(Tuple{Float64}, Float64, :dynamic, compiled_for(userdbl), Val(true)).f === userdbl   # the conversion wins
+    @test TraitWorld.enter_callable(Tuple{Float64}, Float64, :compiled, with_dynamic(userdbl), Val(true)).f isa TraitWorld.Erased
+    @test TraitWorld.enter_callable(Tuple{Float64}, Float64, :compiled, Dynamic{Callable{Tuple{Float64},Float64}}(userdbl), Val(true)).f isa TraitWorld.Erased   # carried
+    @test_throws TraitBoundError TraitWorld.enter_callable(Tuple{Float64}, Float64, nothing, Dynamic{Callable{Tuple{Int},Int}}(userdbl), Val(true))
+    @test cmap(compiled_for(userdbl), v, 1) == [2.0, 4.0] && csum(with_dynamic(userdbl), v, 1) == 6.0
+    @test csum(abs2, v, 1) == 5.0 && cmap(abs2, v, 1) == [1.0, 4.0]   # Base's function: not affected by Callable's @dynamic
+    @test cboth(with_dynamic(x -> x + one(x)), 1.5, 2) == (2.5, 3)
     @test_throws LoadError Core.eval(Main, :(@trait_module module OldSpec
         using TraitWorld, ..Columns
         f(@specialize(g::Callable{Tuple{Float64},Float64}), t::ColTable) = g(1.0)
@@ -836,3 +836,4 @@ include("verify_dynamic.jl")
 include("certificate.jl")
 include("redeclare.jl")
 include("basetraits.jl")
+include("attributes.jl")

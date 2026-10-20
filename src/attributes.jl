@@ -92,30 +92,35 @@ over the candidates, `trait.jl`), its result asserted to the declared type at th
 carries the trait's parameters. An operation whose result is `Self` gives a `Dynamic` of the new value.
 """
 @inline function _erased_op(::Type{X}, f::F, ::Type{RT}, v, args...) where {X,F,RT}
-    d = Dynamic{X}(Val(:checked), getfield(v, :o))
+    # an invoke at the constructor's own signature: a fact, so it is inlined and the call stays typed
+    # (a call with the `Any`-typed object would be a run-time site of code compiled by facts)
+    d = invoke(Dynamic{X}, Tuple{Val{:checked},Any}, Val(:checked), getfield(v, :o))::Dynamic{X}
     RT === ErasedSelf && return f(d, args...)
     return f(d, args...)::RT
 end
 
 "A declared field read on a held object of unknown type: the field on its trait object."
 struct _DynField{X,f} end
-@inline (::_DynField{X,f})(o) where {X,f} = fieldget(X, Val(f), _Open{X}()(o))
+@inline (::_DynField{X,f})(o) where {X,f} = getproperty(_Open{X}()(o), f)
 "A declared field written on a held object of unknown type."
 struct _DynFieldSet{X,f} end
-@inline (::_DynFieldSet{X,f})(o, y) where {X,f} = (fieldset!(X, Val(f), _Open{X}()(o), y); nothing)
+@inline (::_DynFieldSet{X,f})(o, y) where {X,f} = (setproperty!(_Open{X}()(o), f, y); nothing)   # a `@const` field raises
+"A declared field's type at the erased key: `Any` where it is declared with the receiver type (`Self`), unknown there."
+_erased_ft(::Type{T}) where {T} = T === ErasedSelf ? Any : T
 @inline _fget(::Type{X}, ::Val{f}, w::ErasedWit, v, ::Type{K}) where {X,f,K} =
-    CC.split_call(_family_of(X), field_type(X, Val(f), K), _DynField{X,f}(), getfield(v, :o))::field_type(X, Val(f), K)
+    CC.split_call(_family_of(X), _erased_ft(field_type(X, Val(f), K)), _DynField{X,f}(), getfield(v, :o))::_erased_ft(field_type(X, Val(f), K))
 
 """
 The seams: an argument of an operation or of a `Callable` declared `Dynamic{Y}` that receives a
 trait object gets a `Dynamic{Y}` of it (lowering §13). Every other argument passes as it is.
 """
 @generated function _seams(::Type{AT}, args::Tuple) where {AT}
-    AT isa DataType && AT <: Tuple || return :args
+    asis = :(Base.@_inline_meta; args)          # inlined in every case: the arguments never go through a tuple
+    AT isa DataType && AT <: Tuple || return asis
     ds = (AT::DataType).parameters
     as = (args::DataType).parameters
-    length(ds) == length(as) || return :args
-    any(i -> as[i] <: TObj && ds[i] isa DataType && ds[i] <: Dynamic, 1:length(as)) || return :args
+    length(ds) == length(as) || return asis
+    any(i -> as[i] <: TObj && ds[i] isa DataType && ds[i] <: Dynamic, 1:length(as)) || return asis
     return quote
         Base.@_inline_meta          # inlined, so the caller's arguments are never stored in a tuple
         ($([as[i] <: TObj && ds[i] isa DataType && ds[i] <: Dynamic ? :($(ds[i])(args[$i])) : :(args[$i]) for i in 1:length(as)]...),)
