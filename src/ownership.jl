@@ -129,6 +129,24 @@ function _owner(m::Module)
     return p === nothing ? r : owner(p)
 end
 
+"""
+    @joint_owners P1 P2 …
+
+At the top level of a package's module: the packages named (by name) own its functions and types
+with it (traits §10.1, joint owners). Only the owner declares its joint owners.
+"""
+macro joint_owners(names...)
+    all(n -> n isa Symbol, names) && !isempty(names) ||
+        error("@joint_owners: name the packages, as in `@joint_owners DiffEqBase OrdinaryDiffEqCore`")
+    owner(__module__) === __module__ ||
+        error("@joint_owners: only a package's own module declares its joint owners, not $(__module__)")
+    return esc(:(const __tw_joint_owners__ = $(Tuple(names))))
+end
+"The joint owners the owner `o` declares, by name."
+_joint_names(@nospecialize(o)) = o isa Module && isdefined(o, :__tw_joint_owners__) ? getfield(o, :__tw_joint_owners__)::Tuple : ()
+"Whether `definer` owns what the owner `o` owns: it is `o`, or a joint owner `o` declares."
+owns(@nospecialize(definer), @nospecialize(o)) = definer === o || (definer isa Module && nameof(definer) in _joint_names(o))
+
 function _owners!(acc::Base.IdSet{Any}, @nospecialize(T))
     if T isa Union
         _owners!(acc, T.a); _owners!(acc, T.b)
@@ -213,7 +231,7 @@ applies to another package's subtype (note "Ownership": stakeholders include sup
 function owned_method(m::Method)
     definer = owner(m.module)
     for s in _sig_alternatives(m.sig)
-        definer in sig_owners(s) || return false
+        any(o -> owns(definer, o), sig_owners(s)) || return false
     end
     return true
 end

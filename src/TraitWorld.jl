@@ -12,6 +12,7 @@ module TraitWorld
 using PrecompileTools: PrecompileTools
 using Serialization: Serialization
 
+export @joint_owners
 export Trait, Callable, TObj, Dynamic, Compiled, Kept, compiled_for, with_dynamic,
        @trait, @implement, @trait_module, @workload,
        TraitBoundError, TraitUseError, ImplementError, OwnershipError, verify_main, isclosed,

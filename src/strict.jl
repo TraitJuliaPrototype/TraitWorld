@@ -94,7 +94,7 @@ end
 "Whether `definer` is a stakeholder of the concrete signature `s` (or a delegate of one)."
 function _stakeholder(@nospecialize(definer), @nospecialize(s))
     os = sig_owners(s)
-    definer in os && return true
+    any(o -> owns(definer, o), os) && return true
     for o in os
         ds = get(DELEGATES, o, nothing)
         ds !== nothing && definer in ds && return true
@@ -348,7 +348,7 @@ function _strict_owned(m::Method)
     body = Base.unwrap_unionall(m.sig)
     if body isa DataType && !isempty(body.parameters)
         ft = body.parameters[1]
-        ft isa DataType && owner(ft.name.module) === d && return true
+        ft isa DataType && owns(d, owner(ft.name.module)) && return true
     end
     return owned_method(m)
 end

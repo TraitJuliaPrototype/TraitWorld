@@ -485,8 +485,7 @@ end
 # --- checks run when an implementation or projection is defined (rule 3, rule 2) -------
 
 function _owns(definer, @nospecialize(T))
-    o = sig_owners(T)
-    return definer in o
+    return any(o -> owns(definer, o), sig_owners(T))
 end
 
 """
@@ -520,7 +519,7 @@ _check_implementation(mod::Module, @nospecialize(X), @nospecialize(R), given::Tu
     _check_delegate(mod, X, R)
     definer = owner(mod)
     tmod = owner(parentmodule(X))
-    (definer === tmod || (R isa Type && _owns(definer, R))) ||
+    (owns(definer, tmod) || (R isa Type && _owns(definer, R))) ||
         throw(ImplementError("$(mod) may not implement $X for $R: it owns neither the trait nor the representation (rule 3)"))
     # rule 3 for the methods themselves: an operation that is someone else's function (Base.size)
     # may be implemented for R only by an owner of the function or of R, never by the trait's owner alone
@@ -549,7 +548,7 @@ _check_projection(mod::Module, @nospecialize(X), @nospecialize(T)) = _refusing(_
     _check_delegate(mod, X, T)
     p = _proj(X, T)::ProjRec
     definer = owner(mod)
-    (definer === owner(parentmodule(X)) || _owns(definer, T)) ||
+    (owns(definer, owner(parentmodule(X))) || _owns(definer, T)) ||
         throw(ImplementError("$(mod) may not declare that $T conforms to $X: it owns neither (rule 3)"))
     R = p.R
     R isa Type || throw(ImplementError("$T forwards $X to something that is not a type: $R"))
@@ -947,9 +946,9 @@ function _op_method(mod::Module, @nospecialize(X), d, Rex; precheck::Bool = true
     end
     # rule 3 before anything is defined: someone else's function (Base.size) may get a method
     # only for a representation the defining package owns
-    if precheck && owner(parentmodule(f)) !== owner(mod)
+    if precheck && !owns(owner(mod), owner(parentmodule(f)))
         Rv = _tryeval(mod, Rex)
-        if !(Rv isa Type && owner(mod) in sig_owners(Rv))
+        if !(Rv isa Type && _owns(owner(mod), Rv))
             throw(ImplementError(
                 "$(mod) may not implement `$op` of $X for $(Rex): `$(nameof(f))` belongs to $(parentmodule(f)), and $(mod) does not own " *
                 "$(Rex), so the method would change `$(nameof(f))` for everyone (rule 3). Declare the existing methods instead " *

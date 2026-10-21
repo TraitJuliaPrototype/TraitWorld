@@ -827,7 +827,7 @@ function _rewrite_fdef(mod::Module, ex)
         end
         if key[1] !== mod
             # an entry is a method at Any: only the function's owner may add one (rule 3)
-            owner(key[1]) === owner(mod) || error("@trait_module: `$fname` belongs to $(key[1]); $(mod) may add trait-bounded " *
+            owns(owner(mod), owner(key[1])) || error("@trait_module: `$fname` belongs to $(key[1]); $(mod) may add trait-bounded " *
                                                   "methods to it only where it already has an entry of that shape (rule 3)")
         end
         nargs = nva == 0 ? length(args) : -1
