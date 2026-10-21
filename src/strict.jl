@@ -154,8 +154,19 @@ end
 "The first fact `(sig, caller)` of valid trait-world code at which `m` would win and `accept(sig)` holds, or `nothing`."
 function _winning_fact(m::Method, accept)
     world = Base.get_world_counter()
-    check(s, caller) = caller isa Core.CodeInstance && caller.max_world == typemax(UInt) && _trait_world_code(caller) &&
-                       _fact_sig(s) && _would_win_split(m, s, world) && accept(s)
+    seen = Base.IdSet{Any}()
+    # a fact of trait-world code at which m wins; or a call of other code at which m wins, whose invalidation
+    # reaches trait-world code through the callers' backedges, as Julia's invalidation follows them
+    function check(s, caller)
+        caller isa Core.CodeInstance && caller.max_world == typemax(UInt) || return nothing
+        if _trait_world_code(caller)
+            return _fact_sig(s) && _would_win_split(m, s, world) && accept(s) ? caller : nothing
+        end
+        caller in seen && return nothing
+        si = typeintersect(s, m.sig)                     # a call of plain code may be at an abstract signature
+        (si !== Union{} && _would_win(m, si, world) && accept(si)) || return nothing
+        return _trait_dependent(caller, seen)
+    end
     # 1. calls that dispatch to an existing method's specializations, where m would win
     ms = Base._methods_by_ftype(m.sig, nothing, -1, world, false, Ref{UInt}(typemin(UInt)), Ref{UInt}(typemax(UInt)), Ptr{Int32}(C_NULL))
     if ms isa Vector
@@ -176,7 +187,8 @@ function _winning_fact(m::Method, accept)
                     else
                         s, caller = mi.specTypes, x; i += 1
                     end
-                    check(s, caller) && return (s, caller)
+                    t = check(s, caller)
+                    t === nothing || return (s, t)
                 end
             end
         end
@@ -196,8 +208,39 @@ function _winning_fact(m::Method, accept)
             v = be[i+1]
             v isa Vector{Any} || continue
             for j in 1:2:length(v)-1
-                check(v[j], v[j+1]) && return (v[j], v[j+1])
+                t = check(v[j], v[j+1])
+                t === nothing || return (v[j], t)
             end
+        end
+    end
+    return nothing
+end
+
+"""
+The first valid trait-world CodeInstance that depends on `ci` through callers' backedges (what
+invalidating `ci` would invalidate too), or `nothing`. `seen` holds the code already walked.
+"""
+function _trait_dependent(ci::Core.CodeInstance, seen::Base.IdSet{Any})
+    stack = Any[ci]
+    while !isempty(stack)
+        c = pop!(stack)::Core.CodeInstance
+        c in seen && continue
+        push!(seen, c)
+        c.max_world == typemax(UInt) || continue
+        _trait_world_code(c) && return c
+        mi = Core.Compiler.get_ci_mi(c)
+        isdefined(mi, :backedges) || continue
+        be = mi.backedges
+        i = 1
+        while i <= length(be)
+            x = be[i]
+            if x isa Type                                  # (invoke signature, caller)
+                i + 1 <= length(be) || break
+                y = be[i+1]; i += 2
+            else
+                y = x; i += 1
+            end
+            y isa Core.CodeInstance && !(y in seen) && push!(stack, y)
         end
     end
     return nothing
