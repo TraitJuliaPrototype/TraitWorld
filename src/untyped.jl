@@ -59,8 +59,9 @@ end
 The builder of user type `T` at entry position `p` in world `w` (or `NOTRAIT`, or `_UNTABLED` for
 an implementation the table does not serve), added to the table.
 It is valid in the worlds where each needed trait's implementation for `T` is the same method: a
-declared implementation (a `conformance` method of `T`'s own) for the range of its dispatch; an
-implementation found by the slow path (generic, family) for this world only.
+declared implementation (a `conformance` method of `T`'s own) or a family's (checked as a member
+first) for the range of its dispatch; a generic implementation, found by the slow path, for this
+world only.
 """
 @machinery @noinline function _umiss(tbl::UTable, @nospecialize(p::EntryPos), T::DataType, w::UInt)
     L = _in_world(w, needed, p)
@@ -75,11 +76,13 @@ implementation found by the slow path (generic, family) for this world only.
         m = ccall(:jl_gf_invoke_lookup_worlds, Any, (Any, Any, UInt, Ptr{Csize_t}, Ptr{Csize_t}),
                   Tuple{typeof(conformance),As{X},T}, nothing, w, mn, mx)
         declared = m isa Core.MethodMatch && m.method.sig isa DataType && m.method.sig.parameters[3] === T   # a declaration for `T` itself
-        if declared
+        # a family's method: any other than TraitWorld's fallback (`conformance(::As{X}, u)`, entry.jl)
+        family = !declared && m isa Core.MethodMatch && m.method.module !== TraitWorld
+        family && _in_world(w, _check_member, X, T)    # a member that does not conform is refused here, at its first use
+        if declared || family
             lo, hi = max(lo, mn[]), min(hi, mx[])
         else
-            # a generic implementation or a family member: found and fixed by the entry's own path
-            # (`_conformance_slow`, `_conf_family_slow`, which keep what they find)
+            # a generic implementation: found and fixed by the entry's own path (`_conformance_slow`)
             tabled = false
             lo, hi = max(lo, w), min(hi, w)
         end

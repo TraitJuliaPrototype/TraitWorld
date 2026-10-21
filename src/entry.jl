@@ -925,8 +925,8 @@ function _callable_kept(::Type{C}, @nospecialize(f)) where {C<:Callable}
     if f isa CObj
         return getfield(f, :f) isa Erased ? Kept{C}(Val(:checked), _erased_at(A, S, f), false) : Kept{C}(Val(:checked), _callable_fn(f), true)
     end
-    _held_callable_compiled(f) && return Kept{C}(Val(:checked), getfield(Compiled{C}(f), :t), true)
-    return Kept{C}(Val(:checked), getfield(Dynamic{C}(f), :t), false)
+    _held_callable_compiled(f) && return Kept{C}(Val(:of), Compiled{C}(f), true)
+    return Kept{C}(Val(:of), Dynamic{C}(f), false)
 end
 (::Type{Kept{C}})(f::Kept{C}) where {C<:Callable} = f
 # between the forms at one signature, as for any trait (core.jl), stated for `Callable` too: its
@@ -934,11 +934,11 @@ end
 (::Type{Dynamic{C}})(c::Compiled{C}) where {C<:Callable} = Base.inferencebarrier(_cast_refuse)(C, :Dynamic, :Compiled)
 (::Type{Compiled{C}})(d::Dynamic{C}) where {C<:Callable} = Base.inferencebarrier(_cast_refuse)(C, :Compiled, :Dynamic)
 (::Type{Dynamic{C}})(k::Kept{C}) where {C<:Callable} = getfield(k, :compiled) ?
-    Base.inferencebarrier(_cast_refuse)(C, :Dynamic, :Compiled) : Dynamic{C}(Val(:checked), getfield(k, :t))
+    Base.inferencebarrier(_cast_refuse)(C, :Dynamic, :Compiled) : Dynamic{C}(Val(:of), k)
 (::Type{Compiled{C}})(k::Kept{C}) where {C<:Callable} = getfield(k, :compiled) ?
-    Compiled{C}(Val(:checked), getfield(k, :t)) : Base.inferencebarrier(_cast_refuse)(C, :Compiled, :Dynamic)
-(::Type{Kept{C}})(d::Dynamic{C}) where {C<:Callable} = Kept{C}(Val(:checked), getfield(d, :t), false)
-(::Type{Kept{C}})(c::Compiled{C}) where {C<:Callable} = Kept{C}(Val(:checked), getfield(c, :t), true)
+    Compiled{C}(Val(:of), k) : Base.inferencebarrier(_cast_refuse)(C, :Compiled, :Dynamic)
+(::Type{Kept{C}})(d::Dynamic{C}) where {C<:Callable} = Kept{C}(Val(:of), d, false)
+(::Type{Kept{C}})(c::Compiled{C}) where {C<:Callable} = Kept{C}(Val(:of), c, true)
 Base.convert(::Type{Kept{C}}, c::CObj) where {C<:Callable} = Kept{C}(c)
 Base.convert(::Type{Kept{C}}, c::Union{Dynamic{C},Compiled{C}}) where {C<:Callable} = Kept{C}(c)
 @inline function (d::Dynamic{Callable{A,S}})(args...) where {A,S}
@@ -1158,8 +1158,8 @@ _like_held(::Compiled{X}, n::TObj) where {X} = Compiled{X}(Val(:hold), n)
 _like_held(k::Kept{X}, n::TObj) where {X} = (Dynamic{X}(Val(:hold), n); Kept{X}(Val(:checked), n, getfield(k, :compiled)))
 "The user's object trait object `t` reads, kept with the form and attribute of held value `u`."
 _keep_as(::Dynamic{X}, t::TObj) where {X} = Dynamic{X}(Val(:keep), t)
-_keep_as(::Compiled{X}, t::TObj) where {X} = Compiled{X}(Val(:checked), getfield(Dynamic{X}(Val(:keep), t), :t))
-_keep_as(k::Kept{X}, t::TObj) where {X} = Kept{X}(Val(:checked), getfield(Dynamic{X}(Val(:keep), t), :t), getfield(k, :compiled))
+_keep_as(::Compiled{X}, t::TObj) where {X} = Compiled{X}(Val(:of), Dynamic{X}(Val(:keep), t))
+_keep_as(k::Kept{X}, t::TObj) where {X} = Kept{X}(Val(:of), Dynamic{X}(Val(:keep), t), getfield(k, :compiled))
 
 # --- membership (note "Traits as abstract types") ----------------------------------
 

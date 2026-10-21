@@ -445,6 +445,8 @@ struct Dynamic{X}
     end
     "A dynamic value holding `x`, checked to conform by the caller (`@dynamic_of`): reached by `invoke`, so `x` keeps its box."
     Dynamic{X}(::Val{:checked}, @nospecialize(x)) where {X} = new{X}(x)
+    "A dynamic value holding what the held value `h` holds: a call at `h`'s concrete type, never at the `Any`-typed object."
+    Dynamic{X}(::Val{:of}, h) where {X} = new{X}(getfield(h, :t))
 end
 """
     Compiled{X}
@@ -484,6 +486,8 @@ struct Compiled{X}
     end
     "A compiled value holding `x`, checked to conform by the caller: reached by `invoke`, so `x` keeps its box."
     Compiled{X}(::Val{:checked}, @nospecialize(x)) where {X} = new{X}(x)
+    "A compiled value holding what the held value `h` holds: a call at `h`'s concrete type."
+    Compiled{X}(::Val{:of}, h) where {X} = new{X}(getfield(h, :t))
 end
 """
     Kept{X}
@@ -502,6 +506,8 @@ struct Kept{X}
     compiled::Bool
     "A kept value holding `x`, checked to conform by the caller."
     Kept{X}(::Val{:checked}, @nospecialize(x), compiled::Bool) where {X} = new{X}(x, compiled)
+    "A kept value holding what the held value `h` holds: a call at `h`'s concrete type."
+    Kept{X}(::Val{:of}, h, compiled::Bool) where {X} = new{X}(getfield(h, :t), compiled)
 end
 "Any value of `X` that holds the user's object: `Compiled{X}`, `Dynamic{X}`, `Kept{X}`."
 const HeldValue{X} = Union{Compiled{X},Dynamic{X},Kept{X}}
@@ -570,21 +576,21 @@ Kept{X}(k::Kept{X}) where {X} = k
 Dynamic{X}(c::Compiled{X}) where {X} = Base.inferencebarrier(_cast_refuse)(X, :Dynamic, :Compiled)
 Compiled{X}(d::Dynamic{X}) where {X} = Base.inferencebarrier(_cast_refuse)(X, :Compiled, :Dynamic)
 Dynamic{X}(k::Kept{X}) where {X} = getfield(k, :compiled) ? Base.inferencebarrier(_cast_refuse)(X, :Dynamic, :Compiled) :
-    Dynamic{X}(Val(:checked), getfield(k, :t))
-Compiled{X}(k::Kept{X}) where {X} = getfield(k, :compiled) ? Compiled{X}(Val(:checked), getfield(k, :t)) :
+    Dynamic{X}(Val(:of), k)
+Compiled{X}(k::Kept{X}) where {X} = getfield(k, :compiled) ? Compiled{X}(Val(:of), k) :
     Base.inferencebarrier(_cast_refuse)(X, :Compiled, :Dynamic)
-Kept{X}(d::Dynamic{X}) where {X} = Kept{X}(Val(:checked), getfield(d, :t), false)
-Kept{X}(c::Compiled{X}) where {X} = Kept{X}(Val(:checked), getfield(c, :t), true)
+Kept{X}(d::Dynamic{X}) where {X} = Kept{X}(Val(:of), d, false)
+Kept{X}(c::Compiled{X}) where {X} = Kept{X}(Val(:of), c, true)
 "A trait object kept: its key gives the attribute, at its own key `Compiled`, at the erased key `Dynamic`."
 function Kept{X}(t::TObj{T,V}) where {X,T,V}
     d = Dynamic{X}(Val(:keep), t)
-    return Kept{X}(Val(:checked), getfield(d, :t), !_is_erased(V))
+    return Kept{X}(Val(:of), d, !_is_erased(V))
 end
 "A plain value kept: the trait's default, `Dynamic` under `@default_with_dynamic_self` for a value not of the trait world, else `Compiled`."
 @inline function Kept{X}(x) where {X}
     c = Compiled{X}(x)
     dyn = default_attribute(_family_of(X)) === :dynamic && !_from_trait_world(x)
-    return Kept{X}(Val(:checked), getfield(c, :t), !dyn)
+    return Kept{X}(Val(:of), c, !dyn)
 end
 Base.convert(::Type{Kept{X}}, k::Kept{X}) where {X} = k
 "A plain value assigned where a trait's name is declared: first seen there, the trait's default (traits reference §7)."

@@ -82,7 +82,7 @@ end
 end
 
 # The table's worlds and the implementations it does not serve: a redefined operation, a type
-# declared after a call (an older world must not see it), a family member, a generic implementation.
+# declared after a call (an older world must not see it), family members.
 toplevel(quote
     @trait_module module UTab2
     using TraitWorld
@@ -98,10 +98,18 @@ toplevel(quote
     @trait Gen{R} begin
         glen(r::R)::Int
     end
-    @implement Gen{A} where {A <: AbstractVector} begin           # a generic implementation
+    @implement Gen{A} where {A <: AbstractVector} begin           # a family over AbstractVector's subtypes
         glen(r) = length(r)
     end
     gfirst(g::Gen) = glen(g)
+    @trait Nm begin
+        nget(n::Nm)::Float64
+    end
+    ntwice(n::Nm) = 2 * nget(n)
+    struct NV{T}; x::T; end
+    @implement Nm A where {A <: NV} begin                         # a family whose String member does not conform
+        nget(n) = n.x
+    end
     end
 end)
 toplevel(quote
@@ -110,9 +118,11 @@ toplevel(quote
     @implement UTab2.Val1 V1
     struct FM{P}; data::Vector{Float64}; p::P; end
     @implement UTab2.Fam FM{P} where {P}                          # a family
+    struct FD; data::Vector{Float64}; end
+    @implement UTab2.Fam FD                                       # a declared type of the same trait
 end)
 
-@testset "untyped calls: worlds, redefinitions, families, generic implementations" begin
+@testset "untyped calls: worlds, redefinitions, families" begin
     call1(v) = (r = Float64[]; for x in v; push!(r, UTab2.vtwice(x)::Float64); end; r)
     cfcall(v) = (r = Float64[]; for x in v; push!(r, UTab2.vtwice(compiled_for(x))::Float64); end; r)   # compiled_for through the table
     xs = Any[V1(1.5)]
@@ -134,9 +144,28 @@ end)
     ys = Any[Base.invokelatest(getglobal(Main, :V2), 1.0)]
     @test Base.invokelatest(call1, ys) == [4.0]
     @test_throws MethodError Base.invoke_in_world(w2, call1, ys)    # as plain Julia: no method there
-    # a family member and a generic implementation, called untyped: the entry's own path
+    # family members, called untyped (Dynamic): the worker at the erased key
     callf(v) = (r = Float64[]; for x in v; push!(r, UTab2.fsum(x)::Float64); end; r)
     @test callf(Any[FM([1.0, 2.0], :a), FM([3.0], 1)]) == [3.0, 3.0]
     callg(v) = (r = Int[]; for x in v; push!(r, UTab2.gfirst(x)::Int); end; r)
     @test callg(Any[[1, 2, 3], [1.0]]) == [3, 1]
+    # compiled_for: a family member is served by the table, a pointer per member type, valid for the
+    # family method's dispatch (lowering §9.3); generic implementations are runtests.jl's (M2)
+    served(f) = [e.T for e in (@atomic TraitWorld._ptable(only(t for (g, n, t, p) in UTab2.__tw_untyped__ if g === f)).entries) if e.fp != C_NULL]
+    cff(v) = (r = Float64[]; for x in v; push!(r, UTab2.fsum(compiled_for(x))::Float64); end; r)
+    @test cff(Any[FM([1.0, 2.0], :a), FM([3.0], 1)]) == [3.0, 3.0]
+    @test FM{Symbol} in served(UTab2.fsum) && FM{Int} in served(UTab2.fsum)
+    cfg(v) = (r = Int[]; for x in v; push!(r, UTab2.gfirst(compiled_for(x))::Int); end; r)
+    @test cfg(Any[[1, 2, 3], [1.0]]) == [3, 1]
+    @test issubset([Vector{Int}, Vector{Float64}], served(UTab2.gfirst))
+    # a member that does not conform is refused at its first use through the table too
+    one_n(x) = UTab2.ntwice(compiled_for(x))
+    @test one_n(Any[UTab2.NV(1.5)][1]) == 3.0
+    e = try one_n(Any[UTab2.NV("s")][1]); nothing catch err; err end
+    @test e isa ImplementError && occursin("member of a family implementation", sprint(showerror, e))
+    # the cost of crossing from a kept value into a family member: as into a declared type of the same trait
+    kept_call(ks) = (r = 0.0; for k in ks; r += UTab2.fsum(compiled_for(k))::Float64; end; r)
+    kf, kd = Kept{UTab2.Fam}[compiled_for(FM([1.0], :a))], Kept{UTab2.Fam}[compiled_for(FD([1.0]))]
+    kept_call(kf); kept_call(kd); kept_call(kf); kept_call(kd)
+    @test (@allocated kept_call(kf)) == (@allocated kept_call(kd))
 end

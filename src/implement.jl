@@ -807,14 +807,7 @@ function _family_registry end
 end
 @machinery @noinline function _conf_family_slow(reg::Base.RefValue{IdDict{Any,Any}}, @nospecialize(X), @nospecialize(u))
     U = typeof(u)
-    # a member that does not conform is refused (traits reference §4.7), at its first use; a part the
-    # concreteness declarations name that is not concrete (`S{Any}`, §11.1) among the problems
-    key = Pair{Any,Any}(X, U)
-    if !(@lock _LOCK key in _MEMBERS_CHECKED)
-        ps = _latest(_member_problems, X, U)
-        isempty(ps) || throw(ImplementError("$U is a member of a family implementation of $X, but does not conform:\n  " * join(ps, "\n  ")))
-        @lock _LOCK push!(_MEMBERS_CHECKED, key)
-    end
+    _check_member(X, U)
     r = _conformance_slow(X, u)
     b = r === NOTRAIT ? nothing : _latest(_family_builder, X, U)
     if b isa Builder
@@ -854,6 +847,19 @@ single type's implementation is at its declaration, and the parameters' bounds.
 end
 "The family members checked at their first use and found to conform (a refused one is refused at each use)."
 const _MEMBERS_CHECKED = Set{Pair{Any,Any}}()
+"""
+A family member is checked at its first use, by the entry's path or the table's: one that does not
+conform is refused (traits reference §4.7); a part the concreteness declarations name that is not
+concrete (`S{Any}`, §11.1) is among the problems.
+"""
+@machinery function _check_member(@nospecialize(X), @nospecialize(U))
+    key = Pair{Any,Any}(X, U)
+    (@lock _LOCK key in _MEMBERS_CHECKED) && return nothing
+    ps = _latest(_member_problems, X, U)
+    isempty(ps) || throw(ImplementError("$U is a member of a family implementation of $X, but does not conform:\n  " * join(ps, "\n  ")))
+    @lock _LOCK push!(_MEMBERS_CHECKED, key)
+    return nothing
+end
 
 "The builder of a family member's implementation, fixed when first compiled: `nothing` if it cannot be."
 @machinery function _family_builder(@nospecialize(X), @nospecialize(U))

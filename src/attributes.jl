@@ -150,9 +150,9 @@ its type when the call runs (a function barrier). On a `Dynamic` value or trait 
 Always wins over a position's attribute and a trait's default.
 """
 compiled_for(x::T) where {T} = CompiledFor{T}(x)
-compiled_for(d::Dynamic{X}) where {X} = Compiled{X}(Val(:checked), getfield(d, :t))
+compiled_for(d::Dynamic{X}) where {X} = Compiled{X}(Val(:of), d)
 compiled_for(c::Compiled) = c
-compiled_for(k::Kept{X}) where {X} = Kept{X}(Val(:checked), getfield(k, :t), true)
+compiled_for(k::Kept{X}) where {X} = Kept{X}(Val(:of), k, true)
 compiled_for(t::TObj{T,V}) where {T,V} = _is_erased(V) ? Base.inferencebarrier(_open_erased)(t) : t
 """
     with_dynamic(x)
@@ -162,8 +162,8 @@ operation on it dispatches when it runs. Always wins over a position's attribute
 """
 with_dynamic(x) = WithDynamic(x)
 with_dynamic(d::Dynamic) = d
-with_dynamic(c::Compiled{X}) where {X} = Dynamic{X}(Val(:checked), getfield(c, :t))
-with_dynamic(k::Kept{X}) where {X} = Kept{X}(Val(:checked), getfield(k, :t), false)
+with_dynamic(c::Compiled{X}) where {X} = Dynamic{X}(Val(:of), c)
+with_dynamic(k::Kept{X}) where {X} = Kept{X}(Val(:of), k, false)
 with_dynamic(t::TObj) = _erase(t, _held_object(t))
 "A plain value converted by `compiled_for`, until it is first seen through a trait (then a `Compiled{X}`, or the trait object at its key)."
 struct CompiledFor{T}
