@@ -888,7 +888,7 @@ function _rewrite_fdef(mod::Module, ex)
         else
             push!(stmts, :($res = $TraitWorld.checked_call($fname, $(newnames...))))
         end
-        push!(stmts, :(return $res isa $TraitWorld.LikeResult ? Base.inferencebarrier($TraitWorld._like_out)($res, $us, $vs) : $res))
+        push!(stmts, :(return $res isa $TraitWorld.LikeResult ? $TraitWorld._like_return($res, $us, $vs) : $res))
         kept = Any[w for w in wheres if any(x -> x.kind in (:plain, :vararg) && x.ann !== nothing && _uses(x.ann, _wherevar(w)), args)]
         # with keywords, the entry is its own keyword sorter: Julia's would be specialized on the named tuple of
         # the supplied keywords, where `known_type` always sees their types; taken unspecialized, as the

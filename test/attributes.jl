@@ -299,3 +299,30 @@ AttrSeveral.pb(x::PAB) = x.b
     @test fb(PAB(1.0, 2.0)) == (:compiled, 3.0)
     @test S.both_c(with_dynamic(PAB(1.0, 2.0)))[1] === :dynamic       # the cast wins
 end
+
+# an operation on a `Dynamic` is typed by the declared result at the parameters it fixes (lowering §13)
+toplevel(quote
+    @trait_module module DynTyped
+    using TraitWorld
+    export SVt, sfirst, slen, sfirst_d
+    @trait SVt{T} begin
+        T = eltype(Self)
+        sfirst(v::SVt{T})::T
+        slen(v::SVt)::Int
+    end
+    @implement SVt A where {A <: Vector{<:Real}} begin
+        sfirst(v) = v[1]
+        slen(v) = length(v)
+    end
+    sfirst_d(v::Dynamic{SVt{Float64}}) = sfirst(v) + 1.0
+    end
+end)
+
+@testset "a Dynamic's operations typed by its fixed parameters" begin
+    D = Main.DynTyped
+    d = Dynamic{D.SVt{Float64}}([2.0, 3.0])
+    @test D.sfirst(d) === 2.0 && D.slen(d) === 2
+    @test Base.return_types(D.sfirst, (typeof(d),)) == [Float64]
+    @test Base.return_types(D.slen, (typeof(d),)) == [Int]
+    @test D.sfirst_d([2.0]) === 3.0
+end

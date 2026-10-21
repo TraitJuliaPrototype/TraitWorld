@@ -110,3 +110,18 @@ end)
     @test_throws TraitUseError Main.LikeBad.leak(m)
     @test isempty(check_definitions(L))
 end
+
+@testset "a result like the input, typed for a caller that knows the type" begin
+    ft(x::Main.LSeries{Float64}) = Main.LikeLib.tof32(x)
+    fm(x::Main.LMeas) = Main.LikeLib.earlyout(x, true)
+    fo(x::Main.LOwn) = Main.LikeLib.earlyout(x, true)
+    fb(x::Main.LBox) = Main.LikeLib.shifted(x)
+    @test ft(Main.LSeries([1.0, 2.5])).data == Float32[1.0, 2.5]
+    @test Base.return_types(ft, (Main.LSeries{Float64},)) == [Main.LSeries{Float32}]
+    @test fm(Main.LMeas([[-1.0]], "a")).cols == [[-1.0]]
+    @test Base.return_types(fm, (Main.LMeas,)) == [Main.LMeas]
+    @test fo(Main.LOwn([[-2.0]])).cs == [[-2.0]]
+    @test Base.return_types(fo, (Main.LOwn,)) == [Main.LOwn]
+    @test fb(Main.LBox([1.0], "b")).u == [2.0]
+    @test Base.return_types(fb, (Main.LBox,)) == [Main.LBox]
+end

@@ -334,11 +334,15 @@ macro trait(header, block = nothing)
     # type holds downstream); in code compiled by facts the call runs code compiled by facts (part (C))
     for (k, d) in enumerate(decls)
         syms = [gensym(:a) for _ in d.args]
-        dep(t) = _mentions(t, Rsym) || any(p -> _mentions(t, p), pnames)
-        retx = dep(d.ret) ? :Any : d.ret
+        # the declared result at the parameters the `Dynamic` fixes (`Any` where it names `Self` or an
+        # open parameter), as a declared field's type is read (lowering §13); a constant where it is compiled
+        X__ = gensym(:X)
+        retx = _mentions(d.ret, Rsym) ? :Any :
+               any(p -> _mentions(d.ret, p), pnames) ?
+                   :($TW._erased_ft($TW.op_ret($name, Val($(QuoteNode(d.name))), $TW._erased_key_of($X__), Val($(length(d.args)))))) :
+               d.ret
         # a constructor operation (result R) gives a dynamic value of the same implementation
         call = :($(d.fexpr)($TW.opened(dyn), $(syms...)))
-        X__ = gensym(:X)
         if d.ret === Rsym
             rhs = :($TW._dyn_like(dyn, $call))
         else

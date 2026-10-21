@@ -1016,8 +1016,78 @@ A result like `t` with declared fields replaced; also on a result of `like`.
         end
         return _invert(X, v, u, res)
     end
-    throw(TraitBoundError("a result like the input names no trait object the entry passed"))
+    _like_none()
 end
+
+"""
+A result like the input at the entry (lowering §11). Where the caller knows the user's type and that
+type's own declaration fixed a builder (a constant), the inverse is compiled for the type: the slots
+it replaces are the builder's, so the constructor's result has the type it builds (a sibling:
+`LSeries{Float32}` from `LSeries{Float64}`). Otherwise the inverse runs when the call runs (`_like_out`).
+"""
+@inline function _like_return(res::LikeResult, us::Tuple, vs::Tuple)
+    i = _like_pos(typeof(res.t), typeof(vs))
+    if i > 0
+        # the only position of the result's trait object type: if it is not that object, none is
+        vs[i] === res.t || Base.inferencebarrier(_like_none)()
+        r = _like_typed(res, us[i])
+        r isa _NoPlan || return r
+    end
+    return Base.inferencebarrier(_like_out)(res, us, vs)
+end
+@noinline _like_none() = throw(TraitBoundError("a result like the input names no trait object the entry passed"))
+"The one entry position whose trait object has type `T`, or 0 (none, or several: decided when the call runs)."
+@generated function _like_pos(::Type{T}, ::Type{V}) where {T,V}
+    is = [i for (i, P) in enumerate(V.parameters) if P === T]
+    return length(is) == 1 ? is[1] : 0
+end
+"No compiled inverse: the user's type is not known here, or has no declaration of its own."
+struct _NoPlan end
+@inline function _like_typed(res::LikeResult, u::U) where {U}
+    (u isa HeldValue || u isa CompiledFor || u isa WithDynamic || !isconcretetype(U)) && return _NoPlan()
+    w = getfield(res.t, :views)[1]
+    typeof(w).parameters[2] === ErasedWit && return _NoPlan()
+    X = _family(typeof(w).parameters[1])
+    b = _declared_builder(As{X}(), U)
+    b isa Builder || return _NoPlan()
+    s = _spec_of(X, getfield(b, :specs)...)
+    s === nothing && return _NoPlan()
+    r = getfield(s, :r)
+    x = res.x
+    if getfield(r, :off) < 0
+        # the type implements the operations itself: the new value replaces it, of the same type family
+        base = x isa KeepSelf ? u : _same_family(X, u, x)
+        return _rebuild_typed(base, _field_repls(X, getfield(s, :fs), res.f))
+    end
+    reps = x isa KeepSelf ? _field_repls(X, getfield(s, :fs), res.f) :
+                            ((getfield(r, :idx), x), _field_repls(X, getfield(s, :fs), res.f)...)
+    return _rebuild_typed(u, reps)
+end
+"The spec of trait family `X` among a builder's specs (one per trait of the closure), or `nothing`."
+@inline _spec_of(@nospecialize(X)) = nothing
+@inline _spec_of(X, s::VSpec{Xi}, rest...) where {Xi} = _family(Xi) === X ? s : _spec_of(X, rest...)
+@inline function _same_family(@nospecialize(X), u::U, x) where {U}
+    typeof(x) <: Base.typename(U).wrapper ||
+        throw(TraitBoundError("$U implements $X itself, but the result is a $(typeof(x)): " *
+                              "a result like the input must be a $(Base.typename(U).wrapper)"))
+    return x
+end
+"The replaced declared fields as (stored field index, value) pairs."
+@inline _field_repls(X, fs::Tuple, f::NamedTuple{names}) where {names} =
+    ntuple(k -> (getfield(fs[_fieldpos(X, Val(names[k]))], :idx), getfield(f, k)), Val(length(names)))
+"A copy of `u` with stored fields replaced, by the type's constructor; the indices are constants where this is compiled."
+Base.@constprop :aggressive @inline function _rebuild_typed(u::U, reps::Tuple) where {U}
+    isempty(reps) && return u
+    fs = ntuple(j -> _pick(j, u, reps...), Val(fieldcount(U)))
+    try
+        return Base.typename(U).wrapper(fs...)
+    catch e
+        e isa MethodError || rethrow()
+        throw(TraitBoundError("$U cannot be rebuilt from its fields by its constructor, so a result like it cannot be built"))
+    end
+end
+Base.@constprop :aggressive @inline _pick(j::Int, u) = getfield(u, j)
+Base.@constprop :aggressive @inline _pick(j::Int, u, r::Tuple, rest...) = r[1] == j ? r[2] : _pick(j, u, rest...)
 
 """
 The implementation's inverse: a value of the user's type `typeof(u)` with the new parts of `res`.
