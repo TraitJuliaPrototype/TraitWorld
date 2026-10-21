@@ -267,3 +267,36 @@ end)
         end)
     end
 end
+
+# an attribute on several bounds (traits reference §5.1): `Dynamic{(X, Y)}`, `Compiled{(X, Y)}`
+toplevel(quote
+    @trait_module module AttrSeveral
+    using TraitWorld
+    export PA, pa, PB, pb, both_d, both_c, both
+    @trait PA begin
+        pa(x::PA)::Float64
+    end
+    @trait PB begin
+        pb(x::PB)::Float64
+    end
+    both(t::(PA, PB)) = (TraitWorld.is_dynamic(t) ? :dynamic : :compiled, pa(t) + pb(t))
+    both_d(t::Dynamic{(PA, PB)}) = both(t)
+    both_c(t::Compiled{(PA, PB)}) = both(t)
+    end
+end)
+using .AttrSeveral
+struct PAB; a::Float64; b::Float64; end
+AttrSeveral.pa(x::PAB) = x.a
+AttrSeveral.pb(x::PAB) = x.b
+@implement (PA, PB) PAB
+
+@testset "an attribute on several bounds" begin
+    S = Main.AttrSeveral
+    fd(x::PAB) = AttrSeveral.both_d(x)           # from typed callers
+    fc(x::PAB) = AttrSeveral.both_c(x)
+    fb(x::PAB) = AttrSeveral.both(x)
+    @test fd(PAB(1.0, 2.0)) == (:dynamic, 3.0)
+    @test fc(PAB(1.0, 2.0)) == (:compiled, 3.0)
+    @test fb(PAB(1.0, 2.0)) == (:compiled, 3.0)
+    @test S.both_c(with_dynamic(PAB(1.0, 2.0)))[1] === :dynamic       # the cast wins
+end

@@ -290,10 +290,9 @@ Base.size(b::Broken) = (b.n,)
     @test gmean([1.0 9.0; 3.0 9.0]) == 2.0
     @test gsum([1.0, 2.0, 3.5]) == 6.5                                      # Iterable with two arities of iterate
     @test_throws MethodError gmean(42)
-    # a subtype that breaks AbstractVector's contract: a warning, and the same error as plain Julia
-    e_plain = try Broken(2)[1] catch e; e end
-    e_trait = (@test_logs (:warn, r"does not conform") match_mode=:any (try Gen.first_of(Broken(2)) catch e; e end))
-    @test typeof(e_plain) === typeof(e_trait) && sprint(showerror, e_plain) == sprint(showerror, e_trait)
+    # a subtype that breaks AbstractVector's contract: a member of the family that does not conform, refused at its first use
+    e_trait = try Gen.first_of(Broken(2)) catch e; e end
+    @test e_trait isa ImplementError && occursin("`getindex` at Tuple{Broken, Int64} always throws", sprint(showerror, e_trait))
     @test isempty(TraitWorld.conformance_problems(Iterable, Vector{Float64}, (:iterate,)))
     @test !isempty(TraitWorld.conformance_problems(Indexable, Broken, (:getindex,)))
 end
@@ -847,3 +846,4 @@ include("basetraits.jl")
 include("attributes.jl")
 include("carry.jl")
 include("wherevars.jl")
+include("declaration.jl")

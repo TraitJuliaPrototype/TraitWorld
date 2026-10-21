@@ -450,6 +450,23 @@ function _classify(mod::Module, a, unbounded::Vector{Symbol} = Symbol[]; attr_bo
             end
             return _Arg(name, ann, :trait, traits, nothing, nothing, nothing)
         end
+        if attr_bounds && ann isa Expr && ann.head === :curly && length(ann.args) == 2 &&
+           ann.args[2] isa Expr && ann.args[2].head === :tuple
+            # an attribute on several bounds, `Dynamic{(ColTable, RowTable)}` (traits reference §5.1): read
+            # from the syntax, since a tuple of traits is not a type parameter
+            h = _tryeval(mod, ann.args[1])
+            if h === Compiled || h === Dynamic
+                attr = h === Compiled ? :compiled : :dynamic
+                traits = Any[]
+                for x in ann.args[2].args
+                    v = _tryeval(mod, x)
+                    is_trait(v) || error("@trait_module: `$x` in the bound `$ann` is not a trait")
+                    _check_dynamic_params(v, attr, name)
+                    append!(traits, bound_traits(v))
+                end
+                return _Arg(name, ann, :trait, traits, nothing, nothing, attr)
+            end
+        end
         v = _tryeval(mod, ann)
         if v === nothing && ann isa Expr && ann.head === :curly
             # a bound that names a method's `where` variables (traits reference §5.1): evaluated with them open

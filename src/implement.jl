@@ -342,11 +342,9 @@ function _witness(@nospecialize(X), @nospecialize(R))
         rec.kind === :methods && return Impl{rec.defaults}()
         # existing methods: defaults per representation
         D = _existing_defaults(X, R)
-        if rec.kind === :family && isconcretetype(R) && !(Pair{Any,Any}(X, R) in _FAMILY_WARNED)
-            push!(_FAMILY_WARNED, Pair{Any,Any}(X, R))
-            ps = conformance_problems(X, R, Tuple(op for op in _ops(X) if !(op in D)))
-            isempty(ps) || @warn "$R is declared $(X) through a family, but does not conform:\n  " * join(ps, "\n  ")
-        end
+        # a member that does not conform does not implement X: refused at its first use (`_member_problems`)
+        rec.kind === :family && isconcretetype(R) &&
+            !isempty(conformance_problems(X, R, Tuple(op for op in _ops(X) if !(op in D)))) && return nothing
         return Impl{D}()
     end
     found = Any[]
@@ -492,7 +490,7 @@ function _check_delegate(mod::Module, @nospecialize(types...))
 end
 
 _check_implementation(mod::Module, @nospecialize(X), @nospecialize(R), given::Tuple) =
-    _latest(_check_implementation_now, mod, X, R, given)
+    _refusing(_check_implementation_now, mod, X, mod, X, R, given)
 @machinery function _check_implementation_now(mod::Module, @nospecialize(X), @nospecialize(R), given::Tuple)
     _check_delegate(mod, X, R)
     definer = owner(mod)
@@ -511,7 +509,7 @@ _check_implementation(mod::Module, @nospecialize(X), @nospecialize(R), given::Tu
                 "(`@implement $X{…}` without a block), or let the owner of $(R) implement it."))
         end
     end
-    isconcretetype(R) || return nothing          # families and generic implementations are checked per type
+    isconcretetype(R) || return nothing          # a family's members are checked at their first use (`_member_problems`), a generic implementation's at each representation
     _concreteness_check(X, R, "the receiver type")
     ps = conformance_problems(X, R, given)       # the operations only: declared fields are checked with the declaration
     isempty(ps) || throw(ImplementError("the implementation of $X for $R does not conform:\n  " * join(ps, "\n  ")))
@@ -522,7 +520,7 @@ _check_implementation(mod::Module, @nospecialize(X), @nospecialize(R), given::Tu
     return nothing
 end
 
-_check_projection(mod::Module, @nospecialize(X), @nospecialize(T)) = _latest(_check_projection_now, mod, X, T)
+_check_projection(mod::Module, @nospecialize(X), @nospecialize(T)) = _refusing(_check_projection_now, mod, X, mod, X, T)
 @machinery function _check_projection_now(mod::Module, @nospecialize(X), @nospecialize(T))
     _check_delegate(mod, X, T)
     p = _proj(X, T)::ProjRec
@@ -542,7 +540,7 @@ _check_projection(mod::Module, @nospecialize(X), @nospecialize(T)) = _latest(_ch
 end
 
 "A type declared to conform by its own methods has the fields the trait and its supertraits declare."
-_check_own_fields(@nospecialize(X), @nospecialize(T)) = _latest(_check_own_fields_now, X, T)
+_check_own_fields(mod::Module, @nospecialize(X), @nospecialize(T)) = _refusing(_check_own_fields_now, mod, X, X, T)
 @machinery function _check_own_fields_now(@nospecialize(X), @nospecialize(T))
     for Y in trait_closure(X)
         ps = _field_problems(Y, T, nothing, isempty(_ops(Y)) ? Nothing : T)
@@ -636,12 +634,16 @@ What an implementation's declaration fixes, after its checks: the builder of its
 (`nothing` when it must be built per session) and the operations its defaults serve,
 without those the receiver type already had a method for.
 """
-_declare_conformance(@nospecialize(X), @nospecialize(T)) = _latest(_declare_conformance_now, X, T)
+_declare_conformance(mod::Module, @nospecialize(X), @nospecialize(T)) = _refusing(_declare_conformance_now, mod, X, X, T)
 @machinery function _declare_conformance_now(@nospecialize(X), @nospecialize(T))
     recs = Any[]
     (T isa DataType && isconcretetype(T)) || return (b = nothing, recs = ())
     p = proj_lookup(X, T)
     p === nothing && return (b = nothing, recs = ())
+    ps = _param_bound_problems(X, T, p)
+    isempty(ps) || throw(ImplementError("$T does not conform to $X: a parameter is outside its bound:\n  " * join(ps, "\n  ")))
+    ps = _agreement_problems(X, T, p)
+    isempty(ps) || throw(ImplementError("$T's implementation of $X disagrees with its implementation of a related trait:\n  " * join(ps, "\n  ")))
     for Y in trait_closure(X)
         w = Y === X ? proj_witness(X, T, p) : witness(Y, p.R)
         (w isa Impl && p.R !== Nothing) || continue
@@ -650,6 +652,68 @@ _declare_conformance(@nospecialize(X), @nospecialize(T)) = _latest(_declare_conf
     end
     _refuse_overrides()
     return (b = _conformance_builder(X, T), recs = Tuple(recs))
+end
+
+"""
+The parameters of `X` and its supertraits at user type `T` (conforming through `p`) that lie outside
+the bounds their traits declare (traits reference §3.4): a type bound (`T <: Real`) is a subtype
+check, a trait bound (`T <: NumberLike`) asks that the value conform.
+"""
+function _param_bound_problems(@nospecialize(X), @nospecialize(T), p::ProjRec)
+    out = String[]
+    for Y in trait_closure(X)
+        ns = trait_params(Y)
+        isempty(ns) && continue
+        w = Y === X ? proj_witness(X, T, p) : witness(Y, p.R)
+        w === nothing && continue                  # reported by the declaration's own check
+        K, _ = _key_and_slots(Y, p, T, w)
+        for n in ns
+            hasmethod(param_bound, Tuple{Type{Y}, Val{n}}) || continue
+            b = param_bound(Y, Val(n))
+            v = param(Y, Val(n), K)
+            ok = v isa Type && (is_trait(b) ? witness(b, v) !== nothing || proj_lookup(b, v) !== nothing : v <: b)
+            ok || push!(out, "$Y's parameter $n is $v, outside its bound $n <: $b")
+        end
+    end
+    return out
+end
+
+"""
+Where `T`'s implementation of `X` (through `p`) disagrees with its declared implementations of
+`X`'s supertraits, or of a trait whose supertrait `X` is (traits reference §3.6): both must forward
+to the same field, or both be served by the type itself, with the shared traits' fields mapped alike.
+"""
+function _agreement_problems(@nospecialize(X), @nospecialize(T), p::ProjRec)
+    out = String[]
+    related = Any[(Y, X) for Y in trait_closure(X)[2:end]]
+    for Z in _declared_traits(T)
+        Z === X || !(X in trait_closure(Z)) || push!(related, (X, Z))
+    end
+    for (A, B) in related                               # A a supertrait of B; one of them is X
+        other = A === X ? B : A
+        _declared_for(other, T) || continue             # a generic or a family implementation is not T's own
+        q = proj_lookup(other, T)
+        q isa ProjRec || continue
+        pA, pB = A === X ? (p, q) : (q, p)
+        where_(r) = r.field == 0 ? "by its own methods" : "by its field `$(fieldname(T, r.field))`"
+        pA.field == pB.field ||
+            push!(out, "$B is implemented $(where_(pB)), its supertrait $A $(where_(pA)): both the same")
+        for (f, _) in trait_fields(A)
+            _mapped(pA, f) === _mapped(pB, f) ||
+                push!(out, "$A's field `$f` is `$(_mapped(pA, f))` for $A and `$(_mapped(pB, f))` for $B: mapped alike")
+        end
+    end
+    return out
+end
+"The traits `T` itself is declared to conform to (its `conformance` methods), not a family's."
+function _declared_traits(@nospecialize(T))
+    out = Any[]
+    for m in methods(conformance)
+        ps = Base.unwrap_unionall(m.sig).parameters
+        length(ps) == 3 && ps[3] === T && ps[2] isa DataType && ps[2] <: As || continue
+        push!(out, ps[2].parameters[1])
+    end
+    return out
 end
 
 "Whether `T` has a declaration of its own for `X`: a `conformance` method at `T` itself, not a family's (a member may still declare its own) nor the fallback."
@@ -682,7 +746,7 @@ place.
 function _conformance_methods(Xex, Tex)
     TW = TraitWorld
     c = gensym(:conformance)
-    return Any[:(const $c = $TW._declare_conformance($Xex, $Tex)),
+    return Any[:(const $c = $TW._declare_conformance(@__MODULE__, $Xex, $Tex)),
                Expr(:macrocall, GlobalRef(Base, Symbol("@inline")), LineNumberNode(0, :none),
                     Expr(:function, :($TW.conformance(::$TW.As{$Xex}, u::$Tex)),
                          Expr(:block, Expr(:meta, :facts_boundary), :($TW._conf_call($c.b, $Xex, u))))),
@@ -724,7 +788,14 @@ end
     # a member at an abstract parameter (`S{Any}`) is refused at the entry where X asks for concrete keys
     _latest(_concreteness_of, X) === :concrete_only && !key_concrete(U) &&
         throw(TraitBoundError("a $U has an abstract type parameter, and $X asks for concrete keys (`@concrete_only`)"))
-    r = _conformance_slow(X, u)                         # warns once for a member that does not conform
+    # a member that does not conform is refused (traits reference §4.7), at its first use
+    key = Pair{Any,Any}(X, U)
+    if !(@lock _LOCK key in _MEMBERS_CHECKED)
+        ps = _latest(_member_problems, X, U)
+        isempty(ps) || throw(ImplementError("$U is a member of a family implementation of $X, but does not conform:\n  " * join(ps, "\n  ")))
+        @lock _LOCK push!(_MEMBERS_CHECKED, key)
+    end
+    r = _conformance_slow(X, u)
     b = r === NOTRAIT ? nothing : _latest(_family_builder, X, U)
     if b isa Builder
         @lock _LOCK begin
@@ -738,18 +809,31 @@ end
     end
     return r
 end
+"""
+The problems of concrete type `U` as a member of a family implementation of `X`: the operations the
+family's methods serve (those written in its block, or the existing methods), checked at `U` as a
+single type's implementation is at its declaration, and the parameters' bounds.
+"""
+@machinery function _member_problems(@nospecialize(X), @nospecialize(U))
+    (U isa DataType && isconcretetype(U)) || return String[]
+    out = String[]
+    rec = _impl(X, U)
+    if rec isa ImplRec
+        D = rec.kind === :methods ? rec.defaults : _existing_defaults(X, U)
+        append!(out, conformance_problems(X, U, Tuple(op for op in _ops(X) if !(op in D))))
+    end
+    p = proj_lookup(X, U)
+    p === nothing || append!(out, _param_bound_problems(X, U, p))
+    return out
+end
+"The family members checked at their first use and found to conform (a refused one is refused at each use)."
+const _MEMBERS_CHECKED = Set{Pair{Any,Any}}()
+
 "The builder of a family member's implementation, fixed when first compiled: `nothing` if it cannot be."
 @machinery function _family_builder(@nospecialize(X), @nospecialize(U))
     (U isa DataType && isconcretetype(U)) || return nothing
     try
-        # a member of a family declared by existing methods that does not conform (it breaks the
-        # family's documented interface) keeps the slow path, which warns at its first use
-        rec = _impl(X, U)
-        if rec isa ImplRec && rec.kind === :family && !isempty(_ops(X))
-            D = _existing_defaults(X, U)
-            isempty(conformance_problems(X, U, Tuple(op for op in _ops(X) if !(op in D)))) || return nothing
-        end
-        b = _conformance_builder(X, U)
+        b = _conformance_builder(X, U)              # a member that does not conform is refused before (`_member_problems`)
         return b isa Builder ? b : nothing
     catch
         return nothing
@@ -935,7 +1019,45 @@ end
 
 macro implement(args...)
     ex = _latest(_implement_expand, __module__, __source__.file, Any[args...])
-    return _latest(_at_declaration, ex, __source__)
+    return Expr(:block, Expr(:call, GlobalRef(TraitWorld, :_declaration_begins)), _latest(_at_declaration, ex, __source__))
+end
+
+# --- a refused declaration defines nothing ---------------------------------------
+# The checks need the declaration's methods defined (they infer the operations' results), so a
+# declaration's expansion defines them first; a check that refuses it deletes every method the
+# declaration defined since it began (traits reference §4.9).
+"The world an `@implement` began in: its methods are those its module defined after it."
+const _DECL_WORLD = Ref{UInt}(typemax(UInt))
+"Marks the start of an `@implement`'s definitions."
+_declaration_begins() = (_DECL_WORLD[] = Base.get_world_counter(); nothing)
+"Runs a declaration's check; when it refuses, the declaration's methods are deleted first."
+function _refusing(f, mod::Module, @nospecialize(X), args...)
+    try
+        return _latest(f, args...)
+    catch err
+        err isa ImplementError && _latest(_rollback!, mod, X)
+        rethrow()
+    end
+end
+"""
+Deletes the methods `mod` defined since the current declaration began: the operations' methods of
+`X` and its supertraits, and the records (`implementation`, `projection`, `param`, `conformance`).
+"""
+@machinery function _rollback!(mod::Module, @nospecialize(X))
+    w0 = _DECL_WORLD[]
+    w0 == typemax(UInt) && return nothing
+    # while a package is built, a refusal fails the build: nothing is kept (and methods cannot be deleted)
+    ccall(:jl_generating_output, Cint, ()) == 1 && return nothing
+    fs = Any[implementation, projection, param, conformance, _declared_defaults, _declared_builder]
+    for Y in trait_closure(X), op in _ops(Y)
+        push!(fs, _opfn(Y, op))
+    end
+    for f in unique(fs), m in methods(f)
+        m.module === mod && m.primary_world > w0 && Base.delete_method(m)
+    end
+    _DECL_WORLD[] = typemax(UInt)
+    _bump!()
+    return nothing
 end
 """
 The records an `@implement` defines (its `implementation` and `projection` methods) carry the
@@ -1095,6 +1217,7 @@ function _implement_family(mod::Module, @nospecialize(X), tr, wheres::Vector{Any
     Rex = tr.args[end]
     out = _param_methods(X, tr.args[2:end-1], Rex, wheres)
     rec = gensym(:implementation)
+    given = ()
     if block === nothing
         push!(out, :(const $rec = $TW.ImplRec(:family, ())))
     else
@@ -1108,7 +1231,7 @@ function _implement_family(mod::Module, @nospecialize(X), tr, wheres::Vector{Any
         push!(out, :(const $rec = $TW.ImplRec(:methods, $defaults)))
     end
     push!(out, Expr(:(=), Expr(:where, :($TW.implementation(::Type{$X}, ::Type{$Rex})), wheres...), rec))
-    push!(out, :($TW._check_implementation(@__MODULE__, $X, $(Expr(:where, Rex, wheres...)), ())))
+    push!(out, :($TW._check_implementation(@__MODULE__, $X, $(Expr(:where, Rex, wheres...)), $given)))
     append!(out, _family_conformance_methods(X, Rex, wheres))
     push!(out, :($TW._bump!()))
     push!(out, :nothing)
@@ -1145,6 +1268,7 @@ function _implement_where(mod::Module, head, block)
         # a family: Base's (or the owner's) existing methods, or methods written for the whole family
         out = Any[]
         rec = gensym(:implementation)
+        given = ()
         if block === nothing
             push!(out, :(const $rec = $TW.ImplRec(:family, ())))
             push!(out, :($TW.implementation(::Type{$X}, ::Type{$Rsym}) where {$(family...)} = $rec))
@@ -1160,7 +1284,7 @@ function _implement_where(mod::Module, head, block)
             push!(out, :($TW.implementation(::Type{$X}, ::Type{$Rsym}) where {$(family...)} = $rec))
         end
         famR = isempty(family) ? X : family[1].args[2]
-        push!(out, :($TW._check_implementation(@__MODULE__, $X, $famR, ())))
+        push!(out, :($TW._check_implementation(@__MODULE__, $X, $famR, $given)))
         isempty(family) || append!(out, _family_conformance_methods(X, Rsym, family))
         push!(out, :($TW._bump!()))
         push!(out, :nothing)
@@ -1248,7 +1372,7 @@ function _implement_oneline(mod::Module, traits::Vector{Any}, Tex, Rdecl; pexs =
             push!(out, :($TW._check_implementation(@__MODULE__, $xex, $Tex,
                            $TW._remaining_ops($xex, $Tex))))     # a call, not a generator (compiled per declaration)
             # the one-line form declares that the type conforms: it must have the declared fields
-            fmap === nothing && push!(out, :($TW._check_own_fields($xex, $Tex)))
+            fmap === nothing && push!(out, :($TW._check_own_fields(@__MODULE__, $xex, $Tex)))
             _declared_for(X, T) || append!(out, _conformance_methods(xex, Tex))
         end
         push!(out, :($TW._bump!()))
