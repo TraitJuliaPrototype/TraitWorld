@@ -155,6 +155,25 @@ function _override_violation(m::Method)
     return nothing
 end
 
+"""
+A method outside the trait world with a trait's name as an argument's type (traits reference §2):
+refused, since a trait's name on an argument is a bound only inside a trait module. `nothing` if none.
+"""
+function _trait_argument_outside(m::Method)
+    is_trait_world(m.module) && return nothing
+    sig = Base.unwrap_unionall(m.sig)
+    sig isa DataType || return nothing
+    for (i, p) in enumerate(sig.parameters[2:end])
+        p isa Core.TypeofVararg && (p = isdefined(p, :T) ? p.T : Any)
+        p = Base.unwrap_unionall(p)
+        (p isa DataType && p !== Union{} && p <: Trait) || continue
+        return "$(m.name) at $(m.file):$(m.line): argument $i is typed by the trait $(nameof(p.name.wrapper)) outside a trait module, " *
+               "where a trait's name is a bound only inside one: define the function in a trait module, or take a kept value " *
+               "(`Kept{$(nameof(p.name.wrapper))}`) or a type"
+    end
+    return nothing
+end
+
 # --- the hooks --------------------------------------------------------------------------
 
 "Called by the runtime for every method definition: before it is visible (`after = false`, may throw), and after."
@@ -164,6 +183,10 @@ end
         if !after
             msg = _override_violation(m)
             msg === nothing || (err = ImplementError(msg))
+            if err === nothing
+                msg = _trait_argument_outside(m)
+                msg === nothing || (err = TraitUseError([msg]))
+            end
             err === nothing && (err = _strict_check(m, false))
         else
             err = _strict_check(m, true)

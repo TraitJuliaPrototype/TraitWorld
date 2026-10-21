@@ -104,3 +104,12 @@ end
     e = caught(() -> toplevel(:(@error_on_abstract @trait_module module Old1 end)))
     @test occursin("@enforce_fully_typed", sprint(showerror, e))
 end
+
+@testset "a trait's name on an argument outside trait modules is refused" begin
+    e = caught(() -> toplevel(:(outside_g(x::Conc.KV) = 1)))
+    if TraitWorld._HAS_DEF_HOOK[]
+        @test e isa TraitUseError && occursin("outside a trait module", sprint(showerror, e))
+        @test !isdefined(Main, :outside_g) || isempty(methods(Main.outside_g))
+        @test caught(() -> toplevel(:(outside_k(x::Kept{Conc.KV}) = 1))) === nothing     # a kept value's type: fine
+    end
+end
