@@ -438,7 +438,7 @@ using .Weights
     @test !TraitWorld.owned_method(only(methods(Weights.weight, (Float64,))))   # still a pirate under rule 3
 end
 
-# --- M7: concrete mode, verify_main ---------------------------------------------------------
+# --- M7: fully typed mode, verify_main ---------------------------------------------------------
 @enforce_fully_typed @trait_module module Hot
 using TraitWorld, ..Columns
 hot(t::ColTable, k::Float64) = (s = 0.0; for x in col(t, 1); s += x * k; end; s)
@@ -448,7 +448,7 @@ using TraitWorld, ..Columns
 @warn_not_fully_typed cold(t::ColTable, k::Vector{Any}) = (s = 0.0; for x in col(t, 1); s += x * k[1]; end; s)
 fine(t::ColTable, k::Vector{Any}) = (s = 0.0; for x in col(t, 1); s += x * k[1]; end; s)
 end
-@testset "M7: concrete mode" begin
+@testset "M7: fully typed mode" begin
     @test Hot.hot([[1.0, 2.0]], 2.0) == 6.0                                    # concrete: runs
     @test (@test_logs (:warn, r"abstract element type") match_mode=:any Hot2.cold([[1.0, 2.0]], Any[2.0])) == 6.0
     @test (@test_logs Hot2.fine([[1.0, 2.0]], Any[2.0])) == 6.0                 # not annotated: silent

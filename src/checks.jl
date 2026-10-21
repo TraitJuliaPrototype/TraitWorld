@@ -355,7 +355,7 @@ _noescape(::Union{TObj,AbstractView,CObj,CMulti,LikeResult}) = throw(TraitUseErr
         ps = _latest(worker_problems, sig)::Vector{String}
         isempty(ps) || throw(TraitUseError(unique(ps)))
     end
-    _latest(_check_concrete, sig)
+    _latest(_check_fully_typed, sig)
     flag[] = true
     return nothing
 end

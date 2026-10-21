@@ -3,7 +3,7 @@
 
 The trait language of the design (`writeup/design.md` in the design repository) as a package
 on Julia with the facts mode (the patched build, julia-1.13): traits, implementations, keys, trait
-modules, `Dynamic`, `Callable`, results like the input, definition checking, concrete mode,
+modules, `Dynamic`, `Callable`, results like the input, definition checking, fully typed mode,
 `verify_main` and strict mode. Julia's compiler compiles a trait module by facts (`compiler.jl`):
 its code depends on the method table only through facts at concrete signatures.
 """
@@ -15,7 +15,7 @@ using Serialization: Serialization
 export Trait, Callable, TObj, Dynamic, Compiled, Kept, compiled_for, with_dynamic,
        @trait, @implement, @trait_module, @workload,
        TraitBoundError, TraitUseError, ImplementError, OwnershipError, verify_main, isclosed,
-       @enforce_concrete_only, @warn_on_abstract, @enforce_fully_typed, @warn_not_fully_typed, @error_on_abstract, AbstractTypeError, check_concrete, check_definitions, conforms, withfields,
+       @enforce_concrete_only, @warn_on_abstract, @enforce_fully_typed, @warn_not_fully_typed, @error_on_abstract, AbstractTypeError, check_fully_typed, check_definitions, conforms, withfields,
        fully_typed, isfullytyped, FullyTypedReport, NotFullyTypedError
 
 function __init__()

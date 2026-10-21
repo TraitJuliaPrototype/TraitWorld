@@ -45,7 +45,7 @@ end)
     @test Cert.ctotal(v) == 4.0
     r3 = fully_typed(Cert.ctotal, (Vector{Dynamic{Cert.CShape}},))
     @test isfullytyped(r3) && r3.dynamic >= 1           # an operation on a Dynamic value is declared
-    # concrete mode's error level refuses code that is not fully typed (or uses abstract values)
+    # fully typed mode's error level refuses code that is not fully typed (or uses abstract values)
     e = try CertStrict.strictmixed(t, Any[1.0, 2.0]); nothing catch err; err end
     @test e isa NotFullyTypedError || e isa AbstractTypeError
 end

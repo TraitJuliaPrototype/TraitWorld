@@ -126,7 +126,7 @@ function _concrete_problems(@nospecialize(X), @nospecialize(T), p::ProjRec)
     return errs, warns
 end
 
-"Recursive concreteness: `T`, its type parameters, and its field types, all the way down (used by concrete mode's reports)."
+"Recursive concreteness: `T`, its type parameters, and its field types, all the way down (used by fully typed mode's reports)."
 function deep_concrete(@nospecialize(T); seen = Base.IdSet{Any}())
     T isa Type || return true
     T in seen && return true

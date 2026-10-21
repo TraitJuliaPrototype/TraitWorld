@@ -111,13 +111,13 @@ function _process(mod::Module, ex)
         return Base.ScopedValues.with(_PART_CONCRETE => (_part_concrete_level(ex.args[1]), Symbol[names...])) do
             _process(mod, ex.args[end])
         end
-    elseif h === :macrocall && _concrete_macro_level(ex.args[1]) !== nothing && _prefixed_fdef(ex.args[end]) !== nothing
-        # @warn_not_fully_typed / @enforce_fully_typed on one function: concrete mode (traits reference §11.3)
-        level = _concrete_macro_level(ex.args[1])
+    elseif h === :macrocall && _fully_typed_macro_level(ex.args[1]) !== nothing && _prefixed_fdef(ex.args[end]) !== nothing
+        # @warn_not_fully_typed / @enforce_fully_typed on one function: fully typed mode (traits reference §11.3)
+        level = _fully_typed_macro_level(ex.args[1])
         inner = ex.args[end]
         fname = _fdef_name(_prefixed_fdef(inner))
         r = _process(mod, inner)
-        return Expr(:toplevel, r, :($TraitWorld.concrete_level(::typeof($fname)) = $(QuoteNode(level))))
+        return Expr(:toplevel, r, :($TraitWorld.fully_typed_level(::typeof($fname)) = $(QuoteNode(level))))
     elseif h === :struct
         st, ctor = _bounded_struct(mod, _dynamic_fields(mod, ex))
         return ctor === nothing ? st : Expr(:toplevel, st, ctor)
@@ -374,7 +374,7 @@ end
 const _PART_CONCRETE = Base.ScopedValues.ScopedValue{Any}(nothing)
 "A function definition, under any concreteness prefixes; else `nothing`."
 function _prefixed_fdef(ex)
-    while ex isa Expr && ex.head === :macrocall && (_part_concrete_level(ex.args[1]) !== nothing || _concrete_macro_level(ex.args[1]) !== nothing)
+    while ex isa Expr && ex.head === :macrocall && (_part_concrete_level(ex.args[1]) !== nothing || _fully_typed_macro_level(ex.args[1]) !== nothing)
         ex = ex.args[end]
     end
     return _is_fdef(ex) ? ex : nothing

@@ -1,5 +1,5 @@
 # ---------------------------------------------------------------------------
-# Concrete mode, ported from TraitRegions: an opt-in contract that a trait
+# Fully typed mode, ported from TraitRegions: an opt-in contract that a trait
 # module's code works on concrete types only.
 #
 #     @warn_not_fully_typed @trait_module begin … end    # a whole trait module
@@ -71,7 +71,7 @@ end
 
 # --- what counts as abstract ----------------------------------------------------
 
-"Abstract for the purpose of concrete mode: not concrete, not a type constant, not a small union of concrete types."
+"Abstract for the purpose of fully typed mode: not concrete, not a type constant, not a small union of concrete types."
 function _isabstract(@nospecialize(T))
     T === Union{} && return false
     isconcretetype(T) && return false
@@ -503,14 +503,14 @@ function concrete_findings(@nospecialize(sig))
 end
 
 """
-    concrete_level(f) -> :off, :warn or :error
+    fully_typed_level(f) -> :off, :warn or :error
 
-Concrete mode of a trait module's function: set per function with
+Fully typed mode of a trait module's function: set per function with
 `@warn_not_fully_typed` or `@enforce_fully_typed` inside the module, or for the
 whole module by putting the macro in front of `@trait_module`.
 """
-concrete_level(@nospecialize(f)) = _module_concrete(parentmodule(f))
-function _module_concrete(m::Module)
+fully_typed_level(@nospecialize(f)) = _module_fully_typed(parentmodule(f))
+function _module_fully_typed(m::Module)
     while true
         isdefined(m, :__tw_concrete__) && return getfield(m, :__tw_concrete__)::Symbol
         p = parentmodule(m)
@@ -524,14 +524,14 @@ _sig_reps(@nospecialize(sig)) = join([string(nameof(v.parameters[1]), " at ", v.
                                       for T in sig.parameters if _istobj(T) for v in T.parameters[2].parameters], ", ")
 
 """
-Run concrete mode for a worker signature, per its function's level: warn once, or throw. Two checks:
+Run fully typed mode for a worker signature, per its function's level: warn once, or throw. Two checks:
 abstract values on normal paths, traced to their root causes, and the fully-typed certificate (no
 run-time site on a normal path, in the worker and in what it reaches).
 """
-@machinery function _check_concrete(@nospecialize(sig))
+@machinery function _check_fully_typed(@nospecialize(sig))
     F = _worker_ftype(sig)
     f = F.instance
-    lv = Base.invokelatest(concrete_level, f)::Symbol
+    lv = Base.invokelatest(fully_typed_level, f)::Symbol
     lv === :off && return nothing
     fs = concrete_findings(sig)
     if !isempty(fs)
@@ -551,15 +551,15 @@ run-time site on a normal path, in the worker and in what it reaches).
 end
 
 """
-    check_concrete(f, sig_or_args...) -> Vector{AbstractFinding}
+    check_fully_typed(f, sig_or_args...) -> Vector{AbstractFinding}
 
-Concrete mode's findings for a worker signature, whatever the function's
+Fully typed mode's findings for a worker signature, whatever the function's
 level: for tests and CI.
 """
-check_concrete(@nospecialize(sig::Type)) = concrete_findings(sig)
+check_fully_typed(@nospecialize(sig::Type)) = concrete_findings(sig)
 
-"The level of a concrete-mode prefix (traits reference §11.3): `@warn_not_fully_typed` or `@enforce_fully_typed`."
-function _concrete_macro_level(@nospecialize(head))
+"The level of a fully-typed-mode prefix (traits reference §11.3): `@warn_not_fully_typed` or `@enforce_fully_typed`."
+function _fully_typed_macro_level(@nospecialize(head))
     s = _macro_sym(head)
     return s === Symbol("@warn_not_fully_typed") ? :warn : s === Symbol("@enforce_fully_typed") ? :error : nothing
 end
@@ -588,7 +588,7 @@ end
     @warn_not_fully_typed @trait_module begin … end
     @warn_not_fully_typed f(t::ColTable, …) = …          # inside a trait module
 
-Concrete mode with warnings (traits reference §11.3): the first time a function runs at a
+Fully typed mode with warnings (traits reference §11.3): the first time a function runs at a
 representation (or a package image compiles it there), warn if its code uses abstract types on a
 normal path, naming each root cause.
 """
@@ -600,7 +600,7 @@ end
     @enforce_fully_typed @trait_module begin … end
     @enforce_fully_typed f(t::ColTable, …) = …           # inside a trait module
 
-Concrete mode with errors (traits reference §11.3): the function raises `AbstractTypeError` instead
+Fully typed mode with errors (traits reference §11.3): the function raises `AbstractTypeError` instead
 of running when its code uses abstract types on a normal path.
 """
 macro enforce_fully_typed(ex)
@@ -608,7 +608,7 @@ macro enforce_fully_typed(ex)
 end
 
 macro error_on_abstract(args...)
-    error("`@error_on_abstract` is written `@enforce_fully_typed` (concrete mode, traits reference §11.3)")
+    error("`@error_on_abstract` is written `@enforce_fully_typed` (fully typed mode, traits reference §11.3)")
 end
 
 """
@@ -629,7 +629,7 @@ As `@enforce_concrete_only`, with a warning instead of a refusal (traits referen
 """
 macro warn_on_abstract(args...)
     isempty(args) || !(args[end] isa Expr && args[end].head === :macrocall && endswith(string(args[end].args[1]), "trait_module")) ||
-        error("`@warn_on_abstract` before `@trait_module` is written `@warn_not_fully_typed` (concrete mode, traits reference §11.3)")
+        error("`@warn_on_abstract` before `@trait_module` is written `@warn_not_fully_typed` (fully typed mode, traits reference §11.3)")
     error("`@warn_on_abstract` belongs in a trait's body, or before a bounded function inside a trait module (traits reference §11)")
 end
 
