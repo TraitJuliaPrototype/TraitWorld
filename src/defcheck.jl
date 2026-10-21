@@ -252,10 +252,8 @@ function _keeps_sig(@nospecialize(sig), seen::Base.IdSet{Any})
             ex isa Expr || continue
             if ex.head === :new
                 # a closure that captured a trait object and is returned keeps it
-                CT = _CC.argextype(ex.args[1], src, sptypes)
-                CT = CT isa _CC.Const ? CT.val : _CC.widenconst(CT)
-                CT isa DataType && CT <: Type && (CT = CT.parameters[1])
-                if CT isa DataType && CT <: Function && any(k -> _hastobj(fieldtype(CT, k)), 1:fieldcount(CT))
+                CT = _closure_made(_CC.argextype(ex.args[1], src, sptypes))
+                if CT !== nothing && _captures_tobj(CT)
                     i in returned && return true
                 end
                 continue

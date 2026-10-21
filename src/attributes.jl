@@ -85,14 +85,32 @@ end
 """
 An operation at the erased key: the operation on a `Dynamic` of the held object (the call-site split
 over the candidates, `trait.jl`), its result asserted to the declared type at the erased key, which
-carries the trait's parameters. An operation whose result is `Self` gives a `Dynamic` of the new value.
+carries the trait's parameters. The `Dynamic` is of the trait at the parameter values the view
+carries (`GraphInterface{Int64}`, not `GraphInterface`), so the split's declared result is the one at
+the view's key, with no parameter left open. An operation whose result is `Self` gives a `Dynamic`
+of the new value.
 """
 @inline function _erased_op(::Type{X}, f::F, ::Type{RT}, v, args...) where {X,F,RT}
+    o = getfield(v, :o)
     # an invoke at the constructor's own signature: a fact, so it is inlined and the call stays typed
     # (a call with the `Any`-typed object would be a run-time site of code compiled by facts)
-    d = invoke(Dynamic{X}, Tuple{Val{:checked},Any}, Val(:checked), getfield(v, :o))::Dynamic{X}
-    RT === ErasedSelf && return f(d, args...)
+    RT === ErasedSelf && return f(invoke(Dynamic{X}, Tuple{Val{:checked},Any}, Val(:checked), o)::Dynamic{X}, args...)
+    Xp = _view_trait(typeof(v))
+    d = invoke(Dynamic{Xp}, Tuple{Val{:checked},Any}, Val(:checked), o)::Dynamic{Xp}
     return f(d, args...)::RT
+end
+"""
+The trait of view type `Vw` at the parameter values its key carries, without the key
+(`GraphInterface{Int64}` for a view of `GraphInterface{Int64, ErasedKey{…}}`): what a `Dynamic` of
+its object fixes. The bare trait where it has no parameter, or one is still a type variable.
+"""
+@generated function _view_trait(::Type{Vw}) where {Vw}
+    u = Base.unwrap_unionall((Vw::DataType).parameters[1])::DataType
+    ps = u.parameters
+    n = length(ps)::Int
+    W = u.name.wrapper
+    (n == 1 || any(p -> p isa TypeVar, ps[1:n-1])) && return :($W)
+    return :($(Core.apply_type(W, ps[1:n-1]...)))
 end
 
 "A declared field read on a held object of unknown type: the field on its trait object."
@@ -103,7 +121,9 @@ struct _DynFieldSet{X,f} end
 @inline (::_DynFieldSet{X,f})(o, y) where {X,f} = (setproperty!(_Open{X}()(o), f, y); nothing)   # a `@const` field raises
 """
 A parameter a `Dynamic{X}` leaves open (`Dynamic{IntegratorView}` for `IntegratorView{T, P}`), at its
-erased key: a type no value has, so that a type naming it (`Vector{OpenParam}`) is known to be unknown.
+erased key: a type no value has, so that a type naming it is known to be unknown. A declared type
+that names an open parameter is `OpenParam` itself at the erased key (`@trait`'s methods there), never
+formed with it: a type constructor may bound its parameter (`SimpleEdge{T <: Integer}`).
 """
 struct OpenParam end
 "Whether `T` names `OpenParam` anywhere."

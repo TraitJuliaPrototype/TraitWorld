@@ -23,6 +23,36 @@ end
 _istobj(@nospecialize(T)) = T isa DataType && T.name === Base.typename(TObj)
 _hastobj(@nospecialize(T)) = _istobj(T) || (T isa Union && any(_istobj, Base.uniontypes(T)))
 
+"""
+The closure type a `new` makes, from the inferred type of its first argument, or `nothing`: the
+type itself (a constant), `Type{C}`, or `Type{<:C}` where a captured variable's type is not
+inferred, or `Type{C{…, A}} where A`. `C` then has a parameter for that variable
+(`var"#f#1"{G, A} where A`), so it is a `UnionAll`.
+"""
+function _closure_made(@nospecialize(CT))
+    CT = CT isa _CC.Const ? CT.val : _CC.widenconst(CT)
+    CT isa Type || return nothing
+    if CT <: Type
+        u = Base.unwrap_unionall(CT)
+        (u isa DataType && u.name === Base.typename(Type)) || return nothing
+        p = u.parameters[1]
+        CT = p isa TypeVar ? p.ub : Base.rewrap_unionall(p, CT)   # `Type{C{G, A}} where A`: `C{G, A} where A`
+    end
+    return CT isa Type && CT !== Union{} && CT <: Function ? CT : nothing
+end
+"""
+Whether closure type `C` captures a trait object: a field of a trait object's type. A field whose
+type is a parameter (a captured variable of a type not inferred) is read at its bound.
+"""
+function _captures_tobj(@nospecialize(C))
+    B = Base.unwrap_unionall(C)
+    B isa DataType || return false
+    return any(1:fieldcount(B)) do k
+        ft = fieldtype(B, k)
+        _hastobj(ft isa TypeVar ? ft.ub : ft)
+    end
+end
+
 function _line_of(src, mi, i)
     try
         lin = Base.IRShow.buildLineInfoNode(src.debuginfo, mi, i)
@@ -100,10 +130,8 @@ function _worker_problems(@nospecialize(sig), seen, out, root::Bool)
             if ex isa Expr && ex.head === :new
                 # a closure capturing a trait object: its body runs wherever it is called
                 # (inside Base's `sum`, say), so check it here, for any arguments
-                CT = _CC.argextype(ex.args[1], src, sptypes)
-                CT = CT isa _CC.Const ? CT.val : _CC.widenconst(CT)
-                CT isa Type && CT <: Type && (CT = CT.parameters[1])
-                if CT isa DataType && CT <: Function && any(k -> _hastobj(fieldtype(CT, k)), 1:fieldcount(CT))
+                CT = _closure_made(_CC.argextype(ex.args[1], src, sptypes))
+                if CT !== nothing && _captures_tobj(CT)
                     for mm in Base._methods_by_ftype(Tuple{CT,Vararg{Any}}, -1, world)
                         n = mm.method.nargs - 1
                         worker_problems(Tuple{CT,ntuple(_ -> Any, n)...}, seen, out)

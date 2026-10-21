@@ -219,10 +219,19 @@ end
         using TraitWorld, ..Columns
         ok(t::ColTable) = sum(x -> x * ncols(t), col(t, 1))
         bad(t::ColTable) = map(i -> sum(t), 1:2)
+        # a captured variable whose type is not inferred: the closure's type has a parameter for it
+        unt(t::ColTable, a) = (x = Base.inferencebarrier([5, 6]); all(zip(a, a)) do (s, d); s ∈ x end)
+        unt2(t::ColTable, a) = (x = Base.inferencebarrier([5, 6]); all(p -> p[1] ∈ x, zip(a, a)))
+        unt3(t::ColTable) = (x = Base.inferencebarrier(1.0); sum(c -> c * ncols(t) + x, col(t, 1)))
+        badunt(t::ColTable) = (x = Base.inferencebarrier(1); map(i -> sum(t) + x, 1:2))
         end
     end)
     @test Main.Clo.ok([[1.0, 2.0]]) == 3.0
     @test_throws TraitUseError Main.Clo.bad([[1.0, 2.0]])
+    @test Main.Clo.unt([[1.0, 2.0]], [5, 6]) && !Main.Clo.unt([[1.0, 2.0]], [5, 7])
+    @test Main.Clo.unt2([[1.0, 2.0]], [5, 6])
+    @test Main.Clo.unt3([[1.0, 2.0]]) == 5.0
+    @test_throws TraitUseError Main.Clo.badunt([[1.0, 2.0]])     # a trait object beside it: still checked
 end
 
 # --- M2: capability traits over Base's functions, families, generic implementations ---------

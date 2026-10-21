@@ -167,6 +167,20 @@ function _subst_params(ex, pnames::Vector{Symbol}, name, Rsym::Symbol)
     return Expr(ex.head, Any[_subst_params(a, pnames, name, Rsym) for a in ex.args]...)
 end
 
+"""
+A declared type at the erased key (lowering §13): where it names a parameter the key leaves open
+(`OpenParam`), the type is unknown there, so it is `OpenParam` itself rather than the type formed
+with it (`SimpleEdge{V}` with `SimpleEdge{T <: Integer}` cannot take `OpenParam`). A type that names
+no parameter is as declared. `nothing` where no parameter is named: the generic method serves.
+"""
+function _erased_decl(ex, pnames::Vector{Symbol}, name, Ksym::Symbol)
+    TW = TraitWorld
+    ps = Symbol[p for p in pnames if _mentions(ex, p)]
+    isempty(ps) && return nothing
+    open = foldl((a, b) -> :($a || $b), Any[:($TW.param($name, Val($(QuoteNode(p))), $Ksym) === $TW.OpenParam) for p in ps])
+    return :($open ? $TW.OpenParam : $(_subst_params(ex, pnames, name, Ksym)))
+end
+
 "The `where` clause of a method on trait objects carrying trait `name`: a type variable per parameter and the representation."
 function _tobj_where(name, np::Int, T::Symbol)
     return Any[Expr(:(>:), T, name)]                 # the family: no free type variable (see `PTag`)
@@ -339,6 +353,15 @@ macro trait(header, block = nothing)
                          (let $Rsym = $TW._impl(K__); Tuple{$(argtypes...)}; end)))
         push!(out, :($TW.op_ret(::Type{$name}, ::Val{$key}, ::Type{K__}, ::Val{$N}) where {K__} =
                          (let $Rsym = $TW._impl(K__); $(_subst_params(d.ret, pnames, name, :K__)); end)))
+        # at the erased key, a type naming a parameter the key leaves open is unknown (`OpenParam`)
+        eargs = Any[_erased_decl(t, pnames, name, :K__) for (_, t) in d.args]
+        any(!isnothing, eargs) &&
+            push!(out, :($TW.op_args(::Type{$name}, ::Val{$key}, ::Type{K__}, ::Val{$N}) where {K__ <: $TW.ErasedKey} =
+                             (let $Rsym = $TW._impl(K__); Tuple{$([something(e, a) for (e, a) in zip(eargs, argtypes)]...)}; end)))
+        eret = _erased_decl(d.ret, pnames, name, :K__)
+        eret === nothing ||
+            push!(out, :($TW.op_ret(::Type{$name}, ::Val{$key}, ::Type{K__}, ::Val{$N}) where {K__ <: $TW.ErasedKey} =
+                             (let $Rsym = $TW._impl(K__); $eret; end)))
         d.mutating && push!(out, :($TW.is_mutating(::Type{$name}, ::Val{$key}) = true))
         if d.default !== nothing
             argnames = [n for (n, _) in d.args]
@@ -395,6 +418,10 @@ macro trait(header, block = nothing)
             T = gensym(:T)
             push!(out, :($TW.field_type(::Type{$name}, ::Val{$key}, ::Type{K__}) where {K__} =
                              (let $Rsym = $TW._impl(K__); $(_subst_params(Tex, pnames, name, :K__)); end)))
+            eft = _erased_decl(Tex, pnames, name, :K__)
+            eft === nothing ||
+                push!(out, :($TW.field_type(::Type{$name}, ::Val{$key}, ::Type{K__}) where {K__ <: $TW.ErasedKey} =
+                                 (let $Rsym = $TW._impl(K__); $eft; end)))
             push!(out, :($TW._fieldpos(::Type{$name}, ::Val{$key}) = $(findfirst(x -> x[1] === f, fdecls))))
             Tex === Rsym && push!(out, :($TW.field_isrep(::Type{$name}, ::Val{$key}) = true))
             push!(out, Expr(:(=), Expr(:where, :($TW._tgetprop(t::$TW.TObj{$T}, ::Val{$key})), _tobj_where(name, np, T)...),

@@ -326,3 +326,55 @@ end)
     @test Base.return_types(D.slen, (typeof(d),)) == [Int]
     @test D.sfirst_d([2.0]) === 3.0
 end
+
+# a declared type that applies a type constructor bounding its parameter (`DEdge{T <: Integer}`) to the
+# trait's parameter, on a `Dynamic` (traits §5.2, the same results; lowering §13): at the bound the
+# operation is typed at the parameters the trait object carries; on a `Dynamic` that leaves the
+# parameter open the type is unknown (`Any`), never formed with the open parameter
+toplevel(quote
+    module DynEdgeDecl
+    using TraitWorld
+    export DEdge, DEdges, dnv, dedges, dhas
+    struct DEdge{T <: Integer}; s::T; d::T; end
+    @trait DEdges{V <: Integer} begin
+        dnv(g::DEdges{V})::V
+        dedges(g::DEdges{V})::Vector{DEdge{V}}
+        dhas(g::DEdges{V}, e::DEdge{V})::Bool
+        e0::DEdge{V}                              # the field defines `V`
+    end
+    end
+    using .DynEdgeDecl
+    mutable struct DGraph{T <: Integer}; n::T; e0::DEdge{T}; end   # `e0` is a writable field
+    DynEdgeDecl.dnv(g::DGraph) = g.n
+    DynEdgeDecl.dedges(g::DGraph{T}) where {T} = [g.e0, DEdge{T}(one(T), g.n)]
+    DynEdgeDecl.dhas(g::DGraph{T}, e::DEdge{T}) where {T} = e in DynEdgeDecl.dedges(g)
+    @implement DEdges G where {G <: DGraph}
+    @trait_module module DynEdge
+    using TraitWorld, ..DynEdgeDecl
+    eb(g::DEdges) = (es = dedges(g); (dnv(g), length(es), es[end].d, dhas(g, es[1]), g.e0))
+    ew(g::DEdges{V}) where {V} = (es = dedges(g); (dnv(g) + one(V), es[end]))
+    ef(g::DEdges{Int}) = dedges(g)
+    end
+end)
+
+@testset "a Dynamic's operations: a parameter-bounded type constructor in a declared type" begin
+    D, E = Main.DynEdge, Main.DynEdgeDecl
+    g = Main.DGraph(3, E.DEdge(1, 2))
+    g32 = Main.DGraph(Int32(3), E.DEdge{Int32}(1, 2))
+    # at a bound: the same results as Compiled, typed at the parameter the trait object carries
+    @test D.eb(with_dynamic(g)) == D.eb(compiled_for(g)) == (3, 2, 3, true, E.DEdge(1, 2))
+    @test D.ew(with_dynamic(g32)) == D.ew(compiled_for(g32)) == (Int32(4), E.DEdge{Int32}(1, 3))
+    @test D.ew(with_dynamic(g32))[2] isa E.DEdge{Int32}
+    @test D.ef(with_dynamic(g)) isa Vector{E.DEdge{Int}}
+    # a Dynamic fixing the parameter: typed by it
+    df = Dynamic{E.DEdges{Int}}(g)
+    @test E.dedges(df) == [E.DEdge(1, 2), E.DEdge(1, 3)] && df.e0 === E.DEdge(1, 2)
+    @test Base.return_types(E.dedges, (typeof(df),)) == [Vector{E.DEdge{Int}}]
+    @test Base.return_types(d -> d.e0, (typeof(df),)) == [E.DEdge{Int}]
+    # a Dynamic leaving it open: the results, typed `Any` (the declared type names an open parameter)
+    d = Dynamic{E.DEdges}(g)
+    @test E.dedges(d) == [E.DEdge(1, 2), E.DEdge(1, 3)] && E.dnv(d) === 3 && d.e0 === E.DEdge(1, 2)
+    @test E.dhas(d, E.DEdge(1, 3)) && !E.dhas(d, E.DEdge(2, 3))
+    @test Base.return_types(E.dedges, (typeof(d),)) == [Any]
+    @test Base.return_types(E.dhas, (typeof(d), E.DEdge{Int})) == [Bool]
+end
