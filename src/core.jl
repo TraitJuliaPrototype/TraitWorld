@@ -416,6 +416,7 @@ struct Dynamic{X}
     # from a trait object: only one at the erased key (a `Dynamic` value); one at its key is refused,
     # since only `with_dynamic` changes an attribute
     function Dynamic{X}(t::TObj{T,V}) where {X,T,V}
+        _carries_static(T, X) || Base.inferencebarrier(_dyn_refuse)(X, T)     # another trait first: the clearer error
         _is_erased(V) || Base.inferencebarrier(_cast_refuse)(X, :Dynamic, :Compiled)
         return Dynamic{X}(Val(:keep), t)
     end
@@ -459,8 +460,8 @@ struct Compiled{X}
     t::Any            # the user's object, or a trait object (as for `Dynamic`)
     # from a trait object at its key; one at the erased key is refused (only `compiled_for` casts)
     function Compiled{X}(t::TObj{T,V}) where {X,T,V}
-        _is_erased(V) && Base.inferencebarrier(_cast_refuse)(X, :Compiled, :Dynamic)
         _carries_static(T, X) || Base.inferencebarrier(_dyn_refuse)(X, T, :Compiled)
+        _is_erased(V) && Base.inferencebarrier(_cast_refuse)(X, :Compiled, :Dynamic)
         tn = _narrow(X, t)
         o = _tobj_object(tn)
         if o === nothing
@@ -585,6 +586,8 @@ end
     return Kept{X}(Val(:checked), getfield(c, :t), default_attribute(_family_of(X)) !== :dynamic)
 end
 Base.convert(::Type{Kept{X}}, k::Kept{X}) where {X} = k
+"A plain value assigned where a trait's name is declared: first seen there, the trait's default (traits reference §10)."
+Base.convert(::Type{Kept{X}}, x) where {X} = Kept{X}(x)
 Base.convert(::Type{Kept{X}}, t::Union{TObj,Dynamic{X},Compiled{X}}) where {X} = Kept{X}(t)
 Base.convert(::Type{Dynamic{X}}, t::TObj) where {X} = Dynamic{X}(t)
 Base.convert(::Type{Compiled{X}}, t::TObj) where {X} = Compiled{X}(t)

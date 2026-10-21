@@ -175,7 +175,7 @@ end
 _paramname(p) = p isa Expr && p.head === :(<:) ? p.args[1] : p
 
 """
-A struct with parameters bounded by a trait (traits reference §10.4, lowering §13.2): the bounds
+A struct with parameters bounded by a trait (traits reference §10.5, lowering §13.2): the bounds
 stripped from its header (a trait is not a Julia type), Julia's constructor with explicit parameters
 kept as it is, and the constructor without parameters an entry for the bounded fields: each field
 typed exactly by a bounded parameter takes that parameter's bound, where the caller's cast or the
@@ -256,23 +256,22 @@ function _bounded_struct(mod::Module, ex::Expr)
 end
 
 """
-A type with each trait's name in it made `Kept{X}`, and so `Dynamic{X}` and `Compiled{X}` as a
-field's type or a parameter: in storage an attribute is only the default for a value first seen
-there, never a cast (traits reference §6.6). In an argument's type (`arg`), such a parameter is
+A type with each trait's name in it (and `Callable{A, S}`) made `Kept{X}`, the one spelling of a
+value kept with its attribute; `Dynamic{X}` and `Compiled{X}` written out stay the plain types
+(traits reference §10). In an argument's type (`arg`), a trait's name as a parameter is
 `<:HeldValue{X}`: Julia's parameters are invariant, so `cs::Vector{Column}` takes a
 `Vector{Dynamic{Column}}`, a `Vector{Compiled{Column}}` and a `Vector{Kept{Column}}` alike.
 """
 function _dyn_type(mod::Module, T, arg::Bool = false, inner::Bool = false)
     kept(X) = arg && inner ? Expr(:(<:), :($TraitWorld.HeldValue{$X})) : :($TraitWorld.Kept{$X})
-    if T isa Expr && T.head === :curly && (h0 = _tryeval(mod, T.args[1]); h0 === Dynamic || h0 === Compiled)
-        return (inner || !arg) && length(T.args) == 2 ? kept(T.args[2]) : T
-    end
+    _iskepttype(mod, T) && return T                          # `Kept{X}`, `HeldValue{X}`: already the storage type
+    T isa Expr && T.head === :curly && (h0 = _tryeval(mod, T.args[1]); h0 === Dynamic || h0 === Compiled) && return T
     if T isa Symbol || (T isa Expr && T.head === :.)
         v = _tryeval(mod, T)
         return (v isa Type && is_trait(v)) ? kept(T) : T
     elseif T isa Expr && T.head === :curly
         h = _tryeval(mod, T.args[1])
-        h isa Type && is_trait(h) && return kept(T)
+        ((h === Callable && (inner || !arg)) || (h isa Type && is_trait(h))) && return kept(T)   # `f::Callable{…}` on an argument stays a bound
         return Expr(:curly, T.args[1], Any[(a isa Expr && a.head === :(<:)) ? a : _dyn_type(mod, a, arg, true) for a in T.args[2:end]]...)
     end
     return T
@@ -290,6 +289,10 @@ function _dynamic_containers(mod::Module, ex::Expr)
 end
 "Whether `x` names `Dynamic` or `Compiled`: an attribute on a bound (traits reference §6.1)."
 _isattribute(mod::Module, x) = (x isa Symbol || (x isa Expr && x.head === :.)) && (v = _tryeval(mod, x); v === Dynamic || v === Compiled)
+"Whether `T` is `Kept{X}` or `HeldValue{X}` written out: the storage type itself."
+_iskepttype(mod::Module, T) = T isa Expr && T.head === :curly && (h = _tryeval(mod, T.args[1]); h === Kept || h === HeldValue)
+"Whether type expression `T` names `Dynamic{X}` or `Compiled{X}` anywhere."
+_has_attributed(mod::Module, T) = _isattributed(mod, T) || (T isa Expr && any(a -> _has_attributed(mod, a), T.args))
 "Whether `x` is `Dynamic{X}` or `Compiled{X}` written out."
 _isattributed(mod::Module, x) = x isa Expr && x.head === :curly && length(x.args) == 2 && _isattribute(mod, x.args[1])
 _istraitname(mod::Module, x) = (x isa Symbol || (x isa Expr && x.head === :.)) && (v = _tryeval(mod, x); v isa Type && is_trait(v))
@@ -346,11 +349,11 @@ function _dyn_body(mod::Module, x)
     x.head in (:quote, :inert, :meta) && return x
     if x.head in (:ref, :typed_vcat, :typed_hcat, :typed_comprehension) && _istraitname(mod, x.args[1])
         return Expr(x.head, :($TraitWorld.Kept{$(x.args[1])}), Any[_dyn_body(mod, a) for a in x.args[2:end]]...)
-    elseif x.head in (:ref, :typed_vcat, :typed_hcat, :typed_comprehension) && _isattributed(mod, x.args[1])
-        return Expr(x.head, :($TraitWorld.Kept{$(x.args[1].args[2])}), Any[_dyn_body(mod, a) for a in x.args[2:end]]...)
-    elseif x.head === :curly && _isattribute(mod, x.args[1])
-        return x                                     # `Dynamic{X}(t)`, `::Compiled{X}`: a type, not storage
-    elseif x.head === :curly && !_istraitname(mod, x.args[1]) && any(a -> _istraitname(mod, a) || _isattributed(mod, a), x.args[2:end])
+    elseif x.head === :curly && (_isattribute(mod, x.args[1]) || _iskepttype(mod, x))
+        return x                                     # `Dynamic{X}(t)`, `::Compiled{X}`, `Kept{X}(t)`: a type, not storage
+    elseif x.head === :(::) && length(x.args) == 2 && _has_attributed(mod, x.args[2])
+        return Expr(:(::), _dyn_body(mod, x.args[1]), x.args[2])   # a type assertion: written as it is meant, not storage
+    elseif x.head === :curly && !_istraitname(mod, x.args[1]) && any(a -> _istraitname(mod, a), x.args[2:end])
         return _dyn_type(mod, x)
     end
     return Expr(x.head, Any[_dyn_body(mod, a) for a in x.args]...)

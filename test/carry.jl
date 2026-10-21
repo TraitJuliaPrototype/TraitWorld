@@ -1,4 +1,4 @@
-# Values carry their attribute through storage (traits reference §6.6, §10, §10.3, §10.4): a value's
+# Values carry their attribute through storage (traits reference §6.6, §10, §10.3, §10.5): a value's
 # `Compiled` or `Dynamic` is set where a plain value first meets a trait and kept through calls,
 # bounds and storage; only `compiled_for` and `with_dynamic` change it; constructors and types never
 # cast. A trait's name in storage is `Kept{X}`; a struct parameter bounded by a trait keeps the value
@@ -10,7 +10,7 @@ isdefined(Main, :toplevel) || (toplevel(ex) = Core.eval(Main, ex isa Expr && ex.
 toplevel(quote
     @trait_module module Carry
     using TraitWorld
-    export Shape, area, kind, kinds, kinds_c, kinds_d, Bag, keep!, bagkinds, recast!, Holder, ShapeBox, boxit, applyh, boxkind
+    export Shape, area, kind, kinds, kinds_c, kinds_d, Bag, keep!, bagkinds, recast!, Holder, ShapeBox, boxit, applyh, boxkind, DynBox, putd!, kwkind
     @trait Shape begin
         area(s::Shape)::Float64
     end
@@ -20,8 +20,13 @@ toplevel(quote
     kinds_d(ms::Iterable{Dynamic{Shape}}) = (r = Symbol[]; for m in ms; push!(r, kind(m)); end; r)
     mutable struct Bag
         items::Vector{Shape}                 # Kept{Shape}: each value with its attribute
-        last::Dynamic{Shape}                 # an attribute in storage is a default only: Kept{Shape} too
+        last::Shape                          # Kept{Shape}
     end
+    mutable struct DynBox
+        d::Dynamic{Shape}                    # the plain type: Dynamic values only
+    end
+    putd!(b::DynBox, s::Shape) = (b.d = s; nothing)
+    kwkind(t::Shape; s::Shape) = kind(s)             # a positional bound beside it (traits T-48)
     keep!(b::Bag, s::Shape) = (push!(b.items, s); b.last = s; nothing)
     bagkinds(b::Bag) = (r = Symbol[]; for m in b.items; push!(r, kind(m)); end; r)
     recast!(xs::MutableIndexable{Shape}) = (xs[1] = compiled_for(xs[1]); nothing)   # a library's cast, written back
@@ -65,7 +70,7 @@ end
 @testset "values carry: storage keeps each value's attribute" begin
     C = Main.Carry; S = C.Shape; h = Main.CHex(1.0)
     b = C.Bag(Kept{S}[], Kept{S}(Dynamic{S}(h)))
-    @test fieldtype(C.Bag, :items) === Vector{Kept{S}} && fieldtype(C.Bag, :last) === Kept{S}
+    @test fieldtype(C.Bag, :items) === Vector{Kept{S}} && fieldtype(C.Bag, :last) === Kept{S} && fieldtype(C.DynBox, :d) === Dynamic{S}
     typed(b, x::Main.CHex) = Main.Carry.keep!(b, x)           # a caller that knows the type: Compiled
     C.keep!(b, h)                                             # at the prompt: Dynamic
     typed(b, h)
@@ -74,6 +79,14 @@ end
     @test C.bagkinds(b) == [:dynamic, :compiled, :compiled, :dynamic, :compiled, :dynamic]
     @test getfield(b.last, :compiled) === false
     @test sprint(show, b.items[2]) == "Kept{$(S)}: Compiled at $(Main.CHex)"
+    b.last = Main.CSq(2.0)                                    # a plain value from plain code: the trait's default
+    @test getfield(b.last, :compiled)
+    db = C.DynBox(Dynamic{S}(h))
+    C.putd!(db, h)                                            # Dynamic at the prompt: fits
+    tput(b, x::Main.CHex) = Main.Carry.putd!(b, x)
+    @test_throws TraitBoundError tput(db, h)                  # a Compiled value into a Dynamic{X} field: types never cast
+    @test C.kwkind(h; s = Compiled{S}(h)) === :compiled && C.kwkind(h; s = Kept{S}(Dynamic{S}(h))) === :dynamic   # at a keyword too
+    @test TraitWorld.is_dynamic(Kept{S}(Dynamic{S}(h))) && !TraitWorld.is_dynamic(Compiled{S}(h))
 end
 
 @testset "values carry: casts, constructors, equality" begin

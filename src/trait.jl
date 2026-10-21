@@ -339,7 +339,13 @@ macro trait(header, block = nothing)
             # where Julia does not inline the cycle's members, passes no varargs tuple (boxed per call)
             # The split is over the dynamic value's object: the user's object, whose candidates are the
             # declared implementations' types (or a trait object it holds instead, lowering §13)
-            rhs = :($TW.CC.split_call($TW._family_of($X__), $retx, $TW._dynop($X__, $(d.fexpr)), getfield(dyn, :t), $(syms...))::$retx)
+            # the seams first (lowering §13): a trait object at an argument declared `Dynamic{Y}`, `Compiled{Y}`
+            # or `Kept{Y}` becomes that value, its attribute kept; one argument at a time, no tuple
+            AT = :($TW.op_args($name, Val($(QuoteNode(d.name))), $TW._erased_key_of($X__), Val($(length(d.args)))))
+            seams = Any[:($(syms[i]) = $TW._seam1(fieldtype($AT, $i), $(syms[i]))) for i in eachindex(syms)]
+            rhs = :(let $(seams...)
+                        $TW.CC.split_call($TW._family_of($X__), $retx, $TW._dynop($X__, $(d.fexpr)), getfield(dyn, :t), $(syms...))::$retx
+                    end)
         end
         # inferred again at every call site (`@constprop :aggressive`): each caller splits the call over
         # the candidates known when it is compiled

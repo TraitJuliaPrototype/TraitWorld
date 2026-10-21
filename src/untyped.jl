@@ -177,7 +177,7 @@ end
 # is called directly: a call with an `Any` argument would be a run-time site where the wrapper is
 # compiled by facts.
 struct _UWrap end
-for n in 0:5
+for n in 0:8                       # as many as `checked_call`'s fixed arities
     as = [Symbol(:a, k) for k in 1:n]
     hs = [Expr(:new, :XAny, a) for a in as]
     @eval (::_UWrap)(o::_UCall{G,B}, $([:(@nospecialize($a)) for a in as]...)) where {G,B} = G.instance(getfield(o, :b)::B, $(hs...))

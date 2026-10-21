@@ -517,12 +517,13 @@ that conforms to none of them is refused at the entry.
     t = getfield(nt, k)
     t isa TObj && return nt
     # as `enter`: the caller's conversion, a dynamic value carried, the attribute, the traits' default, `known`
-    dyn = t isa WithDynamic || t isa Dynamic ||
-          (!(t isa CompiledFor) && (attr === :dynamic || (attr !== :compiled &&
+    # a held value or a cast carries its attribute; a plain value as at a positional bound
+    dyn = t isa WithDynamic || ((t isa Dynamic || t isa Compiled || t isa Kept) && is_dynamic(t)) ||
+          (!(t isa CompiledFor || t isa Compiled || t isa Kept) && (attr === :dynamic || (attr !== :compiled &&
                                     ((_any_dynamic_default(l) && !_from_trait_world(t)) || !kn))))
     t isa CompiledFor && (t = getfield(t, :x))
     t isa WithDynamic && (t = getfield(t, :x))
-    t isa Dynamic && (t = _dyn_held(t))
+    (t isa Dynamic || t isa Compiled || t isa Kept) && (t = _dyn_held(t))
     v = t isa TObj ? t : _assemble(l, t)
     v === NOTRAIT && Base.inferencebarrier(_kw_refused)(f, k, t, l)
     if dyn
@@ -805,7 +806,7 @@ bounded_constructor(@nospecialize(S)) = false
 """
     _kept_at(B, x, Val(known))
 
-The stored form of `x` at a struct parameter bounded by `B` (traits reference §10.4): its attribute
+The stored form of `x` at a struct parameter bounded by `B` (traits reference §10.5): its attribute
 as a bound gives it (the caller's cast, a value's carried attribute, else the first-seen rule, with
 `known` evaluated in the constructor's body), then for a `Compiled` value the user's object itself
 (the function, for `Callable`), whose type becomes the parameter, and for a `Dynamic` one `Dynamic{B}`.
@@ -865,7 +866,8 @@ to `S`, of a type that does not depend on the function. Made from a plain functi
 `Dynamic` function (a `with_dynamic(f)`, a `Dynamic` or `Kept` value held at any signature); a
 `Compiled` one is refused, since only `with_dynamic` changes an attribute. Calling it is the checked call.
 """
-function (::Type{Dynamic{C}})(@nospecialize(f)) where {C<:Callable}
+(::Type{Dynamic{C}})(@nospecialize(f)) where {C<:Callable} = _callable_dynamic(C, f)
+function _callable_dynamic(::Type{C}, @nospecialize(f)) where {C<:Callable}
     u = Base.unwrap_unionall(C)
     A, S = u.parameters
     f isa Dynamic{C} && return f
@@ -880,7 +882,8 @@ end
 # not know its type. A call selects the code compiled for the function by its type (one dynamic call);
 # passed to a bound, the worker compiled for the function runs. Made from a plain function, or kept
 # from a `Compiled` one; a `Dynamic` one is refused, since only `compiled_for` changes an attribute.
-function (::Type{Compiled{C}})(@nospecialize(f)) where {C<:Callable}
+(::Type{Compiled{C}})(@nospecialize(f)) where {C<:Callable} = _callable_compiled(C, f)
+function _callable_compiled(::Type{C}, @nospecialize(f)) where {C<:Callable}
     f isa Compiled{C} && return f
     _held_callable_dynamic(f) && Base.inferencebarrier(_cast_refuse)(C, :Compiled, :Dynamic)
     f isa CompiledFor && (f = getfield(f, :x))
@@ -893,7 +896,8 @@ end
 # `f` kept with its attribute: a function argument by how it is held (the function itself `Compiled`,
 # an erased one `Dynamic`), a held value or a caller's cast as it is, a plain function by `Callable`'s
 # default, `Dynamic`.
-function (::Type{Kept{C}})(@nospecialize(f)) where {C<:Callable}
+(::Type{Kept{C}})(@nospecialize(f)) where {C<:Callable} = _callable_kept(C, f)
+function _callable_kept(::Type{C}, @nospecialize(f)) where {C<:Callable}
     u = Base.unwrap_unionall(C)
     A, S = u.parameters
     f isa Kept{C} && return f
@@ -919,9 +923,10 @@ Base.convert(::Type{Kept{C}}, c::Union{Dynamic{C},Compiled{C}}) where {C<:Callab
 @inline function (d::Dynamic{Callable{A,S}})(args...) where {A,S}
     return (getfield(d, :t)::CObj{A,S,Erased{A,S}})(args...)
 end
-@inline (c::Compiled{Callable{A,S}})(args...) where {A,S} = CObj{A,S}(getfield(c, :t))(args...)
+# the function's type is not known here: one dynamic call, its result asserted to the declared type
+@inline (c::Compiled{Callable{A,S}})(args...) where {A,S} = CObj{A,S}(getfield(c, :t))(args...)::S
 @inline function (k::Kept{Callable{A,S}})(args...) where {A,S}
-    getfield(k, :compiled) && return CObj{A,S}(getfield(k, :t))(args...)
+    getfield(k, :compiled) && return CObj{A,S}(getfield(k, :t))(args...)::S
     return (getfield(k, :t)::CObj{A,S,Erased{A,S}})(args...)
 end
 # the casts, on `Callable`'s held values: the function moves between its forms

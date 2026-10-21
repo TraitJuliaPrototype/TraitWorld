@@ -132,8 +132,8 @@ function _worker_problems(@nospecialize(sig), seen, out, root::Bool)
             _keeps_dynamic(f, ats, ex, src, sptypes) && continue
             # the conversions (traits reference §6.6), and the test of a trait object's attribute
             (f === compiled_for || f === with_dynamic || f === is_dynamic) && continue
-            # a struct parameter bounded by a trait keeps the value in its stored form (traits reference §10.4)
-            (f === _kept_at || f === _known_type) && continue
+            # a struct parameter bounded by a trait keeps the value in its stored form (traits reference §10.5)
+            (f === _kept_at || f === _known_type || f === _seam1) && continue
             f isa Type && bounded_constructor(f) && continue        # its constructor is the bound
             # a result like the input, which only the entry inverts
             (f === like || f === withfields || (f isa Type && f <: LikeResult) ||

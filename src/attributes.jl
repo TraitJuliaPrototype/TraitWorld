@@ -62,6 +62,7 @@ end
 "Whether a trait object is `Dynamic`: its views are at the erased key."
 @generated _is_erased(::Type{V}) where {V<:Tuple} = all(_is_erased_view, (V::DataType).parameters)
 is_dynamic(t::TObj{T,V}) where {T,V} = _is_erased(V)
+is_dynamic(h::HeldValue) = !_held_compiled(h)
 "The object a trait object's views read, or the trait object itself where they hold only parts."
 @inline function _held_object(t::TObj)
     o = _tobj_object(t)
@@ -135,6 +136,10 @@ changes an attribute). Every other argument passes as it is.
     end
 end
 
+"One argument through the seam: a trait object where a held type is declared becomes that type's value, its attribute kept (refused where the type fixes the other one)."
+@inline _seam1(::Type{D}, a) where {D} = a
+@inline _seam1(::Type{D}, t::TObj) where {D<:HeldValue} = D(t)
+
 # --- the conversions: `compiled_for`, `with_dynamic` --------------------------------
 
 """
@@ -167,6 +172,19 @@ end
 "A plain value converted by `with_dynamic`, until it is first seen through a trait (then a `Dynamic{X}`)."
 struct WithDynamic
     x::Any
+end
+# plain code's casts meet a held form: kept where the attribute matches, refused otherwise (constructors never cast)
+Compiled{X}(c::CompiledFor) where {X} = Compiled{X}(getfield(c, :x))
+Dynamic{X}(w::WithDynamic) where {X} = Dynamic{X}(getfield(w, :x))
+Compiled{X}(::WithDynamic) where {X} = Base.inferencebarrier(_cast_refuse)(X, :Compiled, :Dynamic)
+Dynamic{X}(::CompiledFor) where {X} = Base.inferencebarrier(_cast_refuse)(X, :Dynamic, :Compiled)
+Kept{X}(c::CompiledFor) where {X} = Kept{X}(Compiled{X}(getfield(c, :x)))
+Kept{X}(w::WithDynamic) where {X} = Kept{X}(Dynamic{X}(getfield(w, :x)))
+Base.convert(::Type{Kept{X}}, c::Union{CompiledFor,WithDynamic}) where {X} = Kept{X}(c)
+# the same at `Callable`, whose constructors take any argument (entry.jl): stated, so that neither is ambiguous
+for T in (:Dynamic, :Compiled, :Kept), W in (:CompiledFor, :WithDynamic)
+    h = T === :Dynamic ? :_callable_dynamic : T === :Compiled ? :_callable_compiled : :_callable_kept
+    @eval (::Type{$T{C}})(w::$W) where {C<:Callable} = $h(C, w)
 end
 "The trait object at its own key of a `Dynamic` trait object's held object: what `compiled_for` opens it to."
 function _open_erased(t::TObj{T,V}) where {T,V}
