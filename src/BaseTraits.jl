@@ -12,9 +12,10 @@ Version 0 has what heterogeneous collections need:
   families through Base's abstract types: `AbstractArray`, `AbstractVector`, `Vector`,
   `AbstractDict`.
 - A function bounded by `Iterable{Shape}` and the like takes a user's container whose items are
-  not `Dynamic{Shape}` directly: its entry translates it into a view with items `Dynamic{Shape}`,
-  `DynamicItems{X}(v)` or `DynamicValues{X}(d)`, which wraps each element when it is read. No copy:
-  reads and writes go to the user's container. The views can also be made explicitly.
+  not kept values of `Shape` directly: its entry translates it into a view, `DynamicItems{X}(v)`,
+  `CompiledItems{X}(v)`, `DynamicValues{X}(d)` or `CompiledValues{X}(d)`, which sees each item
+  through the trait when it is read. An item that carries its attribute keeps it. No copy: reads
+  and writes go to the user's container. The views can also be made explicitly.
 - `retain!(f, xs)`: keeps the items for which `f` is `true`, in place.
 
 The owner of these traits is TraitWorld. As their owner it declares Base's types' conformance
@@ -22,7 +23,7 @@ The owner of these traits is TraitWorld. As their owner it declares Base's types
 """
 @trait_module module BaseTraits
 using ..TraitWorld
-using ..TraitWorld: _dyn_object, @dynamic_of, TObj
+using ..TraitWorld: _dyn_object, @dynamic_of, @kept_of, TObj, Kept, compiled_for, with_dynamic
 
 export HasLength, Iterable, Indexable, MutableIndexable, Resizable, Keyed,
        DynamicItems, DynamicValues, CompiledItems, CompiledValues, retain!
@@ -39,7 +40,7 @@ end
 
 Base's iteration protocol, with the item type `T` as an associated type (`eltype`): a `for`
 loop over a value bounded by `Iterable{T}` sees items of type `T`. Inside a trait module,
-`Iterable{Shape}` means `Iterable{Dynamic{Shape}}`, as a trait's name in a container does.
+`Iterable{Shape}` names an item position: items seen through `Shape`, each `Compiled` or `Dynamic`.
 """
 @trait Iterable{T} begin
     T = eltype(Self)
@@ -88,36 +89,63 @@ end
 @implement Resizable A where {A <: Vector}
 @implement Keyed D where {D <: AbstractDict}
 
-# --- a user's container, its items seen as `Dynamic{X}` ------------------------------------------
+# --- a user's container, its items seen through a trait ------------------------------------------
+#
+# Items of an abstract type are read as `Kept{X}`: each keeps the attribute it carries (a `Kept{X}`,
+# `Compiled{X}`, `Dynamic{X}`, `compiled_for(x)`, `with_dynamic(x)`), and a plain item is first seen
+# there, `Dynamic` in `DynamicItems`, `Compiled` in `CompiledItems` (traits reference §10.3). A write
+# stores what reads back as the same value with the same attribute, in plain code's own forms: the
+# user's object where a plain item of the view reads so, else `compiled_for(o)` or `with_dynamic(o)`;
+# a container that can hold neither refuses it (types never cast).
+
+"""
+The value to store for `x` into a user's container of items `E`, whose plain items the view reads with
+attribute `plain_compiled`: the user's object, or plain code's cast of it.
+"""
+@inline function _written(::Type{E}, plain_compiled::Bool, x) where {E}
+    o = _dyn_object(x)
+    TraitWorld._held_compiled(x) === plain_compiled && return o
+    w = plain_compiled ? with_dynamic(o) : compiled_for(o)
+    w isa E || Base.inferencebarrier(_unwritable)(E, x)
+    return w
+end
+@noinline _unwritable(@nospecialize(E), @nospecialize(x)) =
+    throw(TraitBoundError("a $(TraitWorld._held_compiled(x) ? "Compiled" : "Dynamic") value cannot be written to a container of $E, " *
+                          "whose plain items are read with the other attribute: types never cast; cast it with " *
+                          (TraitWorld._held_compiled(x) ? "`with_dynamic`" : "`compiled_for`")))
 
 """
     DynamicItems{X}(v)
 
-The vector `v`, its items seen as `Dynamic{X}`: each item is wrapped when it is read, and `v`
-itself is read and written, never copied. An item that does not conform to `X` raises
-`TraitBoundError` when it is read. Writing a `Dynamic{X}` stores the user's object it holds.
+The vector `v`, its items seen through `X`, each a `Kept{X}`: an item that carries its attribute keeps
+it, a plain item is `Dynamic`. Each item is seen when it is read, and `v` itself is read and written,
+never copied. An item that does not conform to `X` raises `TraitBoundError` when it is read.
 """
 struct DynamicItems{X, V <: AbstractVector}
     data::V
 end
 DynamicItems{X}(v::V) where {X, V <: AbstractVector} = DynamicItems{X, V}(v)
-Base.eltype(::Type{DynamicItems{X, V}}) where {X, V} = Dynamic{X}
+Base.eltype(::Type{DynamicItems{X, V}}) where {X, V} = Kept{X}
 Base.parent(d::DynamicItems) = d.data
 Base.length(d::DynamicItems) = length(d.data)
 Base.size(d::DynamicItems) = size(d.data)
-# The wrapping is written out at each read (`@dynamic_of`): a helper taking the item, typed `Any`,
+# The wrapping is written out at each read (`@kept_of`): a helper taking the item, typed `Any`,
 # would be a run-time site of the trait module (facts §5), its result `Any`.
-Base.@propagate_inbounds Base.getindex(d::DynamicItems{X}, i::Int) where {X} = @dynamic_of(X, d.data[i])
+Base.@propagate_inbounds Base.getindex(d::DynamicItems{X}, i::Int) where {X} = @kept_of(X, d.data[i], :dynamic)
 # The store is split over the object's candidate types, as an operation on it is: at a candidate's
 # type, `setindex!` on the user's vector is a call at concrete types, not a run-time site.
-Base.@propagate_inbounds function Base.setindex!(d::DynamicItems{X}, x::Dynamic{X}, i::Int) where {X}
-    TraitWorld.CC.split_call(TraitWorld._family_of(X), Nothing, _store!, _dyn_object(x), d.data, i)
+Base.@propagate_inbounds function Base.setindex!(d::DynamicItems{X, V}, x::TraitWorld.HeldValue{X}, i::Int) where {X, V}
+    if TraitWorld._held_compiled(x)
+        d.data[i] = _written(eltype(V), false, x)
+    else
+        TraitWorld.CC.split_call(TraitWorld._family_of(X), Nothing, _store!, _dyn_object(x), d.data, i)
+    end
     return d
 end
 Base.@propagate_inbounds _store!(o, data, i::Int) = (data[i] = o; nothing)
 @inline function Base.iterate(d::DynamicItems{X}, i::Int = 1) where {X}
     i > length(d.data) && return nothing
-    return (@dynamic_of(X, @inbounds d.data[i]), i + 1)
+    return (@kept_of(X, @inbounds(d.data[i]), :dynamic), i + 1)
 end
 Base.resize!(d::DynamicItems, n::Int) = (resize!(d.data, n); d)
 Base.show(io::IO, d::DynamicItems{X}) where {X} = print(io, "DynamicItems{", X, "} of a ", typeof(d.data))
@@ -131,19 +159,19 @@ Base.show(io::IO, d::DynamicItems{X}) where {X} = print(io, "DynamicItems{", X, 
 """
     DynamicValues{X}(d)
 
-The dictionary `d`, its values seen as `Dynamic{X}`: `Keyed{K, Dynamic{X}}`, and
-`Iterable{Pair{K, Dynamic{X}}}`. Each value is wrapped when it is read; `d` is not copied.
+The dictionary `d`, its values seen through `X` as `DynamicItems` sees a vector's items, each a
+`Kept{X}`: `Keyed{K, Kept{X}}`, and `Iterable{Pair{K, Kept{X}}}`. `d` is not copied.
 """
 struct DynamicValues{X, D <: AbstractDict}
     data::D
 end
 DynamicValues{X}(d::D) where {X, D <: AbstractDict} = DynamicValues{X, D}(d)
 Base.keytype(::Type{DynamicValues{X, D}}) where {X, D} = keytype(D)
-Base.valtype(::Type{DynamicValues{X, D}}) where {X, D} = Dynamic{X}
-Base.eltype(::Type{DynamicValues{X, D}}) where {X, D} = Pair{keytype(D), Dynamic{X}}
+Base.valtype(::Type{DynamicValues{X, D}}) where {X, D} = Kept{X}
+Base.eltype(::Type{DynamicValues{X, D}}) where {X, D} = Pair{keytype(D), Kept{X}}
 Base.parent(d::DynamicValues) = d.data
 Base.length(d::DynamicValues) = length(d.data)
-Base.getindex(d::DynamicValues{X}, k) where {X} = @dynamic_of(X, d.data[k])
+Base.getindex(d::DynamicValues{X}, k) where {X} = @kept_of(X, d.data[k], :dynamic)
 Base.haskey(d::DynamicValues, k) = haskey(d.data, k)
 # keys and values iterate in the same order (Base's `keys` and `values`): iterating both avoids the
 # `Pair{K, Any}` that iterating a `Dict{K, Any}` itself builds at a run-time site
@@ -151,12 +179,12 @@ Base.haskey(d::DynamicValues, k) = haskey(d.data, k)
 @inline function Base.iterate(d::DynamicValues{X}) where {X}
     kr = iterate(keys(d.data)); vr = iterate(values(d.data))
     (kr === nothing || vr === nothing) && return nothing
-    return (getfield(kr, 1) => @dynamic_of(X, getfield(vr, 1)), (getfield(kr, 2), getfield(vr, 2)))
+    return (getfield(kr, 1) => @kept_of(X, getfield(vr, 1), :dynamic), (getfield(kr, 2), getfield(vr, 2)))
 end
 @inline function Base.iterate(d::DynamicValues{X}, s) where {X}
     kr = iterate(keys(d.data), getfield(s, 1)); vr = iterate(values(d.data), getfield(s, 2))
     (kr === nothing || vr === nothing) && return nothing
-    return (getfield(kr, 1) => @dynamic_of(X, getfield(vr, 1)), (getfield(kr, 2), getfield(vr, 2)))
+    return (getfield(kr, 1) => @kept_of(X, getfield(vr, 1), :dynamic), (getfield(kr, 2), getfield(vr, 2)))
 end
 Base.show(io::IO, d::DynamicValues{X}) where {X} = print(io, "DynamicValues{", X, "} of a ", typeof(d.data))
 
@@ -169,27 +197,25 @@ Base.show(io::IO, d::DynamicValues{X}) where {X} = print(io, "DynamicValues{", X
 """
     CompiledItems{X}(v)
 
-The vector `v`, its items seen through `X` as `Compiled` values: each item is read as its trait object
-at its own key (traits reference §10.3). For a concrete item type the trait object's type is known
-and the code over the items is compiled for it; for an abstract one each item's key is selected when
-it is read. `v` is read and written, never copied. An item that does not conform raises
-`TraitBoundError` when it is read.
+The vector `v`, its items seen through `X` as `Compiled` values (traits reference §10.3). For a
+concrete item type each item is read as its trait object at its own key, a type the code knows, and
+the code over the items is compiled for it. For an abstract one each item is a `Kept{X}`: `Compiled`,
+opened by its type at the next bound, unless it carries `Dynamic`. `v` is read and written, never
+copied. An item that does not conform raises `TraitBoundError` when it is read.
 """
 struct CompiledItems{X, V <: AbstractVector}
     data::V
 end
 CompiledItems{X}(v::V) where {X, V <: AbstractVector} = CompiledItems{X, V}(v)
-"The type of an item of type `E` seen through `X` at its own key: its trait object's type where it is known."
+"The type of an item of type `E` seen through `X` as `Compiled`: its trait object's type where `E` is concrete, else `Kept{X}`."
 function _compiled_item_type(::Type{X}, ::Type{E}) where {X, E}
     if isconcretetype(E)
         T = Base.promote_op(_item_tobj, Type{X}, E)
         T isa DataType && T <: TObj && isconcretetype(T) && return T
+        return Any
     end
-    # not known: `Any` (a view's trait set still says its items are seen through `X`: `_encode_traits`)
-    return Any
+    return Kept{X}
 end
-"An item read at its own key."
-@inline _citem(::Type{X}, ::Type{E}, x) where {X, E} = x
 "The trait object of an item at its own key, or an error if it does not conform."
 @inline function _item_tobj(::Type{X}, x) where {X}
     v = TraitWorld._assemble(TraitWorld._family_list(X), x)
@@ -200,10 +226,19 @@ Base.eltype(::Type{CompiledItems{X, V}}) where {X, V} = _compiled_item_type(X, e
 Base.parent(d::CompiledItems) = d.data
 Base.length(d::CompiledItems) = length(d.data)
 Base.size(d::CompiledItems) = size(d.data)
-# an item of unknown type: `_item_tobj` is a run-time site, the item's key selected when it is read
-Base.@propagate_inbounds Base.getindex(d::CompiledItems{X, V}, i::Int) where {X, V} = _citem(X, eltype(V), _item_tobj(X, d.data[i]))
-Base.@propagate_inbounds function Base.setindex!(d::CompiledItems, x::TObj, i::Int)
+Base.@propagate_inbounds Base.getindex(d::CompiledItems{X, V}, i::Int) where {X, V} =
+    isconcretetype(eltype(V)) ? _item_tobj(X, d.data[i]) : @kept_of(X, d.data[i], :compiled)
+Base.@propagate_inbounds function Base.setindex!(d::CompiledItems{X, V}, x::TObj{T, W}, i::Int) where {X, V, T, W}
+    TraitWorld._is_erased(W) && return setindex!(d, Kept{X}(x), i)
     d.data[i] = _object_of(x)
+    return d
+end
+Base.@propagate_inbounds function Base.setindex!(d::CompiledItems{X, V}, x::TraitWorld.HeldValue{X}, i::Int) where {X, V}
+    if TraitWorld._held_compiled(x)
+        TraitWorld.CC.split_call(TraitWorld._family_of(X), Nothing, _store!, _dyn_object(x), d.data, i)
+    else
+        d.data[i] = _written(eltype(V), true, x)
+    end
     return d
 end
 "The user's object a trait object reads, to store back into the user's container."
@@ -214,7 +249,7 @@ function _object_of(x::TObj)
 end
 @inline function Base.iterate(d::CompiledItems{X, V}, i::Int = 1) where {X, V}
     i > length(d.data) && return nothing
-    return (_citem(X, eltype(V), _item_tobj(X, @inbounds d.data[i])), i + 1)
+    return (isconcretetype(eltype(V)) ? _item_tobj(X, @inbounds(d.data[i])) : @kept_of(X, @inbounds(d.data[i]), :compiled), i + 1)
 end
 Base.resize!(d::CompiledItems, n::Int) = (resize!(d.data, n); d)
 Base.show(io::IO, d::CompiledItems{X}) where {X} = print(io, "CompiledItems{", X, "} of a ", typeof(d.data))
@@ -240,17 +275,19 @@ Base.valtype(::Type{CompiledValues{X, D}}) where {X, D} = _compiled_item_type(X,
 Base.eltype(::Type{CompiledValues{X, D}}) where {X, D} = Pair{keytype(D), _compiled_item_type(X, valtype(D))}
 Base.parent(d::CompiledValues) = d.data
 Base.length(d::CompiledValues) = length(d.data)
-Base.getindex(d::CompiledValues{X, D}, k) where {X, D} = _citem(X, valtype(D), _item_tobj(X, d.data[k]))
+Base.getindex(d::CompiledValues{X, D}, k) where {X, D} = isconcretetype(valtype(D)) ? _item_tobj(X, d.data[k]) : @kept_of(X, d.data[k], :compiled)
 Base.haskey(d::CompiledValues, k) = haskey(d.data, k)
 @inline function Base.iterate(d::CompiledValues{X, D}) where {X, D}
     kr = iterate(keys(d.data)); vr = iterate(values(d.data))
     (kr === nothing || vr === nothing) && return nothing
-    return (getfield(kr, 1) => _citem(X, valtype(D), _item_tobj(X, getfield(vr, 1))), (getfield(kr, 2), getfield(vr, 2)))
+    return (isconcretetype(valtype(D)) ? getfield(kr, 1) => _item_tobj(X, getfield(vr, 1)) :
+                getfield(kr, 1) => @kept_of(X, getfield(vr, 1), :compiled), (getfield(kr, 2), getfield(vr, 2)))
 end
 @inline function Base.iterate(d::CompiledValues{X, D}, s) where {X, D}
     kr = iterate(keys(d.data), getfield(s, 1)); vr = iterate(values(d.data), getfield(s, 2))
     (kr === nothing || vr === nothing) && return nothing
-    return (getfield(kr, 1) => _citem(X, valtype(D), _item_tobj(X, getfield(vr, 1))), (getfield(kr, 2), getfield(vr, 2)))
+    return (isconcretetype(valtype(D)) ? getfield(kr, 1) => _item_tobj(X, getfield(vr, 1)) :
+                getfield(kr, 1) => @kept_of(X, getfield(vr, 1), :compiled), (getfield(kr, 2), getfield(vr, 2)))
 end
 Base.show(io::IO, d::CompiledValues{X}) where {X} = print(io, "CompiledValues{", X, "} of a ", typeof(d.data))
 
@@ -268,15 +305,16 @@ Base.show(io::IO, d::CompiledValues{X}) where {X} = print(io, "CompiledValues{",
 #
 # Which view (traits reference §10.2's table): items of a concrete type that conforms are `Compiled`
 # (`CompiledItems`), items of an abstract type `Dynamic` (`DynamicItems`), unless the bound's attribute
-# says otherwise (`Iterable{Compiled{Shape}}`, `Iterable{Dynamic{Shape}}`). Items already `Dynamic{Y}`
-# meet the bound as they are (they carry their attribute).
+# says otherwise (`Iterable{Compiled{Shape}}`, `Iterable{Dynamic{Shape}}`), and only for items that do
+# not carry an attribute. Items already kept values of `Y` (`Dynamic{Y}`, `Compiled{Y}`, both) meet the
+# bound as they are (they carry their attribute).
 TraitWorld.crossed(::Type{Y}, a::Symbol, v::AbstractVector) where {Y} = _cross_view(Y, a, eltype(v)) === :compiled ? CompiledItems{Y}(v) :
     _cross_view(Y, a, eltype(v)) === :dynamic ? DynamicItems{Y}(v) : nothing
 TraitWorld.crossed(::Type{Y}, a::Symbol, d::AbstractDict) where {Y} = _cross_view(Y, a, valtype(d)) === :compiled ? CompiledValues{Y}(d) :
     _cross_view(Y, a, valtype(d)) === :dynamic ? DynamicValues{Y}(d) : nothing
 "How items of type `E` cross into a bound of item trait `Y` with attribute `a`: `:compiled`, `:dynamic`, or `:no`."
 @inline function _cross_view(::Type{Y}, a::Symbol, ::Type{E}) where {Y, E}
-    E <: Dynamic && return :no                          # `Dynamic{Y}` meets as it is; another trait's does not cross
+    E !== Union{} && E <: TraitWorld.HeldValue && return :no   # held values of `Y` meet as they are; another trait's do not cross
     _may_hold(Y, E) || return :no
     a === :dynamic && return :dynamic
     a === :compiled && return :compiled
@@ -293,8 +331,8 @@ pair and session once true (a flag), so a call pays a load.
 function _may_hold_slow(@nospecialize(Y), @nospecialize(E), flag::Base.RefValue{UInt})
     ok = false
     for u in Base.uniontypes(E)
-        if u isa DataType && u <: Dynamic
-            continue                                      # a Dynamic of another trait does not cross
+        if u isa DataType && u <: TraitWorld.HeldValue
+            continue                                      # a kept value of another trait does not cross
         elseif !isconcretetype(u) || conforms(u, Y)
             ok = true
             break

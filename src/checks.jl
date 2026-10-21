@@ -132,6 +132,9 @@ function _worker_problems(@nospecialize(sig), seen, out, root::Bool)
             _keeps_dynamic(f, ats, ex, src, sptypes) && continue
             # the conversions (traits reference §6.6), and the test of a trait object's attribute
             (f === compiled_for || f === with_dynamic || f === is_dynamic) && continue
+            # a struct parameter bounded by a trait keeps the value in its stored form (traits reference §10.4)
+            (f === _kept_at || f === _known_type) && continue
+            f isa Type && bounded_constructor(f) && continue        # its constructor is the bound
             # a result like the input, which only the entry inverts
             (f === like || f === withfields || (f isa Type && f <: LikeResult) ||
              (f === Core.kwcall && length(ats) >= 3 && _CC.widenconst(ats[3]) === typeof(withfields))) && continue
@@ -217,13 +220,13 @@ function _declares_field(@nospecialize(T), f::Symbol, write::Bool)
 end
 
 """
-Whether a call keeps its trait objects as dynamic values: `Dynamic{X}(t)`,
-`convert(Dynamic{X}, t)`, storing into a container of dynamic values, into a
-field declared `Dynamic`, or constructing a struct whose fields at the trait
-objects' positions are declared `Dynamic`. The conversion checks the trait.
+Whether a call keeps its trait objects as values: `Dynamic{X}(t)`, `Compiled{X}(t)`,
+`convert` to either, storing into a container of such values or of `Kept{X}` (a trait's name),
+into a field declared so, or constructing a struct whose fields at the trait objects' positions
+are declared so. The conversion checks the trait.
 """
 function _keeps_dynamic(@nospecialize(f), ats::Vector{Any}, ex::Expr, src, sptypes)
-    isdyn(@nospecialize(T)) = T isa Type && T !== Union{} && T <: Dynamic
+    isdyn(@nospecialize(T)) = T isa Type && T !== Union{} && T <: HeldValue
     f isa Type && isdyn(f) && return true
     f === with_dynamic && return true                     # a `Dynamic` trait object holds the user's object
     if f === Base.convert && length(ats) == 3

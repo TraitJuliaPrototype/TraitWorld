@@ -202,15 +202,24 @@ end)
         @test kkind(Dict{String, Any}("a" => ACircle(1.0)), "a") === :dynamic
         @test_throws TraitBoundError ikinds_c(Any[ACircle(1.0), 1])     # an item that does not conform: when read
     end
-    @testset "stored functions: the caller's conversion decides (traits §9)" begin
+    @testset "functions held: Compiled, Dynamic, Kept; constructors never cast (traits §9)" begin
         C = Callable{Tuple{Float64}, Float64}
         sq(x) = x^2
-        d = stored(C, sq)
-        @test d isa Dynamic{C} && d(3.0) == 9.0                        # Callable's default: Dynamic
-        @test stored(C, compiled_for(sq)) === sq                       # Compiled: the function itself
-        @test stored(C, with_dynamic(sq)) isa Dynamic{C}
-        @test stored(C, d) === d                                       # a stored function of the signature carries
-        @test_throws TraitBoundError stored(C, Dynamic{Callable{Tuple{Int}, Int}}(sq))   # another signature: refused
+        d = Dynamic{C}(sq); c = Compiled{C}(sq)
+        @test d(3.0) == 9.0 && c(3.0) == 9.0
+        @test getfield(c, :t) === sq                                   # Compiled: the function itself
+        @test compiled_for(d) isa Compiled{C} && getfield(compiled_for(d), :t) === sq
+        @test with_dynamic(c) isa Dynamic{C} && with_dynamic(c)(2.0) == 4.0
+        @test_throws TraitBoundError Dynamic{C}(compiled_for(sq))      # only a cast changes an attribute
+        @test_throws TraitBoundError Dynamic{C}(c)
+        @test_throws TraitBoundError Compiled{C}(d)
+        @test getfield(Kept{C}(sq), :compiled) === false              # a plain function: Callable's default
+        @test getfield(Kept{C}(c), :compiled) === true && Kept{C}(c)(2.0) == 4.0
+        @test cm_kind(c) === :compiled && cm_kind(d) === :dynamic       # at a bound: carried
+        @test cm_kind(Kept{C}(c)) === :compiled && cm_kind(Kept{C}(d)) === :dynamic
+        @test cm_kind(Dynamic{Callable{Tuple{Int}, Int}}(sq)) === :dynamic   # another signature: the same function
+        @test cm(Dynamic{Callable{Tuple{Int}, Int}}(sq), 3.0) == 9.0
+        @test c == d && hash(c) == hash(d)                             # one function, whatever its attribute
     end
     @testset "an attribute on a function neither exported nor public warns (rule 8)" begin
         @test_logs (:warn, r"neither exported nor public") match_mode = :any toplevel(quote

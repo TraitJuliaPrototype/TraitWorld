@@ -20,8 +20,8 @@ toplevel(quote
     mutable struct State
         const u::Vector{Float64}
         t::Float64
-        model::Model                  # a trait's name in a field: Dynamic{Model}
-        hooks::Vector{Hook}           # in a container: Vector{Dynamic{Hook}}
+        model::Model                  # a trait's name in a field: Kept{Model}, each value with its attribute
+        hooks::Vector{Hook}           # in a container: Vector{Kept{Hook}}
     end
 
     # the driver: compiled once for State, whatever the model and the hooks
@@ -37,9 +37,9 @@ toplevel(quote
         return n
     end
 
-    # made at a bound: the model projected, then kept; the hooks kept by storing them
+    # made at a bound: the model and the hooks kept by storing them, each with its attribute
     function start(m::Model, u0::Vector{Float64}, hs::Hook...)
-        st = State(copy(u0), 0.0, Dynamic{Model}(m), Dynamic{Hook}[])
+        st = State(copy(u0), 0.0, m, Hook[])
         for h in hs
             push!(st.hooks, h)
         end
@@ -47,7 +47,7 @@ toplevel(quote
     end
 
     whichmodel(m::Model) = "opened"
-    reopen(s::State) = whichmodel(s.model)      # a Dynamic passed to a bound is opened
+    reopen(s::State) = whichmodel(s.model)      # a kept value passed to a bound
     end
     using .DynSolv
 
@@ -77,10 +77,10 @@ end)
 
 @testset "Dynamic values" begin
     S = Main.DynSolv.State
-    @test fieldtype(S, :model) === Dynamic{Main.DynSolv.Model}
-    @test fieldtype(S, :hooks) === Vector{Dynamic{Main.DynSolv.Hook}}
+    @test fieldtype(S, :model) === TraitWorld.Kept{Main.DynSolv.Model}
+    @test fieldtype(S, :hooks) === Vector{TraitWorld.Kept{Main.DynSolv.Hook}}
     s = Main.DynSolv.start(Main.Decay(1.0), [1.0], Main.Below(0.95), Main.Always())
-    @test s.model isa Dynamic{Main.DynSolv.Model}
+    @test s.model isa TraitWorld.Kept{Main.DynSolv.Model} && !getfield(s.model, :compiled)   # from the prompt: Dynamic
     @test length(s.hooks) == 2
     @test Main.DynSolv.step!(s, 0.1) == 2                 # u = 0.9: both hooks fire
     @test s.u ≈ [0.9]
@@ -89,7 +89,10 @@ end)
     # one compiled driver for both models and every hook set
     @test length(Base.specializations(only(methods(Main.DynSolv.step!)))) == 1
     @test Main.DynSolv.reopen(s) == "opened"
-    @test occursin("Dynamic{", sprint(show, s.model)) && occursin("Decay", sprint(show, s.model))
+    @test occursin("Dynamic at Decay", sprint(show, s.model))
+    typed(m::Main.Decay) = Main.DynSolv.start(m, [1.0])        # a caller that knows the type: Compiled, kept so
+    @test getfield(typed(Main.Decay(1.0)).model, :compiled)
+    @test getfield(Main.DynSolv.start(with_dynamic(Main.Decay(1.0)), [1.0]).model, :compiled) === false
     @test s.model == s.model && hash(s.model) == hash(s.model)
     @test s.hooks[1] != s.hooks[2]
     @test_throws TraitUseError Main.DynBad.keepany(Main.Always())
@@ -97,8 +100,8 @@ end)
     @test isempty(check_definitions(Main.DynSolv))
 end
 
-# A trait's name as a container's element type in a function (body and arguments) means its
-# Dynamic, as in a field; a Dynamic of a supertrait keeps only that trait's views, so a bound
+# A trait's name as a container's element type in a function (body and arguments) means a kept
+# value, as in a field (`<:Kept{X}` in an argument); a Dynamic of a supertrait keeps only that trait's views, so a bound
 # opening it runs the worker compiled for what it sees (TraitTables' columns made by TraitCSV).
 toplevel(quote
     @trait_module module DynCols
@@ -120,8 +123,8 @@ toplevel(quote
     end
     dsum(c::DCol) = dlen(c)
     asdcol(g::DGrow) = (dpush!(g, 1.0); Dynamic{DCol}(g))
-    function collectcols(gs::Vector{DGrow})              # an argument container: Vector{Dynamic{DGrow}}
-        out = DCol[]                                     # a body container: Dynamic{DCol}[]
+    function collectcols(gs::Vector{DGrow})              # an argument container: Vector{<:Kept{DGrow}}
+        out = DCol[]                                     # a body container: Kept{DCol}[]
         for g in gs
             push!(out, asdcol(g)::Dynamic{DCol})
         end
@@ -134,7 +137,7 @@ end)
     D = Main.DynCols
     gs = Dynamic{D.DGrow}[Dynamic{D.DGrow}(Float64[]), Dynamic{D.DGrow}([2.0])]
     cs = D.collectcols(gs)
-    @test cs isa Vector{Dynamic{D.DCol}}
+    @test cs isa Vector{TraitWorld.Kept{D.DCol}} && all(c -> !getfield(c, :compiled), cs)   # kept as made: Dynamic
     @test [D.dsum(c) for c in cs] == [1, 2]
     # the kept DCol has DCol's view only: the same type as one made from a plain vector
     @test typeof(TraitWorld.opened(cs[1])) === typeof(TraitWorld.opened(Dynamic{D.DCol}([1.0])))

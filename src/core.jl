@@ -216,18 +216,19 @@ _isptag(@nospecialize(X)) = X isa DataType && X <: PTag
 
 A bound's item parameter that names a trait (traits reference §10.2): items seen through `Y`, with
 the attribute `A` the bound gives them (`:default`, `:compiled`, `:dynamic`). In a worker's bound it is
-the value of the parameter's tag; a trait object whose item type is `Dynamic{Y}` or a trait object
-carrying `Y` has the tag for every `A`, so one worker takes `Compiled` and `Dynamic` items alike.
+the value of the parameter's tag; a trait object whose item type is a held value of `Y` (`Compiled{Y}`,
+`Dynamic{Y}`, `Kept{Y}`) or a trait object carrying `Y` has the tag for every `A`, so one worker
+takes `Compiled` and `Dynamic` items alike.
 """
 struct Through{Y,A} end
-"The item parameter `p` with each `Dynamic{Y}`, or trait object type carrying `Y`, replaced by `Through{Y, A}`; the variants, one per such `Y`."
+"The item parameter `p` with each held value of `Y` (`Compiled{Y}`, `Dynamic{Y}`, `Kept{Y}`), or trait object type carrying `Y`, replaced by `Through{Y, A}`; the variants, one per such `Y`."
 function _through_variants(@nospecialize(p), @nospecialize(A))
+    # a held value of `Y`: `Compiled{Y}`, `Dynamic{Y}`, `Kept{Y}` (a trait's name in storage)
+    Y = _kept_item(p)
+    Y === nothing || return Any[Through{Y,A}]
     u = Base.unwrap_unionall(p)
     u isa DataType || return Any[]
-    # `Dynamic` by name: this runs in generators, in a world before `Dynamic` is defined
-    if p isa DataType && p.name.name === :Dynamic && p.name.module === TraitWorld
-        return Any[Through{p.parameters[1],A}]
-    elseif u.name === Base.typename(TObj)          # a trait object, or "any trait object carrying Y" (`TObj{T} where T >: Y`)
+    if u.name === Base.typename(TObj)          # a trait object, or "any trait object carrying Y" (`TObj{T} where T >: Y`)
         Ts = u.parameters[1]
         out = Any[]
         for Y in Base.uniontypes(Ts isa TypeVar ? Ts.lb : Ts)
@@ -247,6 +248,15 @@ function _through_variants(@nospecialize(p), @nospecialize(A))
         end
     end
     return out
+end
+"""
+The trait `Y` of a held value's type, `Compiled{Y}`, `Dynamic{Y}` or `Kept{Y}`; else `nothing`. By
+name: this runs in generators, in a world before `Dynamic` is defined.
+"""
+function _kept_item(@nospecialize(p))
+    p isa DataType && (p.name.name === :Dynamic || p.name.name === :Compiled || p.name.name === :Kept) &&
+        p.name.module === TraitWorld && return p.parameters[1]
+    return nothing
 end
 "The trait set of trait instances: their families, and a tag per parameter they fix (the receiver type excluded); for an item type seen through a trait, its `Through` tags too."
 function _encode_traits(insts)
@@ -403,7 +413,14 @@ key runs.
 """
 struct Dynamic{X}
     t::Any            # the user's object, or (see above) a trait object
-    function Dynamic{X}(t::TObj{T}) where {X,T}
+    # from a trait object: only one at the erased key (a `Dynamic` value); one at its key is refused,
+    # since only `with_dynamic` changes an attribute
+    function Dynamic{X}(t::TObj{T,V}) where {X,T,V}
+        _is_erased(V) || Base.inferencebarrier(_cast_refuse)(X, :Dynamic, :Compiled)
+        return Dynamic{X}(Val(:keep), t)
+    end
+    "The user's object a trait object reads, kept whatever its key (`Kept{X}(t)` records the key's attribute)."
+    function Dynamic{X}(::Val{:keep}, t::TObj{T}) where {X,T}
         _carries_static(T, X) || Base.inferencebarrier(_dyn_refuse)(X, T)
         tn = _narrow(X, t)               # the trait object is the user's object: a kept value follows its fields
         o = _tobj_object(tn)
@@ -428,6 +445,69 @@ struct Dynamic{X}
     "A dynamic value holding `x`, checked to conform by the caller (`@dynamic_of`): reached by `invoke`, so `x` keeps its box."
     Dynamic{X}(::Val{:checked}, @nospecialize(x)) where {X} = new{X}(x)
 end
+"""
+    Compiled{X}
+
+A value of any type conforming to trait `X` whose attribute is `Compiled`, held where the code does
+not know its type (traits reference §10; lowering §13): `compiled_for(d)` of a `Dynamic{X}`, or made
+from a value, `Compiled{X}(x)`, or from a trait object at its key. Like `Dynamic{X}` it holds the
+user's object, and an operation or a field read on it is the same call-site split. Passed to a
+function bounded by `X`, it is opened by its type: the code compiled for its key is selected once
+per call (a function barrier), where a `Dynamic{X}` runs the code compiled once.
+"""
+struct Compiled{X}
+    t::Any            # the user's object, or a trait object (as for `Dynamic`)
+    # from a trait object at its key; one at the erased key is refused (only `compiled_for` casts)
+    function Compiled{X}(t::TObj{T,V}) where {X,T,V}
+        _is_erased(V) && Base.inferencebarrier(_cast_refuse)(X, :Compiled, :Dynamic)
+        _carries_static(T, X) || Base.inferencebarrier(_dyn_refuse)(X, T, :Compiled)
+        tn = _narrow(X, t)
+        o = _tobj_object(tn)
+        if o === nothing
+            _register_candidate!(_family_of(X), typeof(tn))
+            return new{X}(tn)
+        end
+        _NoteCandidate{_family_of(X)}()(o)
+        return new{X}(o)
+    end
+    @inline function Compiled{X}(x) where {X}
+        v = _assemble(_family_list(X), x)
+        v === NOTRAIT && _dyn_nonconforming(X, x)
+        _register_candidate!(_family_of(X), typeof(x))
+        return new{X}(x)
+    end
+    "A compiled value holding the trait object `t` itself (a new receiver value of a constructor operation)."
+    function Compiled{X}(::Val{:hold}, t::TObj) where {X}
+        _register_candidate!(_family_of(X), typeof(t))
+        return new{X}(t)
+    end
+    "A compiled value holding `x`, checked to conform by the caller: reached by `invoke`, so `x` keeps its box."
+    Compiled{X}(::Val{:checked}, @nospecialize(x)) where {X} = new{X}(x)
+end
+"""
+    Kept{X}
+
+A value of any type conforming to trait `X`, with its attribute as data: `Compiled` or `Dynamic`
+(traits reference §10). What a trait's name means as the type of a field or of a container's items
+in a trait module, where values of both attributes sit side by side: one concrete type, so it is
+stored inline and reading or making one allocates nothing. It holds the user's object, as
+`Compiled{X}` and `Dynamic{X}` do; an operation or a field read on it is the same call-site split;
+at a bound its attribute decides. Made by storing a trait object (its key gives the attribute) or
+any value of the trait world (it keeps its attribute), or `Kept{X}(x)` from a plain value (the
+trait's default: `Dynamic` under `@dynamic`, else `Compiled`).
+"""
+struct Kept{X}
+    t::Any            # the user's object, or a trait object (as for `Dynamic`)
+    compiled::Bool
+    "A kept value holding `x`, checked to conform by the caller."
+    Kept{X}(::Val{:checked}, @nospecialize(x), compiled::Bool) where {X} = new{X}(x, compiled)
+end
+"Any value of `X` that holds the user's object: `Compiled{X}`, `Dynamic{X}`, `Kept{X}`."
+const HeldValue{X} = Union{Compiled{X},Dynamic{X},Kept{X}}
+"Whether a held value is `Compiled`."
+@inline _held_compiled(::Compiled) = true
+@inline _held_compiled(::Dynamic) = false
+@inline _held_compiled(k::Kept) = getfield(k, :compiled)
 @noinline _dyn_nonconforming(@nospecialize(X), @nospecialize(x)) = throw(TraitBoundError("a $(typeof(x)) does not conform to $X"))
 "The user's object a trait object reads (that of its first view), or `nothing` when its views hold only parts."
 @inline _tobj_object(t::TObj) = _viewobject(getfield(t, :views)[1])
@@ -480,15 +560,44 @@ const _NARROW = IdDict{Any,Any}()
     views = getfield(t, :views)
     return TObj(Tuple(views[i] for i in keep))
 end
+# Constructors make or keep a value, never cast (traits reference §6.6): only `compiled_for` and
+# `with_dynamic` change an attribute. On a value that has one they keep it where it matches, else
+# they refuse, naming the cast.
 Dynamic{X}(d::Dynamic{X}) where {X} = d
+Compiled{X}(c::Compiled{X}) where {X} = c
+Kept{X}(k::Kept{X}) where {X} = k
+Dynamic{X}(c::Compiled{X}) where {X} = Base.inferencebarrier(_cast_refuse)(X, :Dynamic, :Compiled)
+Compiled{X}(d::Dynamic{X}) where {X} = Base.inferencebarrier(_cast_refuse)(X, :Compiled, :Dynamic)
+Dynamic{X}(k::Kept{X}) where {X} = getfield(k, :compiled) ? Base.inferencebarrier(_cast_refuse)(X, :Dynamic, :Compiled) :
+    Dynamic{X}(Val(:checked), getfield(k, :t))
+Compiled{X}(k::Kept{X}) where {X} = getfield(k, :compiled) ? Compiled{X}(Val(:checked), getfield(k, :t)) :
+    Base.inferencebarrier(_cast_refuse)(X, :Compiled, :Dynamic)
+Kept{X}(d::Dynamic{X}) where {X} = Kept{X}(Val(:checked), getfield(d, :t), false)
+Kept{X}(c::Compiled{X}) where {X} = Kept{X}(Val(:checked), getfield(c, :t), true)
+"A trait object kept: its key gives the attribute, at its own key `Compiled`, at the erased key `Dynamic`."
+function Kept{X}(t::TObj{T,V}) where {X,T,V}
+    d = Dynamic{X}(Val(:keep), t)
+    return Kept{X}(Val(:checked), getfield(d, :t), !_is_erased(V))
+end
+"A plain value kept: the trait's default (`@dynamic`), else `Compiled`."
+@inline function Kept{X}(x) where {X}
+    c = Compiled{X}(x)
+    return Kept{X}(Val(:checked), getfield(c, :t), default_attribute(_family_of(X)) !== :dynamic)
+end
+Base.convert(::Type{Kept{X}}, k::Kept{X}) where {X} = k
+Base.convert(::Type{Kept{X}}, t::Union{TObj,Dynamic{X},Compiled{X}}) where {X} = Kept{X}(t)
 Base.convert(::Type{Dynamic{X}}, t::TObj) where {X} = Dynamic{X}(t)
-@noinline _dyn_refuse(@nospecialize(X), @nospecialize(T)) =
-    throw(ArgumentError("a trait object carrying $(join(string.(Base.uniontypes(_decode_traits(T))), ", ")) cannot be kept as a Dynamic{$X}"))
+Base.convert(::Type{Compiled{X}}, t::TObj) where {X} = Compiled{X}(t)
+@noinline _cast_refuse(@nospecialize(X), to::Symbol, from::Symbol) =
+    throw(TraitBoundError("a $from value of $X cannot be made a $to{$X}: only a cast changes a value's attribute; write " *
+                          (to === :Dynamic ? "`with_dynamic(x)`" : "`compiled_for(x)`")))
+@noinline _dyn_refuse(@nospecialize(X), @nospecialize(T), how::Symbol = :Dynamic) =
+    throw(ArgumentError("a trait object carrying $(join(string.(Base.uniontypes(_decode_traits(T))), ", ")) cannot be kept as a $how{$X}"))
 """
 The trait object of a dynamic value: what a bound opens, and what its operations run on. Made
 from the user's object, as `Dynamic{X}(x)` would keep it (`_dyn_tobj`), or the trait object it holds.
 """
-@inline opened(d::Dynamic{X}) where {X} = _Open{X}()(getfield(d, :t))
+@inline opened(d::HeldValue{X}) where {X} = _Open{X}()(getfield(d, :t))
 "Opening a dynamic value's object: as a value of its own type, so a call with an object of unknown type dispatches on the object alone."
 struct _Open{X} end
 @inline (::_Open{X})(t::TObj) where {X} = t
@@ -514,7 +623,7 @@ end
 The user's object a dynamic value holds: what a view over the user's container stores back
 (BaseTraits' `DynamicItems`). An `ArgumentError` if the value holds only the parts its trait sees.
 """
-@inline function _dyn_object(d::Dynamic)
+@inline function _dyn_object(d::HeldValue)
     t = getfield(d, :t)
     t isa TObj || return t
     return Base.inferencebarrier(_dyn_object_slow)(t)
@@ -525,7 +634,7 @@ function _dyn_object_slow(t::TObj)
     return o
 end
 "What a dynamic value's identity is: the user's object, or the trait object where it holds one without an object."
-@inline function _dyn_identity(d::Dynamic)
+@inline function _dyn_identity(d::HeldValue)
     t = getfield(d, :t)
     t isa TObj || return t
     o = Base.inferencebarrier(_tobj_object)(t)
@@ -560,6 +669,41 @@ macro dynamic_of(X, x)
             # the box it came in (a call at `Any` would be a run-time site, and a call at the narrowed
             # type would box it again)
             invoke($TW.Dynamic{$X}, Tuple{Val{:checked}, Any}, Val(:checked), $v)::$TW.Dynamic{$X}
+        end
+    end)
+end
+"""
+    @kept_of X x attr
+
+A value `x` of unknown type read where it is seen through `X`, an item of a user's container
+(traits reference §10.3), as a `Kept{X}`: a value that carries its attribute keeps it (`Kept{X}`,
+`Compiled{X}`, `Dynamic{X}`, `compiled_for(y)`, `with_dynamic(y)`); any other value is first seen
+here, `Compiled` if `attr` is `:compiled`, else `Dynamic`. The tests are `isa`, builtins; the
+conformance of a plain value is split as in `@dynamic_of`; the `Kept{X}` is made by an `invoke` at
+its constructor's own signature, a fact, so `x` is held in the box it came in.
+"""
+macro kept_of(X, x, attr)
+    TW = TraitWorld
+    v = gensym(:x)
+    y = gensym(:y)
+    plainc = attr === QuoteNode(:compiled)
+    kept(o, c) = :(invoke($TW.Kept{$X}, Tuple{Val{:checked}, Any, Bool}, Val(:checked), $o, $c)::$TW.Kept{$X})
+    return esc(quote
+        let $v = $x
+            if $v isa $TW.Kept{$X}
+                $v
+            elseif $v isa $TW.Dynamic{$X}
+                $(kept(:(getfield($v, :t)), false))
+            elseif $v isa $TW.Compiled{$X}
+                $(kept(:(getfield($v, :t)), true))
+            elseif $v isa $TW.WithDynamic || $v isa $TW.CompiledFor
+                $y = getfield($v, :x)
+                $TW.CC.split_call($TW._family_of($X), Bool, $TW._ConformsTo{$X}(), $y)::Bool || $TW._dyn_nonconforming($X, $y)
+                $(kept(y, :($v isa $TW.CompiledFor)))
+            else
+                $TW.CC.split_call($TW._family_of($X), Bool, $TW._ConformsTo{$X}(), $v)::Bool || $TW._dyn_nonconforming($X, $v)
+                $(kept(v, plainc))
+            end
         end
     end)
 end
@@ -614,9 +758,13 @@ const _CAND_LOCK = ReentrantLock()
 end
 
 # equal when they keep the same trait object: same representation type, same implementation, egal data
-Base.:(==)(a::Dynamic{X}, b::Dynamic{X}) where {X} = _dyn_identity(a) === _dyn_identity(b)
-Base.hash(d::Dynamic, h::UInt) = hash(_dyn_identity(d), hash(:TraitWorldDynamic, h))
+# equal when they hold the same object, whatever their attribute (a choice of speed, never of results)
+Base.:(==)(a::HeldValue{X}, b::HeldValue{X}) where {X} = _dyn_identity(a) === _dyn_identity(b)
+Base.hash(d::HeldValue, h::UInt) = hash(_dyn_identity(d), hash(:TraitWorldHeld, h))
 Base.show(io::IO, d::Dynamic{X}) where {X} = print(io, "Dynamic{", X, "} at ", _represented(typeof(opened(d))))
+Base.show(io::IO, d::Compiled{X}) where {X} = print(io, "Compiled{", X, "} at ", _represented(typeof(opened(d))))
+Base.show(io::IO, d::Kept{X}) where {X} =
+    print(io, "Kept{", X, "}: ", getfield(d, :compiled) ? "Compiled" : "Dynamic", " at ", _represented(typeof(opened(d))))
 _represented(@nospecialize(T)) = T <: TObj ? join(unique([sprint(_show_key, v.parameters[3]) for v in T.parameters[2].parameters]), ", ") : string(T)
 @inline _dyn_assert(x, ::Type{S}) where {S} = x::S
 
@@ -740,14 +888,14 @@ field_isrep(@nospecialize(X), @nospecialize(f)) = false
 @noinline _readonly(@nospecialize(X), s::Symbol) = throw(ArgumentError("field `$s` of $X is `const`: read-only"))
 # a declared field of a dynamic value: split over its object, typed by the declared type at the
 # parameters the `Dynamic` fixes (lowering §13)
-Base.@constprop :aggressive @inline Base.getproperty(d::Dynamic{X}, s::Symbol) where {X} = _dyn_getprop(d, Val(s))
-Base.@constprop :aggressive @inline Base.setproperty!(d::Dynamic{X}, s::Symbol, x) where {X} = _dyn_setprop!(d, Val(s), x)
-@inline function _dyn_getprop(d::Dynamic{X}, ::Val{f}) where {X,f}
+Base.@constprop :aggressive @inline Base.getproperty(d::HeldValue{X}, s::Symbol) where {X} = _dyn_getprop(d, Val(s))
+Base.@constprop :aggressive @inline Base.setproperty!(d::HeldValue{X}, s::Symbol, x) where {X} = _dyn_setprop!(d, Val(s), x)
+@inline function _dyn_getprop(d::HeldValue{X}, ::Val{f}) where {X,f}
     F = _family_of(X)
     RT = _erased_ft(field_type(F, Val(f), _erased_key_of(X)))
     return CC.split_call(F, RT, _DynField{F,f}(), getfield(d, :t))::RT
 end
-@inline function _dyn_setprop!(d::Dynamic{X}, ::Val{f}, x) where {X,f}
+@inline function _dyn_setprop!(d::HeldValue{X}, ::Val{f}, x) where {X,f}
     F = _family_of(X)
     y = x::_erased_ft(field_type(F, Val(f), _erased_key_of(X)))
     CC.split_call(F, Nothing, _DynFieldSet{F,f}(), getfield(d, :t), y)

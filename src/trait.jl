@@ -343,7 +343,7 @@ macro trait(header, block = nothing)
         end
         # inferred again at every call site (`@constprop :aggressive`): each caller splits the call over
         # the candidates known when it is compiled
-        push!(out, :(Base.@constprop :aggressive @inline $(d.fexpr)(dyn::$TW.Dynamic{$X__}, $(syms...)) where {$X__<:$name} = $rhs))
+        push!(out, :(Base.@constprop :aggressive @inline $(d.fexpr)(dyn::$TW.HeldValue{$X__}, $(syms...)) where {$X__<:$name} = $rhs))
     end
     # fields: properties of the representation, or (type R) the projection, read through a lens when written
     if !isempty(fdecls)

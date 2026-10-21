@@ -68,7 +68,7 @@ end)
     @test !conforms(Vector{Any}, BT.Iterable{Dynamic{C.Cell}})      # a Vector{Any} crosses through a view
 end
 
-@testset "BaseTraits: a trait's name in a bound's parameters means its Dynamic" begin
+@testset "BaseTraits: a trait's name in a bound's parameters names an item position" begin
     C = Main.BTCells
     w = Dynamic{C.Cell}[Dynamic{C.Cell}(1), Dynamic{C.Cell}("a"), Dynamic{C.Cell}(3)]
     @test C.countnums(w) == 2 && C.countnums_i(w) == 2
@@ -78,9 +78,9 @@ end
     C = Main.BTCells
     v = Any[1, "ab", 3, "c", 5]
     d = DynamicItems{C.Cell}(v)
-    @test conforms(typeof(d), BT.MutableIndexable{Dynamic{C.Cell}})
+    @test conforms(typeof(d), BT.MutableIndexable{TraitWorld.Kept{C.Cell}})       # items of a Vector{Any} may carry `Compiled`
     @test C.countnums(d) == 3 && C.countnums_i(d) == 3
-    @test d[2] isa Dynamic{C.Cell} && C.weight(d[2]) == 2
+    @test d[2] isa TraitWorld.Kept{C.Cell} && !getfield(d[2], :compiled) && C.weight(d[2]) == 2   # a plain item: Dynamic
     # writes reach the user's vector, which holds the user's objects, not dynamic values
     C.keepnums!(d)
     @test v == Any[1, 3, 5] && all(x -> x isa Int, v)
@@ -97,9 +97,9 @@ end
     bad = Any[1, 2.5, 3]
     @test C.firstnum(DynamicItems{C.Cell}(bad)) == 1             # never reaches the Float64
     @test_throws TraitBoundError C.countnums(DynamicItems{C.Cell}(bad))
-    # a copy into Vector{Dynamic{X}} through the view
+    # a copy through the view: each item kept with its attribute, `Dynamic` for plain items
     w = collect(DynamicItems{C.Cell}(Any[1, "a"]))
-    @test w isa Vector{Dynamic{C.Cell}} && C.countnums(w) == 1
+    @test w isa Vector{TraitWorld.Kept{C.Cell}} && all(x -> !getfield(x, :compiled), w) && C.countnums(w) == 1
 end
 
 @testset "BaseTraits: DynamicValues, a user's Dict{String,Any}" begin

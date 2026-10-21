@@ -669,7 +669,8 @@ userdbl(x) = 2x
     @test TraitWorld.enter_callable(Tuple{Float64}, Float64, :dynamic, compiled_for(userdbl), Val(true)).f === userdbl   # the conversion wins
     @test TraitWorld.enter_callable(Tuple{Float64}, Float64, :compiled, with_dynamic(userdbl), Val(true)).f isa TraitWorld.Erased
     @test TraitWorld.enter_callable(Tuple{Float64}, Float64, :compiled, Dynamic{Callable{Tuple{Float64},Float64}}(userdbl), Val(true)).f isa TraitWorld.Erased   # carried
-    @test_throws TraitBoundError TraitWorld.enter_callable(Tuple{Float64}, Float64, nothing, Dynamic{Callable{Tuple{Int},Int}}(userdbl), Val(true))
+    # a Dynamic function at another signature: the same function, Dynamic, through its own pointer
+    @test TraitWorld.enter_callable(Tuple{Float64}, Float64, nothing, Dynamic{Callable{Tuple{Int},Int}}(userdbl), Val(true)).f isa TraitWorld.Erased{Tuple{Float64},Float64}
     @test cmap(compiled_for(userdbl), v, 1) == [2.0, 4.0] && csum(with_dynamic(userdbl), v, 1) == 6.0
     @test csum(abs2, v, 1) == 5.0 && cmap(abs2, v, 1) == [1.0, 4.0]   # Base's function: not affected by Callable's @dynamic
     @test cboth(with_dynamic(x -> x + one(x)), 1.5, 2) == (2.5, 3)
@@ -844,3 +845,4 @@ include("certificate.jl")
 include("redeclare.jl")
 include("basetraits.jl")
 include("attributes.jl")
+include("carry.jl")

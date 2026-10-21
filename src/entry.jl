@@ -196,8 +196,11 @@ evaluated in the entry's own body. Specialized: for a known type it folds to the
     # the caller's conversions always win
     t isa CompiledFor && return _enter_compiled(p, getfield(t, :x))
     t isa WithDynamic && return _enter_erased(p, getfield(t, :x))
-    # a dynamic value stays dynamic (rule 7): never opened at a bound
+    # a kept value keeps its attribute: a dynamic one is never opened at a bound, a compiled one is
+    # opened by its object's type (the table serves it where the entry has one)
     t isa Dynamic && return _enter_erased(p, _dyn_held(t))
+    t isa Compiled && return _enter_compiled(p, _dyn_held(t))
+    t isa Kept && return getfield(t, :compiled) ? _enter_compiled(p, _dyn_held(t)) : _enter_erased(p, _dyn_held(t))
     _enters_dynamic(p, t, Val(kn)) && return _enter_erased(p, t)
     return _enter_compiled(p, t)
 end
@@ -217,8 +220,8 @@ end
     v === NOTRAIT && return NOTRAIT
     return _erase(v, o)
 end
-"What a dynamic value holds: the user's object, or a trait object where it holds one."
-@inline _dyn_held(d::Dynamic) = getfield(d, :t)
+"What a kept value holds: the user's object, or a trait object where it holds one."
+@inline _dyn_held(d::HeldValue) = getfield(d, :t)
 "A trait object a dynamic value holds, as it is (its traits are those of the `Dynamic`)."
 @inline _narrow_to(p::EntryPos, t::TObj) = t
 """
@@ -737,7 +740,7 @@ edges at abstract signatures (in `owner`, `is_trait_world`) that unrelated loads
 """
 @machinery function _tw_type(@nospecialize(T), seen)
     T isa DataType || return false
-    T <: Dynamic && return true                         # made only from trait objects: its type decides it
+    T <: HeldValue && return true                       # a held value: its type decides it
     T in seen && return true
     push!(seen, T)
     is_trait_world(T.name.module) || return false
@@ -761,13 +764,14 @@ the function's type (`known`, evaluated in the entry's body). In a closed build 
 """
 @noinline function enter_callable(::Type{A}, ::Type{S}, @nospecialize(attr), @nospecialize(f), ::Val{kn}) where {A,S,kn}
     f isa CObj{A,S} && return f
-    if f isa Dynamic && typeof(f).parameters[1] <: Callable
-        c = getfield(f, :t)
-        c isa CObj{A,S} || Base.inferencebarrier(_callable_mismatch)(typeof(f).parameters[1], A, S)
-        return c
+    # a function held or cast keeps its attribute, at this signature too (a `Dynamic` one through its own pointer)
+    if _held_callable_dynamic(f) && !(f isa WithDynamic)
+        return _erased_at(A, S, _callable_fn(f))
+    elseif f isa CObj
+        return getfield(f, :f) isa Erased ? _erased_at(A, S, f) : CObj{A,S}(_callable_fn(f))
     end
-    if f isa CompiledFor
-        f = getfield(f, :x); attr = :compiled
+    if _held_callable_compiled(f)
+        f = f isa CompiledFor ? getfield(f, :x) : _callable_fn(f); attr = :compiled
     elseif f isa WithDynamic
         f = getfield(f, :x); attr = :dynamic
     elseif attr === nothing
@@ -794,53 +798,144 @@ const _CALLABLE = Ref(Dict{Any,Any}())           # copy-on-write
 _wrap_callable(::Type{A}, ::Type{S}, attr::Symbol, @nospecialize(f)) where {A,S} =
     attr === :compiled ? CObj{A,S}(f) : CObj{A,S}(Erased{A,S}(f))
 
+Base.Experimental.@max_methods 1 function bounded_constructor end
+"`bounded_constructor(S)`: whether struct `S` has parameters bounded by a trait, so its constructor without parameters is their bound (methods added by `@trait_module`)."
+bounded_constructor(@nospecialize(S)) = false
+
+"""
+    _kept_at(B, x, Val(known))
+
+The stored form of `x` at a struct parameter bounded by `B` (traits reference §10.4): its attribute
+as a bound gives it (the caller's cast, a value's carried attribute, else the first-seen rule, with
+`known` evaluated in the constructor's body), then for a `Compiled` value the user's object itself
+(the function, for `Callable`), whose type becomes the parameter, and for a `Dynamic` one `Dynamic{B}`.
+A `Compiled{X}` or a `Kept{X}` with `Compiled` is opened here, by its object's type.
+"""
+function _kept_at(::Type{C}, @nospecialize(x), ::Val{kn}) where {C<:Callable,kn}
+    u = Base.unwrap_unionall(C)
+    c = enter_callable(u.parameters[1], u.parameters[2], nothing, x, Val(kn))
+    f = getfield(c, :f)
+    return f isa Erased ? Dynamic{C}(Val(:checked), c) : f
+end
+function _kept_at(::Type{X}, @nospecialize(x), ::Val{kn}) where {X,kn}
+    if x isa TObj
+        _is_erased(typeof(getfield(x, :views))) && return Dynamic{X}(x)
+        return getfield(Compiled{X}(x), :t)
+    elseif x isa Dynamic || x isa WithDynamic
+        return Dynamic{X}(x isa WithDynamic ? getfield(x, :x) : x)
+    elseif x isa Compiled || x isa CompiledFor
+        return getfield(Compiled{X}(x isa CompiledFor ? getfield(x, :x) : x), :t)
+    elseif x isa Kept
+        return getfield(x, :compiled) ? getfield(Compiled{X}(x), :t) : Dynamic{X}(x)
+    end
+    dyn = !kn || (default_attribute(_family(X)) === :dynamic && !_from_trait_world(x))
+    return dyn ? Dynamic{X}(x) : getfield(Compiled{X}(x), :t)
+end
+
 "A function argument with several `Callable` bounds: one `CObj` per signature."
 function enter_callables(sigs::Tuple, @nospecialize(f), ::Val{kn}) where {kn}
     f isa CMulti && return f
     return CMulti(map(s -> enter_callable(s[1], s[2], s[3], f, Val(kn)), sigs))
 end
 
+# --- `Callable`'s held values (traits reference §9; lowering §12) -------------------------------
+#
+# A `Dynamic{Callable{A, S}}` holds the function erased to a pointer (`CObj{A, S, Erased{A, S}}`); a
+# `Compiled{Callable{A, S}}` holds the function itself; a `Kept{Callable{A, S}}` holds either, with
+# its attribute. Constructors make or keep, never cast. A function held at one signature is the same
+# function at another: seen there with its attribute, a `Dynamic` one through a new pointer.
+
+"The function a held `Callable` value or a function argument stands for."
+@inline _callable_fn(c::CObj) = (f = getfield(c, :f); f isa Erased ? getfield(f, :obj) : f)
+@inline _callable_fn(h::HeldValue{C}) where {C<:Callable} = (t = getfield(h, :t); t isa CObj ? _callable_fn(t) : t)
+"The function argument `f`, a plain function or a function argument, as a `Dynamic` at `Callable{A, S}`."
+@inline _erased_at(::Type{A}, ::Type{S}, @nospecialize(f)) where {A,S} =
+    f isa CObj{A,S,Erased{A,S}} ? f : CObj{A,S}(Erased{A,S}(f isa CObj ? _callable_fn(f) : f))
+"Whether a value is a `Callable` value held with the attribute `Compiled` (the caller's `compiled_for`, or kept so)."
+@inline _held_callable_compiled(@nospecialize(f)) = f isa CompiledFor || (f isa Compiled && f isa Compiled{<:Callable}) ||
+    (f isa Kept && f isa Kept{<:Callable} && getfield(f, :compiled))
+@inline _held_callable_dynamic(@nospecialize(f)) = f isa WithDynamic || (f isa Dynamic && f isa Dynamic{<:Callable}) ||
+    (f isa Kept && f isa Kept{<:Callable} && !getfield(f, :compiled))
+
 """
     Dynamic{Callable{A, S}}(f)
 
 `f` as a dynamic value of `Callable{A, S}`: a pointer to its code compiled for `A`, its result asserted
-to `S`, of a type that does not depend on the function. What a library stores in a field for a
-function from above (a model's right-hand side, a callback). Calling it is the checked call.
+to `S`, of a type that does not depend on the function. Made from a plain function, or kept from a
+`Dynamic` function (a `with_dynamic(f)`, a `Dynamic` or `Kept` value held at any signature); a
+`Compiled` one is refused, since only `with_dynamic` changes an attribute. Calling it is the checked call.
 """
-function (::Type{Dynamic{C}})(f) where {C<:Callable}
+function (::Type{Dynamic{C}})(@nospecialize(f)) where {C<:Callable}
     u = Base.unwrap_unionall(C)
     A, S = u.parameters
     f isa Dynamic{C} && return f
-    f isa CompiledFor && (f = getfield(f, :x))
+    _held_callable_compiled(f) && Base.inferencebarrier(_cast_refuse)(C, :Dynamic, :Compiled)
     f isa WithDynamic && (f = getfield(f, :x))
-    c = f isa CObj{A,S,Erased{A,S}} ? f : CObj{A,S}(Erased{A,S}(f))
-    return Dynamic{C}(Val(:checked), c)
+    f isa HeldValue && (f = _callable_fn(f))
+    return Dynamic{C}(Val(:checked), _erased_at(A, S, f))
 end
 (::Type{Dynamic{C}})(f::Dynamic{C}) where {C<:Callable} = f
+#     Compiled{Callable{A, S}}(f)
+# `f` as a compiled value of `Callable{A, S}`: the function itself, where the code that holds it does
+# not know its type. A call selects the code compiled for the function by its type (one dynamic call);
+# passed to a bound, the worker compiled for the function runs. Made from a plain function, or kept
+# from a `Compiled` one; a `Dynamic` one is refused, since only `compiled_for` changes an attribute.
+function (::Type{Compiled{C}})(@nospecialize(f)) where {C<:Callable}
+    f isa Compiled{C} && return f
+    _held_callable_dynamic(f) && Base.inferencebarrier(_cast_refuse)(C, :Compiled, :Dynamic)
+    f isa CompiledFor && (f = getfield(f, :x))
+    f isa HeldValue && (f = _callable_fn(f))
+    f isa CObj && (f = _callable_fn(f))
+    return Compiled{C}(Val(:checked), f)
+end
+(::Type{Compiled{C}})(f::Compiled{C}) where {C<:Callable} = f
+#     Kept{Callable{A, S}}(f)
+# `f` kept with its attribute: a function argument by how it is held (the function itself `Compiled`,
+# an erased one `Dynamic`), a held value or a caller's cast as it is, a plain function by `Callable`'s
+# default, `Dynamic`.
+function (::Type{Kept{C}})(@nospecialize(f)) where {C<:Callable}
+    u = Base.unwrap_unionall(C)
+    A, S = u.parameters
+    f isa Kept{C} && return f
+    if f isa CObj
+        return getfield(f, :f) isa Erased ? Kept{C}(Val(:checked), _erased_at(A, S, f), false) : Kept{C}(Val(:checked), _callable_fn(f), true)
+    end
+    _held_callable_compiled(f) && return Kept{C}(Val(:checked), getfield(Compiled{C}(f), :t), true)
+    return Kept{C}(Val(:checked), getfield(Dynamic{C}(f), :t), false)
+end
+(::Type{Kept{C}})(f::Kept{C}) where {C<:Callable} = f
+# between the forms at one signature, as for any trait (core.jl), stated for `Callable` too: its
+# constructors above take any argument, so these resolve what would otherwise be ambiguous
+(::Type{Dynamic{C}})(c::Compiled{C}) where {C<:Callable} = Base.inferencebarrier(_cast_refuse)(C, :Dynamic, :Compiled)
+(::Type{Compiled{C}})(d::Dynamic{C}) where {C<:Callable} = Base.inferencebarrier(_cast_refuse)(C, :Compiled, :Dynamic)
+(::Type{Dynamic{C}})(k::Kept{C}) where {C<:Callable} = getfield(k, :compiled) ?
+    Base.inferencebarrier(_cast_refuse)(C, :Dynamic, :Compiled) : Dynamic{C}(Val(:checked), getfield(k, :t))
+(::Type{Compiled{C}})(k::Kept{C}) where {C<:Callable} = getfield(k, :compiled) ?
+    Compiled{C}(Val(:checked), getfield(k, :t)) : Base.inferencebarrier(_cast_refuse)(C, :Compiled, :Dynamic)
+(::Type{Kept{C}})(d::Dynamic{C}) where {C<:Callable} = Kept{C}(Val(:checked), getfield(d, :t), false)
+(::Type{Kept{C}})(c::Compiled{C}) where {C<:Callable} = Kept{C}(Val(:checked), getfield(c, :t), true)
+Base.convert(::Type{Kept{C}}, c::CObj) where {C<:Callable} = Kept{C}(c)
+Base.convert(::Type{Kept{C}}, c::Union{Dynamic{C},Compiled{C}}) where {C<:Callable} = Kept{C}(c)
 @inline function (d::Dynamic{Callable{A,S}})(args...) where {A,S}
     return (getfield(d, :t)::CObj{A,S,Erased{A,S}})(args...)
 end
-Base.show(io::IO, d::Dynamic{C}) where {C<:Callable} = print(io, "Dynamic{", C, "}")
-
-"""
-    stored(Callable{A, S}, f)
-
-`f` as a library keeps it in a field, for calls at the signature `A` with result `S`: the
-caller's conversion and `Callable`'s default decide, as at a bound (traits reference §9).
-- By default, and for `with_dynamic(f)`: `Dynamic{Callable{A, S}}(f)`, of a type that does not depend
-  on the function, so the code that reads the field is compiled once.
-- For `compiled_for(f)`, and for a function of the trait world: `f` itself, so the code that reads
-  the field, compiled for the field's type, is compiled per function.
-- A `Dynamic{Callable{A, S}}` is kept as it is; one of another signature is refused (`TraitBoundError`).
-"""
-function stored(::Type{Callable{A,S}}, @nospecialize(f)) where {A,S}
-    f isa CompiledFor && return getfield(f, :x)
-    f isa WithDynamic && return Dynamic{Callable{A,S}}(getfield(f, :x))
-    f isa Dynamic{Callable{A,S}} && return f
-    f isa Dynamic && f isa Dynamic{<:Callable} && Base.inferencebarrier(_callable_mismatch)(typeof(f).parameters[1], A, S)
-    _from_trait_world(f) && return f
-    return Dynamic{Callable{A,S}}(f)
+@inline (c::Compiled{Callable{A,S}})(args...) where {A,S} = CObj{A,S}(getfield(c, :t))(args...)
+@inline function (k::Kept{Callable{A,S}})(args...) where {A,S}
+    getfield(k, :compiled) && return CObj{A,S}(getfield(k, :t))(args...)
+    return (getfield(k, :t)::CObj{A,S,Erased{A,S}})(args...)
 end
+# the casts, on `Callable`'s held values: the function moves between its forms
+compiled_for(d::Dynamic{C}) where {C<:Callable} = Compiled{C}(Val(:checked), _callable_fn(d))
+compiled_for(k::Kept{C}) where {C<:Callable} = Kept{C}(Val(:checked), _callable_fn(k), true)
+with_dynamic(c::Compiled{C}) where {C<:Callable} =
+    (u = Base.unwrap_unionall(C); Dynamic{C}(Val(:checked), _erased_at(u.parameters[1], u.parameters[2], _callable_fn(c))))
+with_dynamic(k::Kept{C}) where {C<:Callable} = getfield(k, :compiled) ?
+    (u = Base.unwrap_unionall(C); Kept{C}(Val(:checked), _erased_at(u.parameters[1], u.parameters[2], _callable_fn(k)), false)) : k
+Base.show(io::IO, d::Dynamic{C}) where {C<:Callable} = print(io, "Dynamic{", C, "}")
+Base.show(io::IO, d::Compiled{C}) where {C<:Callable} = print(io, "Compiled{", C, "} at ", typeof(getfield(d, :t)))
+Base.show(io::IO, d::Kept{C}) where {C<:Callable} =
+    getfield(d, :compiled) ? print(io, "Kept{", C, "}: Compiled at ", typeof(getfield(d, :t))) : print(io, "Kept{", C, "}: Dynamic")
+_dyn_identity(h::HeldValue{C}) where {C<:Callable} = _callable_fn(h)
 
 "The trait list of `X`'s family, computed from `X` alone when the caller is specialized (a constant, so code compiled by facts needs no run-time site for it)."
 @generated _family_list(::Type{X}) where {X} = :($(TraitList{Tuple{_family(X)}}()))
@@ -898,11 +993,11 @@ A result like `t` with declared fields replaced; also on a result of `like`.
             kt = o isa TObj ? o : _assemble(TraitList{Tuple{X}}(), o)
             kt isa TObj && !(o isa TObj) && !ismutable(o) && (kt = _with_object(kt, o))
             v = viewof(kt, X)
-            x = res.x isa Dynamic ? _dyn_object(res.x) : res.x
+            x = res.x isa HeldValue ? _dyn_object(res.x) : res.x
             res = LikeResult(kt, x, res.f)
         end
-        if u isa Dynamic
-            # a dynamic value in, a dynamic value of the same trait out
+        if u isa HeldValue
+            # a held value in, a held value of the same trait and attribute out (kept, not cast)
             o = _viewobject(v)
             o === nothing && getfield(_viewslot(v), :off) >= 0 && throw(TraitBoundError(
                 "a dynamic value of an immutable type keeps the parts $X can see, not the whole object, " *
@@ -910,7 +1005,7 @@ A result like `t` with declared fields replaced; also on a result of `like`.
             nu = _invert(X, v, o === nothing ? getfield(getfield(v, :parts), 1) : o, res)
             b = _builder_for(Any[X], typeof(nu))
             b === NOTRAIT && throw(TraitBoundError("$(typeof(nu)) does not conform to $X"))
-            return typeof(u)(b(nu))
+            return _keep_as(u, b(nu))
         end
         return _invert(X, v, u, res)
     end
@@ -954,12 +1049,21 @@ function _rebuild(u, repl::Dict{Int,Any})
     end
 end
 "An operation returning `Self`, on a dynamic value: a dynamic value of the new value, which implements the trait itself."
-function _dyn_like(d::Dynamic{X}, x) where {X}
+function _dyn_like(d::HeldValue{X}, x) where {X}
     t = opened(d)
     v = getfield(t, :views)[1]
     isempty(getfield(v, :fs)) || throw(TraitBoundError("$X declares fields, so a new value of its receiver type alone does not conform"))
-    return Dynamic{X}(Val(:hold), TObj(map(w -> _selfview(typeof(w).parameters[1], getfield(w, :w), x), getfield(t, :views))))
+    n = TObj(map(w -> _selfview(typeof(w).parameters[1], getfield(w, :w), x), getfield(t, :views)))
+    return _like_held(d, n)
 end
+"A held value of the new receiver value `n`, with `d`'s form and attribute."
+_like_held(::Dynamic{X}, n::TObj) where {X} = Dynamic{X}(Val(:hold), n)
+_like_held(::Compiled{X}, n::TObj) where {X} = Compiled{X}(Val(:hold), n)
+_like_held(k::Kept{X}, n::TObj) where {X} = (Dynamic{X}(Val(:hold), n); Kept{X}(Val(:checked), n, getfield(k, :compiled)))
+"The user's object trait object `t` reads, kept with the form and attribute of held value `u`."
+_keep_as(::Dynamic{X}, t::TObj) where {X} = Dynamic{X}(Val(:keep), t)
+_keep_as(::Compiled{X}, t::TObj) where {X} = Compiled{X}(Val(:checked), getfield(Dynamic{X}(Val(:keep), t), :t))
+_keep_as(k::Kept{X}, t::TObj) where {X} = Kept{X}(Val(:checked), getfield(Dynamic{X}(Val(:keep), t), :t), getfield(k, :compiled))
 
 # --- membership (note "Traits as abstract types") ----------------------------------
 

@@ -12,14 +12,6 @@
 # ---------------------------------------------------------------------------
 
 """
-    Compiled{X}
-
-An attribute on a bound, `x::Compiled{X}`: a plain value entering there is `Compiled`, compiled for
-its key, whatever its caller knew of its type. Never the type of a value.
-"""
-abstract type Compiled{X} end
-
-"""
     ErasedKey{P, Y}
 
 The key of a `Dynamic` trait object: the trait's parameter values `P` (a tuple type, in order),
@@ -125,8 +117,10 @@ or names a parameter a `Dynamic{X}` leaves open, unknown there. A generator, so 
     CC.split_call(_family_of(X), _erased_ft(field_type(X, Val(f), K)), _DynField{X,f}(), getfield(v, :o))::_erased_ft(field_type(X, Val(f), K))
 
 """
-The seams: an argument of an operation or of a `Callable` declared `Dynamic{Y}` that receives a
-trait object gets a `Dynamic{Y}` of it (lowering §13). Every other argument passes as it is.
+The seams: an argument of an operation or of a `Callable` declared `Dynamic{Y}`, `Compiled{Y}` or
+`Kept{Y}` that receives a trait object gets that value of it (lowering §13): its attribute kept, so a
+trait object of the other attribute at a `Dynamic{Y}` or `Compiled{Y}` is refused (only a cast
+changes an attribute). Every other argument passes as it is.
 """
 @generated function _seams(::Type{AT}, args::Tuple) where {AT}
     asis = :(Base.@_inline_meta; args)          # inlined in every case: the arguments never go through a tuple
@@ -134,10 +128,10 @@ trait object gets a `Dynamic{Y}` of it (lowering §13). Every other argument pas
     ds = (AT::DataType).parameters
     as = (args::DataType).parameters
     length(ds) == length(as) || return asis
-    any(i -> as[i] <: TObj && ds[i] isa DataType && ds[i] <: Dynamic, 1:length(as)) || return asis
+    any(i -> as[i] <: TObj && ds[i] isa DataType && ds[i] <: HeldValue, 1:length(as)) || return asis
     return quote
         Base.@_inline_meta          # inlined, so the caller's arguments are never stored in a tuple
-        ($([as[i] <: TObj && ds[i] isa DataType && ds[i] <: Dynamic ? :($(ds[i])(args[$i])) : :(args[$i]) for i in 1:length(as)]...),)
+        ($([as[i] <: TObj && ds[i] isa DataType && ds[i] <: HeldValue ? :($(ds[i])(args[$i])) : :(args[$i]) for i in 1:length(as)]...),)
     end
 end
 
@@ -151,7 +145,9 @@ its type when the call runs (a function barrier). On a `Dynamic` value or trait 
 Always wins over a position's attribute and a trait's default.
 """
 compiled_for(x::T) where {T} = CompiledFor{T}(x)
-compiled_for(d::Dynamic) = Base.inferencebarrier(opened)(d)
+compiled_for(d::Dynamic{X}) where {X} = Compiled{X}(Val(:checked), getfield(d, :t))
+compiled_for(c::Compiled) = c
+compiled_for(k::Kept{X}) where {X} = Kept{X}(Val(:checked), getfield(k, :t), true)
 compiled_for(t::TObj{T,V}) where {T,V} = _is_erased(V) ? Base.inferencebarrier(_open_erased)(t) : t
 """
     with_dynamic(x)
@@ -161,12 +157,14 @@ operation on it dispatches when it runs. Always wins over a position's attribute
 """
 with_dynamic(x) = WithDynamic(x)
 with_dynamic(d::Dynamic) = d
+with_dynamic(c::Compiled{X}) where {X} = Dynamic{X}(Val(:checked), getfield(c, :t))
+with_dynamic(k::Kept{X}) where {X} = Kept{X}(Val(:checked), getfield(k, :t), false)
 with_dynamic(t::TObj) = _erase(t, _held_object(t))
-"A value converted by `compiled_for`, until the next entry."
+"A plain value converted by `compiled_for`, until it is first seen through a trait (then a `Compiled{X}`, or the trait object at its key)."
 struct CompiledFor{T}
     x::T
 end
-"A value converted by `with_dynamic`, until the next entry."
+"A plain value converted by `with_dynamic`, until it is first seen through a trait (then a `Dynamic{X}`)."
 struct WithDynamic
     x::Any
 end
@@ -219,14 +217,18 @@ end
 
 """
 Whether a value from a caller that does not know its type enters position `p` as `Compiled`:
-converted by `compiled_for`, or a plain value at a position whose attribute is `Compiled`. The
+converted by `compiled_for`, a `Compiled{X}` (whose object's type no caller knows), or a plain value
+at a position whose attribute is `Compiled`. The
 table of declared implementations serves it (untyped.jl): one lookup by its type, then the code
 compiled for its key (lowering §9.2).
 """
 @inline _tabled(p::EntryPos, @nospecialize(t)) =
-    t isa CompiledFor || (attribute(p) === :compiled && !(t isa Dynamic || t isa TObj || t isa WithDynamic))
-"The plain value a `compiled_for` holds, or the value itself."
-@inline _unconverted(@nospecialize(t)) = t isa CompiledFor ? getfield(t, :x) : t
+    t isa CompiledFor || t isa Compiled || (t isa Kept && getfield(t, :compiled)) ||
+    (attribute(p) === :compiled && !(t isa Dynamic || t isa Kept || t isa TObj || t isa WithDynamic))
+"The plain value a `compiled_for` or a held value holds, or the value itself."
+@inline _unconverted(@nospecialize(t)) = t isa CompiledFor ? getfield(t, :x) : (t isa Compiled || t isa Kept) ? getfield(t, :t) : t
+"Whether the code knows the type of the object a trait argument stands for: not for a `Compiled{X}` or a `Kept{X}`, whose object's type is not part of its own."
+@inline _known_object(@nospecialize(t), kn::Bool) = kn & !(t isa Compiled || t isa Kept)
 
 Base.Experimental.@max_methods 1 function result_params end
 "`result_params(X)`: the parameters of trait `X` that its operations' declared result types and its declared fields' types use (methods added by `@trait`)."

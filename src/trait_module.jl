@@ -111,12 +111,15 @@ function _process(mod::Module, ex)
         r = _process(mod, inner)
         return Expr(:toplevel, r, :($TraitWorld.concrete_level(::typeof($fname)) = $(QuoteNode(level))))
     elseif h === :struct
-        return _dynamic_fields(mod, ex)
+        st, ctor = _bounded_struct(mod, _dynamic_fields(mod, ex))
+        return ctor === nothing ? st : Expr(:toplevel, st, ctor)
     elseif h === :macrocall
         name = ex.args[1]
         inner = ex.args[end]
         if name == GlobalRef(Core, Symbol("@doc")) && inner isa Expr && inner.head === :struct
-            return Expr(:macrocall, ex.args[1:end-1]..., _dynamic_fields(mod, inner))
+            st, ctor = _bounded_struct(mod, _dynamic_fields(mod, inner))
+            d = Expr(:macrocall, ex.args[1:end-1]..., st)
+            return ctor === nothing ? d : Expr(:toplevel, d, ctor)
         end
         if (name in _PASS_MACROS || name == GlobalRef(Core, Symbol("@doc"))) && _is_fdef(inner)
             r = _rewrite_fdef(mod, inner)
@@ -136,10 +139,10 @@ function _process(mod::Module, ex)
 end
 
 """
-A trait's name in a struct field or a container means its dynamic value, as an
-abstract type's name there means a boxed value (note "Traits as abstract
-types"): `plots::Vector{Plot}` is `Vector{Dynamic{Plot}}`, `bg::ColorSpec` is
-`Dynamic{ColorSpec}`. `Vector{<:ColTable}` keeps its meaning, one representation.
+A trait's name in a struct field or a container means a value of the trait with its attribute,
+as an abstract type's name there means a boxed value (traits reference §10): `plots::Vector{Plot}`
+is `Vector{Kept{Plot}}`, `bg::ColorSpec` is `Kept{ColorSpec}`, each item `Compiled{X}` or
+`Dynamic{X}` as it was stored. `Vector{<:ColTable}` keeps its meaning, one representation.
 """
 function _dynamic_fields(mod::Module, ex::Expr)
     body = ex.args[3]
@@ -158,22 +161,126 @@ function _dynamic_fields(mod::Module, ex::Expr)
     return Expr(:struct, ex.args[1], ex.args[2], Expr(:block, newbody...))
 end
 
-function _dyn_type(mod::Module, T)
-    T isa Expr && T.head === :curly && (h0 = _tryeval(mod, T.args[1]); h0 === Dynamic || h0 === Compiled) && return T
+"""
+Whether `B`, a struct parameter's upper bound, names a trait or `Callable` (an instance of either,
+possibly naming the struct's other parameters): a parameter bounded by a trait.
+"""
+function _istraitbound(mod::Module, B)
+    h = B isa Expr && B.head === :curly ? B.args[1] : B
+    (h isa Symbol || (h isa Expr && h.head === :.)) || return false
+    v = _tryeval(mod, h)
+    return v === Callable || (v isa Type && is_trait(v))
+end
+"The name a struct parameter declares (`T`, `T <: Real`)."
+_paramname(p) = p isa Expr && p.head === :(<:) ? p.args[1] : p
+
+"""
+A struct with parameters bounded by a trait (traits reference §10.4, lowering §13.2): the bounds
+stripped from its header (a trait is not a Julia type), Julia's constructor with explicit parameters
+kept as it is, and the constructor without parameters an entry for the bounded fields: each field
+typed exactly by a bounded parameter takes that parameter's bound, where the caller's cast or the
+first-seen rule applies, and the parameter becomes the stored form's type (the user's object for a
+`Compiled` value, `Dynamic{X}` for a `Dynamic` one). Returns the struct and that constructor, or
+`nothing` for a struct without such parameters.
+"""
+function _bounded_struct(mod::Module, ex::Expr)
+    header = ex.args[2]
+    sup = header isa Expr && header.head === :(<:) ? header.args[2] : nothing
+    h = sup === nothing ? header : header.args[1]
+    h isa Expr && h.head === :curly || return ex, nothing
+    bounds = Dict{Symbol,Any}()
+    params = Any[]
+    for p in h.args[2:end]
+        if p isa Expr && p.head === :(<:) && length(p.args) == 2 && p.args[1] isa Symbol && _istraitbound(mod, p.args[2])
+            bounds[p.args[1]] = p.args[2]
+            push!(params, p.args[1])
+        else
+            push!(params, p)
+        end
+    end
+    isempty(bounds) && return ex, nothing
+    name = h.args[1]
+    nh = Expr(:curly, name, params...)
+    pnames = Any[_paramname(p) for p in params]
+    nfields = count(f -> !(f isa LineNumberNode), ex.args[3].args)
+    fsyms = [gensym(:f) for _ in 1:nfields]
+    # Julia's constructor with explicit parameters, written out: a struct with an inner constructor gets no
+    # default outer one, whose place the bound's constructor below takes
+    inner = Expr(:function, Expr(:where, Expr(:call, Expr(:curly, name, pnames...), fsyms...), params...),
+                 Expr(:block, Expr(:call, Expr(:curly, :new, pnames...), fsyms...)))
+    st = Expr(:struct, ex.args[1], sup === nothing ? nh : Expr(:(<:), nh, sup), Expr(:block, ex.args[3].args..., inner))
+    fields = Tuple{Symbol,Any}[]
+    for f in ex.args[3].args
+        f isa LineNumberNode && continue
+        g = f isa Expr && f.head === :const ? f.args[1] : f
+        if g isa Symbol
+            push!(fields, (g, :Any))
+        elseif g isa Expr && g.head === :(::) && g.args[1] isa Symbol
+            push!(fields, (g.args[1], g.args[2]))
+        else
+            error("@trait_module: struct $name has parameters bounded by a trait, so its constructor is the bound's; " *
+                  "an inner constructor is not allowed (yet). Write an outer constructor that calls `$name(…)`")
+        end
+    end
+    names = Symbol[_paramname(p) for p in params]
+    args = Any[]; stmts = Any[Expr(:meta, :facts_boundary), Expr(:meta, :inline)]
+    vals = Any[]; ptype = Dict{Symbol,Any}()
+    for (fname, ft) in fields
+        if ft isa Symbol && haskey(bounds, ft)
+            haskey(ptype, ft) && error("@trait_module: struct $name: the bounded parameter `$ft` types two fields; it may type one")
+            k = gensym(fname)
+            push!(args, Expr(:macrocall, Symbol("@nospecialize"), LineNumberNode(0), fname))   # as an entry's: compiled at `Any` for a caller that does not know the type
+            push!(stmts, :($k = $TraitWorld._kept_at($(bounds[ft]), $fname, Val($TraitWorld._known_type($fname)))))
+            push!(vals, k)
+            ptype[ft] = :(typeof($k))
+        else
+            any(F -> _uses(ft, F), keys(bounds)) &&
+                error("@trait_module: struct $name: field `$fname` uses a bounded parameter inside another type; a bounded parameter may only type a field itself")
+            push!(args, :($fname::$ft))
+            push!(vals, fname)
+        end
+    end
+    for F in keys(bounds)
+        haskey(ptype, F) || error("@trait_module: struct $name: the bounded parameter `$F` types no field")
+    end
+    free = Any[p for p in params if !haskey(bounds, _paramname(p))]
+    for p in free
+        any(((_, ft),) -> !(ft isa Symbol && haskey(bounds, ft)) && _uses(ft, _paramname(p)), fields) ||
+            error("@trait_module: struct $name: parameter `$(_paramname(p))` is named by no field outside a bound, so its constructor cannot determine it")
+    end
+    push!(stmts, :(return $name{$([haskey(ptype, n) ? ptype[n] : n for n in names]...)}($(vals...))))
+    sig = Expr(:call, name, args...)
+    isempty(free) || (sig = Expr(:where, sig, free...))
+    ctor = Expr(:function, sig, Expr(:block, stmts...))
+    return st, Expr(:toplevel, ctor, :($TraitWorld.bounded_constructor(::Type{<:$name}) = true))
+end
+
+"""
+A type with each trait's name in it made `Kept{X}`, and so `Dynamic{X}` and `Compiled{X}` as a
+field's type or a parameter: in storage an attribute is only the default for a value first seen
+there, never a cast (traits reference §6.6). In an argument's type (`arg`), such a parameter is
+`<:HeldValue{X}`: Julia's parameters are invariant, so `cs::Vector{Column}` takes a
+`Vector{Dynamic{Column}}`, a `Vector{Compiled{Column}}` and a `Vector{Kept{Column}}` alike.
+"""
+function _dyn_type(mod::Module, T, arg::Bool = false, inner::Bool = false)
+    kept(X) = arg && inner ? Expr(:(<:), :($TraitWorld.HeldValue{$X})) : :($TraitWorld.Kept{$X})
+    if T isa Expr && T.head === :curly && (h0 = _tryeval(mod, T.args[1]); h0 === Dynamic || h0 === Compiled)
+        return (inner || !arg) && length(T.args) == 2 ? kept(T.args[2]) : T
+    end
     if T isa Symbol || (T isa Expr && T.head === :.)
         v = _tryeval(mod, T)
-        return (v isa Type && is_trait(v)) ? :($TraitWorld.Dynamic{$T}) : T
+        return (v isa Type && is_trait(v)) ? kept(T) : T
     elseif T isa Expr && T.head === :curly
         h = _tryeval(mod, T.args[1])
-        h isa Type && is_trait(h) && return :($TraitWorld.Dynamic{$T})
-        return Expr(:curly, T.args[1], Any[(a isa Expr && a.head === :(<:)) ? a : _dyn_type(mod, a) for a in T.args[2:end]]...)
+        h isa Type && is_trait(h) && return kept(T)
+        return Expr(:curly, T.args[1], Any[(a isa Expr && a.head === :(<:)) ? a : _dyn_type(mod, a, arg, true) for a in T.args[2:end]]...)
     end
     return T
 end
 
 """
-A trait's name as a container's element type in a function means its dynamic value, as in a
-field (note "Traits as abstract types"): `Column[]`, `Column[a, b]`, `Vector{Column}(undef, n)`
+A trait's name as a container's element type in a function means a value of the trait with its
+attribute (`Kept{X}`), as in a field (note "Traits as abstract types"): `Column[]`, `Column[a, b]`, `Vector{Column}(undef, n)`
 and `Dict{String, Column}()` in a body; `cs::Vector{Column}` in an argument. A trait's name in
 an argument itself stays a bound, and `Vector{<:ColTable}` keeps its meaning.
 """
@@ -183,6 +290,8 @@ function _dynamic_containers(mod::Module, ex::Expr)
 end
 "Whether `x` names `Dynamic` or `Compiled`: an attribute on a bound (traits reference §6.1)."
 _isattribute(mod::Module, x) = (x isa Symbol || (x isa Expr && x.head === :.)) && (v = _tryeval(mod, x); v === Dynamic || v === Compiled)
+"Whether `x` is `Dynamic{X}` or `Compiled{X}` written out."
+_isattributed(mod::Module, x) = x isa Expr && x.head === :curly && length(x.args) == 2 && _isattribute(mod, x.args[1])
 _istraitname(mod::Module, x) = (x isa Symbol || (x isa Expr && x.head === :.)) && (v = _tryeval(mod, x); v isa Type && is_trait(v))
 function _dyn_sig(mod::Module, s)
     s isa Expr || return s
@@ -202,7 +311,7 @@ function _dyn_arg(mod::Module, a)
     elseif a.head === :(::) && length(a.args) == 2 && a.args[2] isa Expr && a.args[2].head === :curly && _isattribute(mod, a.args[2].args[1])
         return a                                     # `x::Dynamic{X}`, `x::Compiled{X}`: a bound with an attribute
     elseif a.head === :(::) && length(a.args) == 2 && a.args[2] isa Expr && a.args[2].head === :curly && !_istraitname(mod, a.args[2].args[1])
-        return Expr(:(::), a.args[1], _dyn_type(mod, a.args[2]))
+        return Expr(:(::), a.args[1], _dyn_type(mod, a.args[2], true))
     elseif a.head === :(::) && length(a.args) == 2 && a.args[2] isa Expr && (a.args[2].head === :curly || a.args[2].head === :tuple)
         return Expr(:(::), a.args[1], _dyn_bound(mod, a.args[2]))
     end
@@ -236,8 +345,12 @@ function _dyn_body(mod::Module, x)
     x isa Expr || return x
     x.head in (:quote, :inert, :meta) && return x
     if x.head in (:ref, :typed_vcat, :typed_hcat, :typed_comprehension) && _istraitname(mod, x.args[1])
-        return Expr(x.head, :($TraitWorld.Dynamic{$(x.args[1])}), Any[_dyn_body(mod, a) for a in x.args[2:end]]...)
-    elseif x.head === :curly && !_istraitname(mod, x.args[1]) && any(a -> _istraitname(mod, a), x.args[2:end])
+        return Expr(x.head, :($TraitWorld.Kept{$(x.args[1])}), Any[_dyn_body(mod, a) for a in x.args[2:end]]...)
+    elseif x.head in (:ref, :typed_vcat, :typed_hcat, :typed_comprehension) && _isattributed(mod, x.args[1])
+        return Expr(x.head, :($TraitWorld.Kept{$(x.args[1].args[2])}), Any[_dyn_body(mod, a) for a in x.args[2:end]]...)
+    elseif x.head === :curly && _isattribute(mod, x.args[1])
+        return x                                     # `Dynamic{X}(t)`, `::Compiled{X}`: a type, not storage
+    elseif x.head === :curly && !_istraitname(mod, x.args[1]) && any(a -> _istraitname(mod, a) || _isattributed(mod, a), x.args[2:end])
         return _dyn_type(mod, x)
     end
     return Expr(x.head, Any[_dyn_body(mod, a) for a in x.args]...)
@@ -694,7 +807,7 @@ function _rewrite_fdef(mod::Module, ex)
             tag = gensym(Symbol(:tw_untyped_, fname isa Symbol ? fname : :f))
             tpos = [i for (i, x) in enumerate(args) if x.kind === :trait]
             bsyms = [gensym(:b) for _ in tpos]
-            known = foldl((a, b) -> :($a | $b), [:($TraitWorld._known_type($(args[i].name))) for i in tpos])
+            known = foldl((a, b) -> :($a | $b), [:($TraitWorld._known_object($(args[i].name), $TraitWorld._known_type($(args[i].name)))) for i in tpos])
             served = foldl((a, b) -> :($a & $b), [:($TraitWorld._tabled($TraitWorld.EntryPos{typeof($fname),$i,$nargs}(), $(args[i].name))) for i in tpos])
             # the values the table compiles for: a `compiled_for`'s held value, or the value
             usyms = Dict(i => gensym(Symbol(args[i].name, :_u)) for i in tpos)

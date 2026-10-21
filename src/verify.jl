@@ -359,8 +359,9 @@ the place it is made): record the trait object type it keeps, for the operations
 of its trait, which dispatch on it.
 """
 function _note_dyn_made!(cx::_Walk, @nospecialize(D), @nospecialize(T))
-    (D isa DataType && D <: Dynamic && length(D.parameters) == 1) || return nothing
+    (D isa DataType && D <: HeldValue && length(D.parameters) == 1) || return nothing
     (T isa DataType && isconcretetype(T)) || return nothing      # the user's object, or a trait object it holds
+    T <: HeldValue && return nothing                              # a conversion between held forms: its object was noted where it was made
     v = get!(() -> Any[], cx.dyn_made, _family(D.parameters[1]))
     T in v || push!(v, T)
     return nothing
@@ -377,7 +378,7 @@ end
 function _note_dyn_consts!(cx::_Walk, @nospecialize(x), depth::Int = 0)
     depth > 4 && return nothing
     x isa QuoteNode && (x = x.value)
-    if x isa Dynamic
+    if x isa HeldValue
         _note_dyn_made!(cx, typeof(x), typeof(getfield(x, :t)))
     elseif x isa Tuple
         for y in x
@@ -407,7 +408,7 @@ function _dyn_op_family_(src, sptypes, @nospecialize(a))
     (fld === :o || fld === 2) && D isa DataType && D <: View && D.parameters[2] === ErasedWit &&
         return _family(D.parameters[1])
     (fld === :t || fld === 1) || return nothing
-    (D isa DataType && D <: Dynamic && length(D.parameters) == 1) || return nothing
+    (D isa DataType && D <: HeldValue && length(D.parameters) == 1) || return nothing
     return _family(D.parameters[1])
 end
 "The `_Open{X}()` a call statement applies (a dynamic value opened to a trait object), or `nothing`."
