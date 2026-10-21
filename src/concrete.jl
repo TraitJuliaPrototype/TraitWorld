@@ -2,8 +2,8 @@
 # Concrete mode, ported from TraitRegions: an opt-in contract that a trait
 # module's code works on concrete types only.
 #
-#     @warn_on_abstract @trait_module begin … end        # a whole trait module
-#     @error_on_abstract f(t::ColTable, i::Int) = …      # one function, inside a trait module
+#     @warn_not_fully_typed @trait_module begin … end    # a whole trait module
+#     @enforce_fully_typed f(t::ColTable, i::Int) = …    # one function, inside a trait module
 #
 # The check runs once per worker signature, in `checked_call`'s first call,
 # so its result is saved with whichever package image compiled the signature
@@ -14,7 +14,7 @@
 # an abstract type, a boxed variable, a variable whose type changes, a
 # non-constant global, an abstract declared result. Workers see their bounds'
 # keys and operation results asserted to their declared types. A key may be
-# abstract unless its trait asks for concrete keys (`@concrete_only`, decision 1);
+# abstract unless its trait asks for a concrete part (`@enforce_concrete_only`, traits reference §11.1);
 # otherwise an abstract value comes from the module's own code or the code it calls.
 # ---------------------------------------------------------------------------
 
@@ -28,7 +28,7 @@ end
 """
     AbstractTypeError
 
-Raised by an `@error_on_abstract` function whose code, at the representations
+Raised by an `@enforce_fully_typed` function whose code, at the representations
 it is called with, uses abstract types on a normal path.
 """
 struct AbstractTypeError <: Exception
@@ -40,7 +40,7 @@ end
 function Base.showerror(io::IO, e::AbstractTypeError)
     print(io, "AbstractTypeError: ")
     _print_findings(io, e.op, e.R, e.findings)
-    print(io, "\nFix the root causes, or relax `@error_on_abstract` to `@warn_on_abstract`.")
+    print(io, "\nFix the root causes, or relax `@enforce_fully_typed` to `@warn_not_fully_typed`.")
 end
 
 function _print_findings(io::IO, op, @nospecialize(R), fs::Vector{AbstractFinding})
@@ -506,7 +506,7 @@ end
     concrete_level(f) -> :off, :warn or :error
 
 Concrete mode of a trait module's function: set per function with
-`@warn_on_abstract` or `@error_on_abstract` inside the module, or for the
+`@warn_not_fully_typed` or `@enforce_fully_typed` inside the module, or for the
 whole module by putting the macro in front of `@trait_module`.
 """
 concrete_level(@nospecialize(f)) = _module_concrete(parentmodule(f))
@@ -536,7 +536,7 @@ run-time site on a normal path, in the worker and in what it reaches).
     fs = concrete_findings(sig)
     if !isempty(fs)
         lv === :error && throw(AbstractTypeError(nameof(f), _sig_reps(sig), fs))
-        @warn "@warn_on_abstract: " * sprint(_print_findings, nameof(f), _sig_reps(sig), fs)
+        @warn "@warn_not_fully_typed: " * sprint(_print_findings, nameof(f), _sig_reps(sig), fs)
     end
     F === typeof(Core.kwcall) && return nothing          # keyword workers: certified through their entry
     cert = try
@@ -546,7 +546,7 @@ run-time site on a normal path, in the worker and in what it reaches).
     end
     (cert === nothing || isfullytyped(cert)) && return nothing
     lv === :error && throw(NotFullyTypedError(cert))
-    @warn "@warn_on_abstract: " * sprint(show, MIME"text/plain"(), cert)
+    @warn "@warn_not_fully_typed: " * sprint(show, MIME"text/plain"(), cert)
     return nothing
 end
 
@@ -558,11 +558,17 @@ level: for tests and CI.
 """
 check_concrete(@nospecialize(sig::Type)) = concrete_findings(sig)
 
-const _CONCRETE_MACROS = (Symbol("@warn_on_abstract"), Symbol("@error_on_abstract"))
+"The level of a concrete-mode prefix (traits reference §11.3): `@warn_not_fully_typed` or `@enforce_fully_typed`."
 function _concrete_macro_level(@nospecialize(head))
-    s = head isa GlobalRef ? head.name : head isa Expr && head.head === :. ? head.args[end].value : head
-    return s === Symbol("@warn_on_abstract") ? :warn : s === Symbol("@error_on_abstract") ? :error : nothing
+    s = _macro_sym(head)
+    return s === Symbol("@warn_not_fully_typed") ? :warn : s === Symbol("@enforce_fully_typed") ? :error : nothing
 end
+"The level of a concreteness prefix on a function (traits reference §11.2): `@warn_on_abstract` or `@enforce_concrete_only`."
+function _part_concrete_level(@nospecialize(head))
+    s = _macro_sym(head)
+    return s === Symbol("@warn_on_abstract") ? :warn : s === Symbol("@enforce_concrete_only") ? :error : nothing
+end
+_macro_sym(@nospecialize(head)) = head isa GlobalRef ? head.name : head isa Expr && head.head === :. ? head.args[end].value : head
 
 function _annotate_module(ex, level::Symbol, which::String)
     if ex isa Expr && ex.head === :macrocall && endswith(string(ex.args[1]), "trait_module")
@@ -579,24 +585,92 @@ function _annotate_module(ex, level::Symbol, which::String)
 end
 
 """
-    @warn_on_abstract @trait_module begin … end
-    @warn_on_abstract f(t::ColTable, …) = …          # inside a trait module
+    @warn_not_fully_typed @trait_module begin … end
+    @warn_not_fully_typed f(t::ColTable, …) = …          # inside a trait module
 
-Concrete mode with warnings: the first time a function runs at a
-representation (or a package image compiles it there), warn if its code uses
-abstract types on a normal path, naming each root cause.
+Concrete mode with warnings (traits reference §11.3): the first time a function runs at a
+representation (or a package image compiles it there), warn if its code uses abstract types on a
+normal path, naming each root cause.
 """
-macro warn_on_abstract(ex)
-    esc(_annotate_module(ex, :warn, "@warn_on_abstract"))
+macro warn_not_fully_typed(ex)
+    esc(_annotate_module(ex, :warn, "@warn_not_fully_typed"))
 end
 
 """
-    @error_on_abstract @trait_module begin … end
-    @error_on_abstract f(t::ColTable, …) = …         # inside a trait module
+    @enforce_fully_typed @trait_module begin … end
+    @enforce_fully_typed f(t::ColTable, …) = …           # inside a trait module
 
-Concrete mode with errors: the function raises `AbstractTypeError` instead of
-running when its code uses abstract types on a normal path.
+Concrete mode with errors (traits reference §11.3): the function raises `AbstractTypeError` instead
+of running when its code uses abstract types on a normal path.
 """
-macro error_on_abstract(ex)
-    esc(_annotate_module(ex, :error, "@error_on_abstract"))
+macro enforce_fully_typed(ex)
+    esc(_annotate_module(ex, :error, "@enforce_fully_typed"))
+end
+
+macro error_on_abstract(args...)
+    error("`@error_on_abstract` is written `@enforce_fully_typed` (concrete mode, traits reference §11.3)")
+end
+
+"""
+    @enforce_concrete_only names…        # in a trait's body, or before a bounded function in a trait module
+    @warn_on_abstract names…
+
+The parts named must be concrete (traits reference §11): in a trait's body, its parameters and `Self`
+at every implementation (none named: all of them); before a bounded function, the `where` variables
+its bounds name and its bounded arguments (each its `Self`) at every call.
+"""
+macro enforce_concrete_only(args...)
+    error("`@enforce_concrete_only` belongs in a trait's body, or before a bounded function inside a trait module (traits reference §11)")
+end
+"""
+    @warn_on_abstract names…             # in a trait's body, or before a bounded function in a trait module
+
+As `@enforce_concrete_only`, with a warning instead of a refusal (traits reference §11).
+"""
+macro warn_on_abstract(args...)
+    isempty(args) || !(args[end] isa Expr && args[end].head === :macrocall && endswith(string(args[end].args[1]), "trait_module")) ||
+        error("`@warn_on_abstract` before `@trait_module` is written `@warn_not_fully_typed` (concrete mode, traits reference §11.3)")
+    error("`@warn_on_abstract` belongs in a trait's body, or before a bounded function inside a trait module (traits reference §11)")
+end
+
+"""
+A part a function's concreteness prefix names (traits reference §11.2), at the call: a type that is
+not concrete raises `TraitBoundError` (`:error`) or warns once (`:warn`). Decided where the call is
+compiled when the type is known there (a constant); a value that is not a type is concrete.
+"""
+@inline _concrete_part(@nospecialize(v), lv::Symbol, n::Symbol, f) = nothing
+@inline _concrete_part(::Type{T}, lv::Symbol, n::Symbol, f) where {T} =
+    _concrete_known(T) ? nothing : _concrete_fail(lv, "`$n` is $T", n, T, f)
+"Whether `T` is concrete, or stands for a type not known here (an archetype of definition checking). A generator: a constant."
+@generated _concrete_known(::Type{T}) where {T} = _concrete_known_now(T)
+_concrete_known_now(@nospecialize(T)) =
+    (T isa DataType && (T.name === Base.typename(ParamArchetype) || T <: Archetype || T === OpenParam)) || key_concrete(T)
+"The `Self` of a bounded argument: the receiver type its views are compiled for; `nothing` where it is not known by choice (a `Dynamic`) or not part of the key."
+@generated function _concrete_self(t::TObj, lv::Symbol, n::Symbol, f)
+    S = _receiver_of(t)
+    (S === nothing || _concrete_known_now(S)) && return :(nothing)
+    return :(_concrete_fail(lv, string("argument `", n, "`'s Self is ", $S), n, $S, f))
+end
+@inline _concrete_self(@nospecialize(t), lv::Symbol, n::Symbol, f) = nothing
+"The receiver type a trait object type's views are compiled for, or `nothing` (a `Dynamic`'s erased key, an archetype, no receiver type)."
+function _receiver_of(@nospecialize(T))
+    V = T.parameters[2].parameters[1]
+    K = V.parameters[3]
+    (K <: ErasedKey || K <: Archetype) && return nothing
+    if K <: Key
+        I = K.parameters[1]
+        return I === Nothing ? nothing : I
+    end
+    return K
+end
+const _CONCRETE_WARNED = Set{Any}()
+@noinline function _concrete_fail(lv::Symbol, what::String, n::Symbol, @nospecialize(T), @nospecialize(f))
+    tag = lv === :error ? "@enforce_concrete_only" : "@warn_on_abstract"
+    msg = "`$f`: $what, which is not concrete (`$tag $n`)"
+    lv === :error && throw(TraitBoundError(msg))
+    key = (f, n, T)
+    key in _CONCRETE_WARNED && return nothing
+    push!(_CONCRETE_WARNED, key)
+    @warn msg * ": the code for it dispatches at run time where it uses that type"
+    return nothing
 end

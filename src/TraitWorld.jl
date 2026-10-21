@@ -15,7 +15,7 @@ using Serialization: Serialization
 export Trait, Callable, TObj, Dynamic, Compiled, Kept, compiled_for, with_dynamic,
        @trait, @implement, @trait_module, @workload,
        TraitBoundError, TraitUseError, ImplementError, OwnershipError, verify_main, isclosed,
-       @warn_on_abstract, @error_on_abstract, AbstractTypeError, check_concrete, check_definitions, conforms, withfields,
+       @enforce_concrete_only, @warn_on_abstract, @enforce_fully_typed, @warn_not_fully_typed, @error_on_abstract, AbstractTypeError, check_concrete, check_definitions, conforms, withfields,
        fully_typed, isfullytyped, FullyTypedReport, NotFullyTypedError
 
 function __init__()

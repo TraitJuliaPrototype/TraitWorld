@@ -85,7 +85,7 @@ Base.show(io::IO, r::FullyTypedReport) = print(io, isfullytyped(r) ? "FullyTyped
 """
     NotFullyTypedError
 
-Raised, under `@error_on_abstract`, by a trait function whose code at a key has run-time sites on
+Raised, under `@enforce_fully_typed`, by a trait function whose code at a key has run-time sites on
 normal paths.
 """
 struct NotFullyTypedError <: Exception

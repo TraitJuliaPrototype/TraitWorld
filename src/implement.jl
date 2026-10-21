@@ -80,25 +80,45 @@ function key_concrete(@nospecialize(T))
     end
     return true
 end
-"The strictest concreteness policy of `X` and its supertraits."
-function _concreteness_of(@nospecialize(X))
-    pol = :none
+"The strictest level `X` and its supertraits ask of `Self` (traits reference §11.1): `:error`, `:warn` or `:none`."
+function _self_level(@nospecialize(X))
+    lv = :none
     for Y in trait_closure(_family(X))
-        p = _in_decision_world(trait_concreteness, Y)::Symbol
-        p === :concrete_only && return p
-        p === :warn && (pol = :warn)
+        for (n, l) in _in_decision_world(trait_concreteness, Y)::Tuple
+            n === :Self || continue
+            l === :error && return :error
+            lv = :warn
+        end
     end
-    return pol
+    return lv
 end
-"Apply `X`'s policy to a key part `T` (`what` names it in the message)."
-function _concreteness_check(@nospecialize(X), @nospecialize(T), what::String)
-    pol = _concreteness_of(X)
-    pol === :none && return nothing
-    key_concrete(T) && return nothing
-    msg = "$what `$T` is not concrete, and $X asks for concrete keys"
-    pol === :concrete_only && throw(ImplementError(msg * " (`@concrete_only`)"))
-    @warn msg * " (`@warn_on_abstract`): code compiled for this key dispatches at run time where it reads that part"
-    return nothing
+"""
+The parts of user type `T`'s implementation of `X` (through `p`) that the concreteness declarations of
+`X` and its supertraits name and that are not concrete (traits reference §11.1): `(errors, warnings)`.
+`Self` is the receiver type; a parameter, its value at the key.
+"""
+function _concrete_problems(@nospecialize(X), @nospecialize(T), p::ProjRec)
+    errs = String[]; warns = String[]
+    note(lv, msg) = push!(lv === :error ? errs : warns, msg)
+    slv = _self_level(X)
+    if slv !== :none && p.R !== Nothing && !key_concrete(p.R)
+        note(slv, "Self is $(p.R)$(p.field == 0 ? "" : ", the type of field `$(fieldname(T, p.field))`"), which is not concrete, " *
+                  "and $X asks for a concrete Self ($(slv === :error ? "`@enforce_concrete_only`" : "`@warn_on_abstract`"))")
+    end
+    for Y in trait_closure(X)
+        lvs = _in_decision_world(trait_concreteness, Y)::Tuple
+        isempty(lvs) && continue
+        w = Y === X ? proj_witness(X, T, p) : witness(Y, p.R)
+        w === nothing && continue
+        K, _ = _key_and_slots(Y, p, T, w)
+        for (n, lv) in lvs
+            n === :Self && continue
+            v = param(Y, Val(n), K)
+            key_concrete(v) && continue
+            note(lv, "$Y's parameter $n is $v, which is not concrete ($(lv === :error ? "`@enforce_concrete_only`" : "`@warn_on_abstract`") $n)")
+        end
+    end
+    return errs, warns
 end
 
 "Recursive concreteness: `T`, its type parameters, and its field types, all the way down (used by concrete mode's reports)."
@@ -510,7 +530,6 @@ _check_implementation(mod::Module, @nospecialize(X), @nospecialize(R), given::Tu
         end
     end
     isconcretetype(R) || return nothing          # a family's members are checked at their first use (`_member_problems`), a generic implementation's at each representation
-    _concreteness_check(X, R, "the receiver type")
     ps = conformance_problems(X, R, given)       # the operations only: declared fields are checked with the declaration
     isempty(ps) || throw(ImplementError("the implementation of $X for $R does not conform:\n  " * join(ps, "\n  ")))
     for S in trait_closure(X)[2:end]
@@ -529,7 +548,6 @@ _check_projection(mod::Module, @nospecialize(X), @nospecialize(T)) = _refusing(_
         throw(ImplementError("$(mod) may not declare that $T conforms to $X: it owns neither (rule 3)"))
     R = p.R
     R isa Type || throw(ImplementError("$T forwards $X to something that is not a type: $R"))
-    R === Nothing || _concreteness_check(X, R, "$T forwards $X to a field whose type")
     for Y in trait_closure(X)
         w = Y === X ? proj_witness(X, T, p) : witness(Y, R)
         w === nothing && throw(ImplementError("$T forwards $X to a field of type $R, which does not implement $Y"))
@@ -595,9 +613,6 @@ function _field_problems(@nospecialize(X), @nospecialize(T), fmap, @nospecialize
         else
             ST <: FT || push!(ps, "field `$g` of $T has type `$ST`, but $X declares `$FT` for `$f`")
         end
-        # a declared field's type is part of the key (decision 1)
-        key_concrete(ST) || _concreteness_of(X) !== :concrete_only ||
-            push!(ps, "field `$g` of $T has type `$ST`, which is not concrete, and $X asks for concrete keys (`@concrete_only`)")
     end
     return ps
 end
@@ -609,9 +624,9 @@ function _rep_of(@nospecialize(f), @nospecialize(T), @nospecialize(Rdecl), Xs = 
         Rinf <: Rdecl || throw(ImplementError("the projection of $T returns $Rinf, declared $Rdecl"))
         return Rdecl
     end
-    # an abstract representation is an abstract key: allowed unless a trait asks for concrete keys
+    # an abstract representation is an abstract key: allowed unless a trait asks for a concrete Self
     abstract_ok = !isempty(Xs) && Rinf isa Type && Rinf !== Union{} && Rinf !== Any &&
-                  all(X -> _concreteness_of(X) !== :concrete_only, Xs)
+                  all(X -> _self_level(X) !== :error, Xs)
     isconcretetype(Rinf) || abstract_ok || throw(ImplementError(
         "cannot infer a concrete representation for the projection of $T (got $Rinf): declare it, as in `@implement Trait{R} $T …`"))
     return Rinf
@@ -642,6 +657,9 @@ _declare_conformance(mod::Module, @nospecialize(X), @nospecialize(T)) = _refusin
     p === nothing && return (b = nothing, recs = ())
     ps = _param_bound_problems(X, T, p)
     isempty(ps) || throw(ImplementError("$T does not conform to $X: a parameter is outside its bound:\n  " * join(ps, "\n  ")))
+    errs, warns = _concrete_problems(X, T, p)
+    isempty(errs) || throw(ImplementError("$T does not conform to $X: a part is not concrete:\n  " * join(errs, "\n  ")))
+    isempty(warns) || @warn "$T conforms to $X with abstract parts: code compiled for it dispatches at run time where it uses them:\n  " * join(warns, "\n  ")
     ps = _agreement_problems(X, T, p)
     isempty(ps) || throw(ImplementError("$T's implementation of $X disagrees with its implementation of a related trait:\n  " * join(ps, "\n  ")))
     for Y in trait_closure(X)
@@ -785,10 +803,8 @@ function _family_registry end
 end
 @machinery @noinline function _conf_family_slow(reg::Base.RefValue{IdDict{Any,Any}}, @nospecialize(X), @nospecialize(u))
     U = typeof(u)
-    # a member at an abstract parameter (`S{Any}`) is refused at the entry where X asks for concrete keys
-    _latest(_concreteness_of, X) === :concrete_only && !key_concrete(U) &&
-        throw(TraitBoundError("a $U has an abstract type parameter, and $X asks for concrete keys (`@concrete_only`)"))
-    # a member that does not conform is refused (traits reference §4.7), at its first use
+    # a member that does not conform is refused (traits reference §4.7), at its first use; a part the
+    # concreteness declarations name that is not concrete (`S{Any}`, §11.1) among the problems
     key = Pair{Any,Any}(X, U)
     if !(@lock _LOCK key in _MEMBERS_CHECKED)
         ps = _latest(_member_problems, X, U)
@@ -823,7 +839,13 @@ single type's implementation is at its declaration, and the parameters' bounds.
         append!(out, conformance_problems(X, U, Tuple(op for op in _ops(X) if !(op in D))))
     end
     p = proj_lookup(X, U)
-    p === nothing || append!(out, _param_bound_problems(X, U, p))
+    if p !== nothing
+        append!(out, _param_bound_problems(X, U, p))
+        errs, warns = _concrete_problems(X, U, p)
+        append!(out, errs)
+        isempty(out) && !isempty(warns) &&
+            @warn "$U conforms to $X with abstract parts: code compiled for it dispatches at run time where it uses them:\n  " * join(warns, "\n  ")
+    end
     return out
 end
 "The family members checked at their first use and found to conform (a refused one is refused at each use)."
@@ -1489,14 +1511,14 @@ function _implement_projection(mod::Module, head, rest; field::Int = 0, fmap = n
     field == 0 && throw(ImplementError("`$(pdef.args[1]) = …` computes a value: a type conforms by implementing the operations or by " *
                         "forwarding them to a field (`@implement X T by field`); a library that needs another layout converts explicitly " *
                         "(note \"Types that only convert\")"))
-    # a trait that asks for concrete keys refuses an abstract field to forward to, naming it
+    # a trait that asks for a concrete Self refuses an abstract field to forward to, naming it
     let T = Core.eval(mod, Tex), FT = fieldtype(T, field)
         if !key_concrete(FT)
             for x in traits
                 X = Core.eval(mod, x)
-                _concreteness_of(X) === :concrete_only && throw(ImplementError(
-                    "field `$(fieldname(T, field))` of $Tex is declared `$FT`, which is not concrete, and $X asks for concrete keys " *
-                    "(`@concrete_only`): declare a concrete field type"))
+                _self_level(X) === :error && throw(ImplementError(
+                    "field `$(fieldname(T, field))` of $Tex is declared `$FT`, which is not concrete, and $X asks for a concrete Self " *
+                    "(`@enforce_concrete_only`): declare a concrete field type"))
             end
         end
     end

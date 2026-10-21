@@ -103,11 +103,19 @@ function _process(mod::Module, ex)
     elseif h === :module
         return Expr(:module, ex.args[1], ex.args[2],
                     Expr(:block, _prologue()..., _transform_all(ex.args[3].args)..., _epilogue()))
-    elseif h === :macrocall && _concrete_macro_level(ex.args[1]) !== nothing && _is_fdef(ex.args[end])
-        # @warn_on_abstract / @error_on_abstract on one function
+    elseif h === :macrocall && _part_concrete_level(ex.args[1]) !== nothing && _prefixed_fdef(ex.args[end]) !== nothing
+        # @enforce_concrete_only / @warn_on_abstract names… on one function (traits reference §11.2)
+        names = Any[a for a in ex.args[2:end-1] if !(a isa LineNumberNode)]
+        all(a -> a isa Symbol, names) && !isempty(names) ||
+            error("@trait_module: `$(ex.args[1])` before a function names its bounded arguments or the `where` variables its bounds name (traits reference §11.2)")
+        return Base.ScopedValues.with(_PART_CONCRETE => (_part_concrete_level(ex.args[1]), Symbol[names...])) do
+            _process(mod, ex.args[end])
+        end
+    elseif h === :macrocall && _concrete_macro_level(ex.args[1]) !== nothing && _prefixed_fdef(ex.args[end]) !== nothing
+        # @warn_not_fully_typed / @enforce_fully_typed on one function: concrete mode (traits reference §11.3)
         level = _concrete_macro_level(ex.args[1])
         inner = ex.args[end]
-        fname = _fdef_name(inner)
+        fname = _fdef_name(_prefixed_fdef(inner))
         r = _process(mod, inner)
         return Expr(:toplevel, r, :($TraitWorld.concrete_level(::typeof($fname)) = $(QuoteNode(level))))
     elseif h === :struct
@@ -360,6 +368,16 @@ function _dyn_body(mod::Module, x)
         return _dyn_type(mod, x)
     end
     return Expr(x.head, Any[_dyn_body(mod, a) for a in x.args]...)
+end
+
+"The concreteness of the parts a function's prefix names (traits reference §11.2), while its definition is rewritten: `(level, names)`."
+const _PART_CONCRETE = Base.ScopedValues.ScopedValue{Any}(nothing)
+"A function definition, under any concreteness prefixes; else `nothing`."
+function _prefixed_fdef(ex)
+    while ex isa Expr && ex.head === :macrocall && (_part_concrete_level(ex.args[1]) !== nothing || _concrete_macro_level(ex.args[1]) !== nothing)
+        ex = ex.args[end]
+    end
+    return _is_fdef(ex) ? ex : nothing
 end
 
 function _is_fdef(ex)
@@ -667,6 +685,9 @@ function _rewrite_fdef(mod::Module, ex)
     pattern = Any[(x.kind in (:trait, :callable, :callables, :untyped, :vararg_trait)) ? nothing : x.ann for x in args]
     entries = _registry(mod, key, :__tw_entries__)
     plain = _registry(mod, key, :__tw_plain__)
+    pc = _PART_CONCRETE[]
+    !istraitdef && pc !== nothing &&
+        error("@trait_module: `$fname` has no bounded argument for `@enforce_concrete_only`/`@warn_on_abstract` to name (traits reference §11.2)")
     if !istraitdef
         # an untyped method shaped like an existing entry is that entry's fallback (keywords and defaults kept)
         if entries !== nothing && pattern in get(entries, key, Any[])
@@ -701,7 +722,23 @@ function _rewrite_fdef(mod::Module, ex)
     boundonly = unique(Symbol[v for (v, _, _, _) in wbind if !elsewhere(v)])
     ret !== nothing && any(v -> _uses(ret, v), boundonly) &&
         error("@trait_module: `$fname`'s result type names a `where` variable that only a bound fixes; assert the result in the body instead")
-    if !isempty(wbind)
+    # the parts a concreteness prefix names (traits reference §11.2), checked at the body's start
+    cchecks = Any[]
+    if pc !== nothing
+        lv, cnames = pc
+        for n in cnames
+            if any(x -> x.name === n && x.kind === :trait, args) || any(x -> x.name === n && x.kind === :trait, kws)
+                push!(cchecks, :($TraitWorld._concrete_self($n, $(QuoteNode(lv)), $(QuoteNode(n)), $(QuoteNode(fname)))))
+            elseif any(t -> t[1] === n, wbind)
+                push!(cchecks, :($TraitWorld._concrete_part($n, $(QuoteNode(lv)), $(QuoteNode(n)), $(QuoteNode(fname)))))
+            else
+                error("@trait_module: `$fname`: `$n` is neither a bounded argument nor a `where` variable its bounds name (traits reference §11.2)")
+            end
+        end
+    end
+    if isempty(wbind)
+        isempty(cchecks) || (body = Expr(:block, cchecks..., body))
+    else
         prefix = Any[]
         seen = Symbol[]
         for (v, nm, F, i) in wbind
@@ -717,7 +754,7 @@ function _rewrite_fdef(mod::Module, ex)
             end
             push!(seen, v)
         end
-        body = Expr(:block, prefix..., body)
+        body = Expr(:block, prefix..., cchecks..., body)
         wheres = Any[w for w in wheres if !(_wherevar(w) in boundonly)]
     end
     # --- the worker

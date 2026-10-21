@@ -439,13 +439,13 @@ using .Weights
 end
 
 # --- M7: concrete mode, verify_main ---------------------------------------------------------
-@error_on_abstract @trait_module module Hot
+@enforce_fully_typed @trait_module module Hot
 using TraitWorld, ..Columns
 hot(t::ColTable, k::Float64) = (s = 0.0; for x in col(t, 1); s += x * k; end; s)
 end
 @trait_module module Hot2
 using TraitWorld, ..Columns
-@warn_on_abstract cold(t::ColTable, k::Vector{Any}) = (s = 0.0; for x in col(t, 1); s += x * k[1]; end; s)
+@warn_not_fully_typed cold(t::ColTable, k::Vector{Any}) = (s = 0.0; for x in col(t, 1); s += x * k[1]; end; s)
 fine(t::ColTable, k::Vector{Any}) = (s = 0.0; for x in col(t, 1); s += x * k[1]; end; s)
 end
 @testset "M7: concrete mode" begin
@@ -453,7 +453,7 @@ end
     @test (@test_logs (:warn, r"abstract element type") match_mode=:any Hot2.cold([[1.0, 2.0]], Any[2.0])) == 6.0
     @test (@test_logs Hot2.fine([[1.0, 2.0]], Any[2.0])) == 6.0                 # not annotated: silent
     toplevel(quote
-        @error_on_abstract @trait_module module Hot3
+        @enforce_fully_typed @trait_module module Hot3
         using TraitWorld, ..Columns
         g(t::ColTable, k::Vector{Any}) = (s = 0.0; for x in col(t, 1); s += x * k[1]; end; s)
         end
@@ -847,3 +847,4 @@ include("attributes.jl")
 include("carry.jl")
 include("wherevars.jl")
 include("declaration.jl")
+include("concreteness.jl")

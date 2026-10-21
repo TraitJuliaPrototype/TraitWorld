@@ -136,15 +136,15 @@ end)
 end
 
 isdefined(Main, :thrown) || (thrown(ex) = try toplevel(ex); nothing catch e; e end)
-# Concreteness is opt-in per trait (decision 1, session 27): `@concrete_only` refuses an abstract
-# key (an implementing type at an abstract parameter, a forwarding field or a declared field of
-# abstract type); `@warn_on_abstract` warns; without either, an abstract key is allowed, silently.
+# Concreteness is opt-in per trait (traits reference §11.1): `@enforce_concrete_only` refuses an
+# implementation whose named parts are abstract (no names: Self and every parameter; here Self, a
+# forwarding field of abstract type); `@warn_on_abstract` warns; without either, silently allowed.
 toplevel(quote
     @trait_module module Pol
     using TraitWorld
     export CO, colen, cuse, WA, walen, wuse, NP, nplen, npuse, SP
     @trait CO begin
-        @concrete_only
+        @enforce_concrete_only
         colen(x::CO)::Int
     end
     @implement CO A where {A <: AbstractVector{Float64}} begin
@@ -173,16 +173,16 @@ toplevel(quote
 end)
 @testset "Concreteness: opt-in per trait" begin
     P = Main.Pol
-    @test TraitWorld.trait_concreteness(P.CO) === :concrete_only && TraitWorld.trait_concreteness(P.NP) === :none
+    @test TraitWorld.trait_concreteness(P.CO) === ((:Self, :error),) && TraitWorld.trait_concreteness(P.NP) === ()
     e = thrown(quote struct CAbs; data::AbstractVector{Float64}; end; @implement Pol.CO CAbs by data end)
-    @test e isa ImplementError && occursin("@concrete_only", e.msg)
+    @test e isa ImplementError && occursin("@enforce_concrete_only", e.msg)
     @test thrown(quote struct CCon; data::Vector{Float64}; end; @implement Pol.CO CCon by data end) === nothing
     @test P.cuse(Main.CCon([1.0, 2.0])) == 2
-    @test_logs (:warn, r"asks for concrete keys") match_mode = :any toplevel(quote struct WAbs; data::AbstractVector{Float64}; end; @implement Pol.WA WAbs by data end)
+    @test_logs (:warn, r"asks for a concrete Self") match_mode = :any toplevel(quote struct WAbs; data::AbstractVector{Float64}; end; @implement Pol.WA WAbs by data end)
     @test P.wuse(Main.WAbs([1.0])) == 1
     @test thrown(quote struct NAbs; data::AbstractVector{Float64}; end; @implement Pol.NP NAbs by data end) === nothing   # silent
     @test P.npuse(Main.NAbs([1.0, 2.0, 3.0])) == 3 && P.npuse(Main.NAbs(view([1.0, 2.0, 3.0], 1:2))) == 2
-    # a family member at an abstract parameter: refused at the entry where the trait asks for concrete keys
+    # a family member at an abstract parameter: refused at its first use where the trait asks for a concrete Self
     @test P.cuse(P.SP{Int}(1)) == 1
-    @test_throws TraitBoundError P.cuse(P.SP{Any}(1))
+    @test_throws ImplementError P.cuse(P.SP{Any}(1))
 end

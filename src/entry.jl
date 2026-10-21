@@ -152,6 +152,7 @@ const _SLOW_WORLD = Ref{UInt}(0)                  # the world `_SLOW` was decide
     end
     _FACTS_DEBUG[] && Core.println("TraitWorld: implementation slow path: ", X, " for ", U)
     b = _in_world(w, _builder_for, Any[X], U)
+    b isa Builder && _in_world(w, _generic_concrete_check, X, U)
     @lock _LOCK begin
         d = _SLOW_WORLD[] == w ? copy(_SLOW[]) : IdDict{Any,Any}()
         d[key] = b
@@ -159,6 +160,24 @@ const _SLOW_WORLD = Ref{UInt}(0)                  # the world `_SLOW` was decide
         _SLOW_WORLD[] = w
     end
     return b === NOTRAIT ? NOTRAIT : (b::Builder)(u)
+end
+
+"""
+A type conforming through a generic implementation, at its first use: the parts the concreteness
+declarations name (traits reference §11.1), as at a declaration. A declared type and a family member
+are checked by their own paths.
+"""
+@machinery function _generic_concrete_check(@nospecialize(X), @nospecialize(U))
+    _impl(X, U) isa ImplRec && return nothing
+    p = proj_lookup(X, U)
+    p === nothing && return nothing
+    errs, warns = _concrete_problems(X, U, p)
+    isempty(errs) || throw(ImplementError("$U conforms to $X through a generic implementation, but a part is not concrete:\n  " * join(errs, "\n  ")))
+    if !isempty(warns) && !(Pair{Any,Any}(X, U) in _FAMILY_WARNED)
+        push!(_FAMILY_WARNED, Pair{Any,Any}(X, U))
+        @warn "$U conforms to $X with abstract parts: code compiled for it dispatches at run time where it uses them:\n  " * join(warns, "\n  ")
+    end
+    return nothing
 end
 
 @noinline _closed_miss(@nospecialize(f), @nospecialize(t)) =

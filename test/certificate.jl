@@ -25,7 +25,7 @@ toplevel(quote
     @implement CShape{CSq} begin carea(s) = s.a^2 end
     ctotal(v::Vector{Dynamic{CShape}}) = (s = 0.0; for d in v; s += carea(d); end; s)  # declared dynamic sites
     end
-    @error_on_abstract @trait_module module CertStrict
+    @enforce_fully_typed @trait_module module CertStrict
     using TraitWorld, ..Cert
     strictmixed(t::CTab, w::Vector{Any}) = (s = 0.0; for i in 1:cn(t); s += w[i] * sum(cc(t, i)); end; s)
     end

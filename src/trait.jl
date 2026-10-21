@@ -172,20 +172,43 @@ function _tobj_where(name, np::Int, T::Symbol)
     return Any[Expr(:(>:), T, name)]                 # the family: no free type variable (see `PTag`)
 end
 
-"The trait's concreteness policy from a line `@concrete_only` or `@warn_on_abstract` in its body, removed from it."
-function _concreteness_policy(block)
-    block isa Expr && block.head === :block || return :none, block
-    policy = :none
+"""
+The trait's concreteness declarations (traits reference §11.1), removed from its body: lines
+`@enforce_concrete_only names…` (level `:error`) and `@warn_on_abstract names…` (`:warn`), as
+`(level, names)` pairs; no names stands for `Self` and every parameter (`nothing`).
+"""
+function _concreteness_decls(block)
+    block isa Expr && block.head === :block || return Any[], block
+    decls = Any[]
     args = Any[]
     for ex in block.args
-        if ex isa Expr && ex.head === :macrocall && all(a -> a isa LineNumberNode, ex.args[2:end]) &&
-           ex.args[1] in (Symbol("@concrete_only"), Symbol("@warn_on_abstract"))
-            policy = ex.args[1] === Symbol("@concrete_only") ? :concrete_only : :warn
+        if ex isa Expr && ex.head === :macrocall && ex.args[1] === Symbol("@concrete_only")
+            error("@trait: write `@enforce_concrete_only` (with the parameters and `Self` it requires concrete, or none for all), " *
+                  "or `@warn_on_abstract` (traits reference §11.1)")
+        elseif ex isa Expr && ex.head === :macrocall && ex.args[1] in (Symbol("@enforce_concrete_only"), Symbol("@warn_on_abstract"))
+            lv = ex.args[1] === Symbol("@enforce_concrete_only") ? :error : :warn
+            any(d -> d[1] === lv, decls) && error("@trait: `$(ex.args[1])` appears twice")
+            names = Any[a for a in ex.args[2:end] if !(a isa LineNumberNode)]
+            all(a -> a isa Symbol, names) || error("@trait: `$(ex.args[1])` takes the names of parameters and `Self`")
+            push!(decls, (lv, isempty(names) ? nothing : Symbol[names...]))
         else
             push!(args, ex)
         end
     end
-    return policy, Expr(:block, args...)
+    return decls, Expr(:block, args...)
+end
+"The concreteness declarations as `((name, level), …)`, the names checked against the trait's parameters."
+function _concreteness_levels(decls, pnames::Vector{Symbol}, name)
+    out = Tuple{Symbol,Symbol}[]
+    for (lv, names) in decls
+        for n in (names === nothing ? Symbol[:Self; pnames] : names)
+            (n === :Self || n in pnames) ||
+                error("@trait $name: `$n` is neither a parameter of the trait nor `Self` (traits reference §11.1)")
+            any(x -> x[1] === n, out) && error("@trait $name: `$n` is named by both concreteness declarations")
+            push!(out, (n, lv))
+        end
+    end
+    return Tuple(out)
 end
 
 """
@@ -213,14 +236,15 @@ end
 
 macro trait(header, block = nothing)
     tdefault, block = _trait_default(block)
-    policy, block = _concreteness_policy(block)
+    cdecls, block = _concreteness_decls(block)
     header, block, fieldparams = _keys_form(header, block)
     name, Rsym, supers, params = _parse_trait_header(header)
     TW = TraitWorld
     pnames = Symbol[p for (p, _) in params]
     np = length(pnames)
     out = Any[:(Core.@__doc__ abstract type $name{$(pnames...), $Rsym} <: $TW.Trait end)]
-    policy === :none || push!(out, :($TW.trait_concreteness(::Type{$name}) = $(QuoteNode(policy))))
+    clevels = _concreteness_levels(cdecls, pnames, name)
+    isempty(clevels) || push!(out, :($TW.trait_concreteness(::Type{$name}) = $(QuoteNode(clevels))))
     tdefault === nothing || push!(out, :($TW.default_attribute(::Type{$name}) = $(QuoteNode(tdefault))))
     if np > 0
         push!(out, :($TW.trait_params(::Type{$name}) = $(Tuple(pnames))))
