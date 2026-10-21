@@ -829,7 +829,7 @@ function _rewrite_fdef(mod::Module, ex)
         haskw = !isempty(kws)
         kwname = gensym(:kws)
         ntname = gensym(:nt)
-        haskw && push!(stmts, :($ntname = Base.values($kwname)))
+        haskw && push!(stmts, :($ntname = $kwname))
         newnames = Any[]
         for (i, x) in enumerate(args)
             if x.kind === :trait
@@ -890,8 +890,19 @@ function _rewrite_fdef(mod::Module, ex)
         end
         push!(stmts, :(return $res isa $TraitWorld.LikeResult ? Base.inferencebarrier($TraitWorld._like_out)($res, $us, $vs) : $res))
         kept = Any[w for w in wheres if any(x -> x.kind in (:plain, :vararg) && x.ann !== nothing && _uses(x.ann, _wherevar(w)), args)]
-        esig = haskw ? Expr(:call, fname, Expr(:parameters, Expr(:..., kwname)), eargs...) : Expr(:call, fname, eargs...)
+        # with keywords, the entry is its own keyword sorter: Julia's would be specialized on the named tuple of
+        # the supplied keywords, where `known_type` always sees their types; taken unspecialized, as the
+        # positional arguments are, a typed caller inlines it and an untyped one does not (traits reference §5.7)
+        esig = haskw ? Expr(:call, :(Core.kwcall), :(@nospecialize($kwname::NamedTuple)), :(::typeof($fname)), eargs...) :
+                       Expr(:call, fname, eargs...)
         isempty(kept) || (esig = Expr(:where, esig, kept...))
+        if haskw
+            psig = Expr(:call, fname, eargs...)
+            isempty(kept) || (psig = Expr(:where, psig, kept...))
+            push!(rest, Expr(:macrocall, GlobalRef(Base, Symbol("@inline")), LineNumberNode(0, :none),
+                             Expr(:function, psig, Expr(:block, Expr(:meta, :facts_boundary),
+                                                        :(return Core.kwcall(NamedTuple(), $fname, $(callnames...)))))))
+        end
         # an ordinary method, inlined into a typed caller (keys-plan §6): there it runs at plain speed.
         # It is the boundary (rule 2): compiled in its caller's mode, while the worker it calls is
         # compiled by facts (`Expr(:meta, :facts_boundary)`, read by Julia's compiler)

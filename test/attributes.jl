@@ -147,9 +147,8 @@ end)
     end
     @testset "keywords and varargs" begin
         @test a_kw_typed(c) === :compiled
-        # a bounded keyword from an untyped caller: the keyword sorter is specialized on the named tuple of
-        # keywords, so `known_type` sees the value's type there (traits T-47)
-        @test_broken a_kw_untyped(v) === :dynamic
+        # a bounded keyword from an untyped caller: Dynamic (the entry's keyword sorter takes the keywords unspecialized)
+        @test a_kw_untyped(v) === :dynamic
         @test a_va_typed(c) === :compiled
         @test a_va_untyped(v) === :dynamic
     end
