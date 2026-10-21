@@ -64,13 +64,18 @@ end
 Base.showerror(io::IO, e::ImplementError) = print(io, "ImplementError: ", e.msg)
 
 """
-A key part is concrete (decision 1, session 27): the type is concrete and its type parameters are,
-all the way down. Fields the trait does not declare are not looked at: the code compiled for a key
-never reads them. `Dynamic` and `Erased` parts are what they are.
+Whether a part is concrete (traits reference §11): a concrete type, or a `Union` of at most four
+concrete types (Julia's limit on union splitting: each split is a fact), with type parameters that
+are, all the way down. Fields are not looked at: trait code reads only the fields its traits declare.
+`Dynamic` and `Erased` parts are what they are.
 """
 function key_concrete(@nospecialize(T))
     T isa Type || return true
     T === Union{} && return true
+    if T isa Union
+        ms = Base.uniontypes(T)
+        return length(ms) <= 4 && all(m -> !(m isa Union) && key_concrete(m), ms)
+    end
     isconcretetype(T) || return false
     (T <: Dynamic || T <: Erased) && return true
     if T isa DataType

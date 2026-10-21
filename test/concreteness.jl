@@ -61,6 +61,11 @@ Conc.pval(x::PBox) = 1
     @test e isa ImplementError && occursin("parameter T is Any", sprint(showerror, e))
     e = caught(() -> Conc.usecv(view([1.0, 2.0], 1:2)))              # Self is a SubArray: concrete; T = Float64
     @test e === nothing
+    # a small union counts as concrete (at most four concrete members: its splits are facts)
+    @test Conc.usecv(Union{Missing, Float64}[2.0, missing]) === 2.0
+    e = caught(() -> Conc.usecv(Union{Int8, Int16, Int32, Int64, Int128}[1]))   # five members
+    @test e isa ImplementError && occursin("is not concrete", sprint(showerror, e))
+    @test !TraitWorld.key_concrete(Union{Missing, Real}) && TraitWorld.key_concrete(Vector{Union{Nothing, Int}})
     # a warning, the implementation kept
     @test (@test_logs (:warn, r"parameter T is Real") match_mode = :any Conc.usecw(Real[1.5])) == 1.5
     # parameters from fields: P must be concrete, U may be abstract
