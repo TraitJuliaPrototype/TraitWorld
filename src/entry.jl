@@ -188,7 +188,7 @@ needed(::EntryPos{F,pos,nargs}) where {F,pos,nargs} = Base.inferencebarrier(_nee
 
 The trait object for argument `pos` of a call from ordinary code, or `NOTRAIT` if `t` has
 none of the traits the position needs: `Compiled` (at its key) or `Dynamic` (at the erased key),
-decided once here (traits reference §6.6; lowering §8.2). `known` is `Compiler.known_type(t)`,
+decided once here (traits reference §6; lowering §8.2). `known` is `Compiler.known_type(t)`,
 evaluated in the entry's own body. Specialized: for a known type it folds to the views' construction.
 """
 @inline function enter(p::EntryPos{F}, t, ::Val{kn}) where {F,kn}
@@ -226,11 +226,11 @@ end
 @inline _narrow_to(p::EntryPos, t::TObj) = t
 """
 The trait object at its key of `t`, and the object its views read: `t`, or where `t` is a container
-that crosses at the position (traits §10.3), the view it crosses as.
+that crosses at the position (traits §8.3), the view it crosses as.
 """
 @inline function _enter_keyed(p::EntryPos{F}, t) where {F}
     # a container crosses with its items seen as `Dynamic{Y}` where the bounds ask for that and it
-    # does not meet them as it is (traits reference §10.3); once decided for its type, it is not
+    # does not meet them as it is (traits reference §8.3); once decided for its type, it is not
     # assembled as it is first (a container whose family check failed would take the slow path)
     c = crossing(p)
     if c isa Crossing && _cross_known(c, t) == 0x02
@@ -520,7 +520,7 @@ that conforms to none of them is refused at the entry.
     # a held value or a cast carries its attribute; a plain value as at a positional bound
     dyn = t isa WithDynamic || ((t isa Dynamic || t isa Compiled || t isa Kept) && is_dynamic(t)) ||
           (!(t isa CompiledFor || t isa Compiled || t isa Kept) && (attr === :dynamic || (attr !== :compiled &&
-                                    ((_any_dynamic_default(l) && !_from_trait_world(t)) || !kn))))
+                                    ((_any_dynamic_default(l) && !_from_trait_world(t)) || (!kn && _traits_default(l) !== :compiled)))))
     t isa CompiledFor && (t = getfield(t, :x))
     t isa WithDynamic && (t = getfield(t, :x))
     (t isa Dynamic || t isa Compiled || t isa Kept) && (t = _dyn_held(t))
@@ -722,8 +722,9 @@ end
 
 const _FROM_TW = Ref(IdDict{Any,Bool}())          # copy-on-write
 "Whether a value's type belongs to the trait world (Julia, TraitWorld, a trait module); cached per type."
-function _from_trait_world(@nospecialize(f))
-    T = typeof(f)
+_from_trait_world(@nospecialize(f)) = _type_from_trait_world(typeof(f))
+"Whether type `T` is of the trait world, all the way down (`_tw_type`), kept per type."
+function _type_from_trait_world(@nospecialize(T))
     v = get(_FROM_TW[], T, nothing)
     v === nothing || return v::Bool
     v = Base.inferencebarrier(_tw_type)(T, Base.IdSet{Any}())::Bool
@@ -806,7 +807,7 @@ bounded_constructor(@nospecialize(S)) = false
 """
     _kept_at(B, x, Val(known))
 
-The stored form of `x` at a struct parameter bounded by `B` (traits reference §10.5): its attribute
+The stored form of `x` at a struct parameter bounded by `B` (traits reference §7.4): its attribute
 as a bound gives it (the caller's cast, a value's carried attribute, else the first-seen rule, with
 `known` evaluated in the constructor's body), then for a `Compiled` value the user's object itself
 (the function, for `Callable`), whose type becomes the parameter, and for a `Dynamic` one `Dynamic{B}`.
@@ -829,7 +830,8 @@ function _kept_at(::Type{X}, @nospecialize(x), ::Val{kn}) where {X,kn}
     elseif x isa Kept
         return getfield(x, :compiled) ? getfield(Compiled{X}(x), :t) : Dynamic{X}(x)
     end
-    dyn = !kn || (default_attribute(_family(X)) === :dynamic && !_from_trait_world(x))
+    d = default_attribute(_family(X))
+    dyn = (d === :dynamic && !_from_trait_world(x)) || (!kn && d !== :compiled)
     return dyn ? Dynamic{X}(x) : getfield(Compiled{X}(x), :t)
 end
 
@@ -839,7 +841,7 @@ function enter_callables(sigs::Tuple, @nospecialize(f), ::Val{kn}) where {kn}
     return CMulti(map(s -> enter_callable(s[1], s[2], s[3], f, Val(kn)), sigs))
 end
 
-# --- `Callable`'s held values (traits reference §9; lowering §12) -------------------------------
+# --- `Callable`'s held values (traits reference §5.8; lowering §12) -------------------------------
 #
 # A `Dynamic{Callable{A, S}}` holds the function erased to a pointer (`CObj{A, S, Erased{A, S}}`); a
 # `Compiled{Callable{A, S}}` holds the function itself; a `Kept{Callable{A, S}}` holds either, with

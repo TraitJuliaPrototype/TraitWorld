@@ -2,7 +2,7 @@
 # Untyped calls of `Compiled` values: the table of declared implementations (lowering §9.2).
 #
 # A caller that does not know an argument's type reaches the entry compiled at `Any`. Its value is
-# `Dynamic` (traits reference §6.6), unless the caller converted it with `compiled_for` or the
+# `Dynamic` (traits reference §6), unless the caller converted it with `compiled_for` or the
 # position's attribute is `Compiled`. For those, each entry position keeps a table from the user
 # type to its implementation's builder (data: the witnesses and the slots its views read), and one
 # call through a pointer reaches a method of the entry specialized on the builders' types, which

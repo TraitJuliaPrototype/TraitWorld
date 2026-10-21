@@ -19,7 +19,7 @@ Version 0 has what heterogeneous collections need:
 - `retain!(f, xs)`: keeps the items for which `f` is `true`, in place.
 
 The owner of these traits is TraitWorld. As their owner it declares Base's types' conformance
-(traits reference §12.1).
+(traits reference §10.1).
 """
 @trait_module module BaseTraits
 using ..TraitWorld
@@ -93,7 +93,7 @@ end
 #
 # Items of an abstract type are read as `Kept{X}`: each keeps the attribute it carries (a `Kept{X}`,
 # `Compiled{X}`, `Dynamic{X}`, `compiled_for(x)`, `with_dynamic(x)`), and a plain item is first seen
-# there, `Dynamic` in `DynamicItems`, `Compiled` in `CompiledItems` (traits reference §10.3). A write
+# there, `Dynamic` in `DynamicItems`, `Compiled` in `CompiledItems` (traits reference §8.3). A write
 # stores what reads back as the same value with the same attribute, in plain code's own forms: the
 # user's object where a plain item of the view reads so, else `compiled_for(o)` or `with_dynamic(o)`;
 # a container that can hold neither refuses it (types never cast).
@@ -197,7 +197,7 @@ Base.show(io::IO, d::DynamicValues{X}) where {X} = print(io, "DynamicValues{", X
 """
     CompiledItems{X}(v)
 
-The vector `v`, its items seen through `X` as `Compiled` values (traits reference §10.3). For a
+The vector `v`, its items seen through `X` as `Compiled` values (traits reference §8.3). For a
 concrete item type each item is read as its trait object at its own key, a type the code knows, and
 the code over the items is compiled for it. For an abstract one each item is a `Kept{X}`: `Compiled`,
 opened by its type at the next bound, unless it carries `Dynamic`. `v` is read and written, never
@@ -299,11 +299,11 @@ Base.show(io::IO, d::CompiledValues{X}) where {X} = print(io, "CompiledValues{",
 
 # A function bounded by `Iterable{Shape}` (`Indexable`, `MutableIndexable`, `Keyed{K, Shape}`,
 # `Iterable{Pair{K, Shape}}`) takes a user's vector or dictionary whose items are not `Dynamic{Shape}`:
-# its entry translates it by its bound into the view (traits reference §10.3). Items of a type that
+# its entry translates it by its bound into the view (traits reference §8.3). Items of a type that
 # cannot hold a conforming value refuse the container at the entry; otherwise a non-conforming item
 # fails when it is read.
 #
-# Which view (traits reference §10.2's table): items of a concrete type that conforms are `Compiled`
+# Which view (traits reference §8.2's table): items of a concrete type that conforms are `Compiled`
 # (`CompiledItems`), items of an abstract type `Dynamic` (`DynamicItems`), unless the bound's attribute
 # says otherwise (`Iterable{Compiled{Shape}}`, `Iterable{Dynamic{Shape}}`), and only for items that do
 # not carry an attribute. Items already kept values of `Y` (`Dynamic{Y}`, `Compiled{Y}`, both) meet the
@@ -318,6 +318,10 @@ TraitWorld.crossed(::Type{Y}, a::Symbol, d::AbstractDict) where {Y} = _cross_vie
     _may_hold(Y, E) || return :no
     a === :dynamic && return :dynamic
     a === :compiled && return :compiled
+    # no annotation: the item trait's default, else the first-seen rule (the item type the code knows)
+    d = TraitWorld.default_attribute(TraitWorld._family_of(Y))
+    d === :compiled && return :compiled
+    d === :dynamic && !(isconcretetype(E) && Base.inferencebarrier(TraitWorld._type_from_trait_world)(E)::Bool) && return :dynamic
     return isconcretetype(E) ? :compiled : :dynamic
 end
 """

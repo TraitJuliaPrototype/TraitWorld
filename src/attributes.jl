@@ -1,12 +1,12 @@
 # ---------------------------------------------------------------------------
-# `Compiled` and `Dynamic` (traits reference §6.6; lowering §5, §8.2, §13).
+# `Compiled` and `Dynamic` (traits reference §6; lowering §5, §8.2, §13).
 #
 # Every value in trait code is `Compiled` or `Dynamic`. The attribute is the trait object's
 # representation: a `Compiled` value is a trait object at its key, a `Dynamic` one a trait object at
 # the erased key (`ErasedKey`), whose views hold the user's object and whose operations and field
 # reads are split over the candidates at the call site. One worker per bounded function serves both:
 # the erased key is one more key. A value keeps its attribute by its type; only an entry decides,
-# for a plain value: the position's attribute, else the traits' default (`@dynamic`, for a value
+# for a plain value: the position's attribute, else the traits' default (`@default_with_dynamic_self` for a value
 # whose type is not of the trait world), else `Compiler.known_type`, evaluated in the entry's own
 # body (E-148). `compiled_for(x)` and `with_dynamic(x)` always win.
 # ---------------------------------------------------------------------------
@@ -201,15 +201,23 @@ Base.Experimental.@max_methods 1 function default_attribute end
 """
     default_attribute(X)
 
-`:dynamic` for a trait that declares `@dynamic` (`Callable` does), else `:compiled`: how a plain value
-whose type is not of the trait world enters a bound of `X` where neither the position nor the caller
-says otherwise.
+A trait's default attribute (traits reference §6.3): `:dynamic` for a trait that declares
+`@default_with_dynamic_self` (`Callable`'s default is `Dynamic` too), `:compiled` for one that declares
+`@default_compiled_for_self`, else `nothing`: the first-seen rule decides how a plain value enters a
+bound of `X` where neither the position nor a cast says otherwise.
 """
-default_attribute(@nospecialize(X)) = :compiled
-"Whether any trait of a list declares `@dynamic`."
-@inline _any_dynamic_default(::TraitList{L}) where {L} = _any_dyn(L)
-@inline _any_dyn(::Type{Tuple{}}) = false
-@inline _any_dyn(::Type{T}) where {T<:Tuple} = default_attribute(fieldtype(T, 1)) === :dynamic || _any_dyn(Base.tuple_type_tail(T))
+default_attribute(@nospecialize(X)) = nothing
+"""
+The default of the traits a position needs: `:dynamic` or `:compiled` where those that declare one
+agree, else `nothing` (traits that disagree leave the first-seen rule to decide).
+"""
+@inline _traits_default(::TraitList{L}) where {L} = _tdef(L, nothing)
+@inline _tdef(::Type{Tuple{}}, acc) = acc === :conflict ? nothing : acc
+@inline function _tdef(::Type{T}, acc) where {T<:Tuple}
+    d = default_attribute(fieldtype(T, 1))
+    return _tdef(Base.tuple_type_tail(T), d === nothing ? acc : (acc === nothing || acc === d) ? d : :conflict)
+end
+@inline _any_dynamic_default(l::TraitList) = _traits_default(l) === :dynamic
 
 Base.Experimental.@max_methods 1 function attribute end
 """
@@ -229,7 +237,9 @@ type (`kn`, evaluated in the entry's body).
     a = attribute(p)
     a === :dynamic && return true
     a === :compiled && return false
-    _any_dynamic_default(needed(p)) && !_from_trait_world(t) && return true
+    d = _traits_default(needed(p))
+    d === :dynamic && !_from_trait_world(t) && return true
+    d === :compiled && return false
     return !kn
 end
 
@@ -242,7 +252,9 @@ compiled for its key (lowering §9.2).
 """
 @inline _tabled(p::EntryPos, @nospecialize(t)) =
     t isa CompiledFor || t isa Compiled || (t isa Kept && getfield(t, :compiled)) ||
-    (attribute(p) === :compiled && !(t isa Dynamic || t isa Kept || t isa TObj || t isa WithDynamic))
+    (_position_compiled(p) && !(t isa Dynamic || t isa Kept || t isa TObj || t isa WithDynamic))
+"Whether a plain value at position `p` is `Compiled` whatever its caller knew: the position's attribute, else the traits' default."
+@inline _position_compiled(p::EntryPos) = (a = attribute(p); a === :compiled || (a === nothing && _traits_default(needed(p)) === :compiled))
 "The plain value a `compiled_for` or a held value holds, or the value itself."
 @inline _unconverted(@nospecialize(t)) = t isa CompiledFor ? getfield(t, :x) : (t isa Compiled || t isa Kept) ? getfield(t, :t) : t
 "Whether the code knows the type of the object a trait argument stands for: not for a `Compiled{X}` or a `Kept{X}`, whose object's type is not part of its own."
@@ -254,7 +266,7 @@ result_params(@nospecialize(X)) = ()
 
 """
 A `Dynamic{X}` attribute must fix every parameter of `X` its operations' result types use, so that
-code after an operation stays typed (traits reference §6.1; decision log, 2026-10-20): refused at the
+code after an operation stays typed (traits reference §5.1; decision log, 2026-10-20): refused at the
 definition otherwise.
 """
 function _check_dynamic_params(@nospecialize(X), attr::Symbol, @nospecialize(name))
@@ -275,9 +287,10 @@ end
 is_dynamic(c::CObj{A,S,F}) where {A,S,F} = F <: Erased
 
 """
-Rule 8 (traits reference §6.6): an attribute on a function that is neither exported nor declared
-`public` warns at the trait module's end. No plain value crosses there, so it decides nothing; the
-conversion at the call does (`compiled_for(x)`, `with_dynamic(x)`).
+Rule 8 (traits reference §6.3): an attribute on a bound of a function that is neither exported nor
+declared `public` warns at the trait module's end. Plain values are expected from plain callers, at
+public functions; elsewhere the annotation is easily mistaken for a cast, which it is not. The cast at
+the call decides (`compiled_for(x)`, `with_dynamic(x)`).
 """
 function _warn_hidden_attributes(mod::Module)
     isdefined(mod, :__tw_attrs__) || return nothing
@@ -290,8 +303,9 @@ function _warn_hidden_attributes(mod::Module)
         m = parentmodule(f)
         Base.ispublic(m, nameof(f)) && continue
         @warn "`$(nameof(f))` has a `$(a === :dynamic ? "Dynamic" : "Compiled")` attribute on a bound, but it is neither " *
-              "exported nor public in $m: no value from plain code enters there, so the attribute decides nothing. " *
-              "Convert at the call instead: `compiled_for(x)`, `with_dynamic(x)`." _module = mod
+              "exported nor public in $m. An annotation is a default for plain values entering from plain callers, " *
+              "expected at public functions; it never casts a value that carries an attribute. " *
+              "Cast at the call instead: `compiled_for(x)`, `with_dynamic(x)`." _module = mod
     end
     return nothing
 end

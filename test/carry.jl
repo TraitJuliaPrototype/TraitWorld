@@ -1,4 +1,4 @@
-# Values carry their attribute through storage (traits reference §6.6, §10, §10.3, §10.5): a value's
+# Values carry their attribute through storage (traits reference §6, §7, §8.3, §7.4): a value's
 # `Compiled` or `Dynamic` is set where a plain value first meets a trait and kept through calls,
 # bounds and storage; only `compiled_for` and `with_dynamic` change it; constructors and types never
 # cast. A trait's name in storage is `Kept{X}`; a struct parameter bounded by a trait keeps the value

@@ -188,23 +188,31 @@ function _concreteness_policy(block)
     return policy, Expr(:block, args...)
 end
 
-"The trait's default attribute from a line `@dynamic` in its body (traits reference §3.8), removed from it."
-function _dynamic_default(block)
-    block isa Expr && block.head === :block || return false, block
-    dyn = false
+"""
+The trait's default attribute from a line in its body (traits reference §6.3), removed from it:
+`@default_with_dynamic_self` gives `:dynamic`, `@default_compiled_for_self` gives `:compiled`, neither
+`nothing` (the first-seen rule decides).
+"""
+function _trait_default(block)
+    block isa Expr && block.head === :block || return nothing, block
+    d = nothing
     args = Any[]
     for ex in block.args
-        if ex isa Expr && ex.head === :macrocall && ex.args[1] === Symbol("@dynamic") && all(a -> a isa LineNumberNode, ex.args[2:end])
-            dyn = true
+        if ex isa Expr && ex.head === :macrocall && all(a -> a isa LineNumberNode, ex.args[2:end]) &&
+           ex.args[1] in (Symbol("@default_with_dynamic_self"), Symbol("@default_compiled_for_self"), Symbol("@dynamic"))
+            ex.args[1] === Symbol("@dynamic") &&
+                error("@trait: a trait's default is written `@default_with_dynamic_self` (or `@default_compiled_for_self`)")
+            d === nothing || error("@trait: a trait declares one default, `@default_with_dynamic_self` or `@default_compiled_for_self`")
+            d = ex.args[1] === Symbol("@default_with_dynamic_self") ? :dynamic : :compiled
         else
             push!(args, ex)
         end
     end
-    return dyn, Expr(:block, args...)
+    return d, Expr(:block, args...)
 end
 
 macro trait(header, block = nothing)
-    dyn, block = _dynamic_default(block)
+    tdefault, block = _trait_default(block)
     policy, block = _concreteness_policy(block)
     header, block, fieldparams = _keys_form(header, block)
     name, Rsym, supers, params = _parse_trait_header(header)
@@ -213,7 +221,7 @@ macro trait(header, block = nothing)
     np = length(pnames)
     out = Any[:(Core.@__doc__ abstract type $name{$(pnames...), $Rsym} <: $TW.Trait end)]
     policy === :none || push!(out, :($TW.trait_concreteness(::Type{$name}) = $(QuoteNode(policy))))
-    dyn && push!(out, :($TW.default_attribute(::Type{$name}) = :dynamic))
+    tdefault === nothing || push!(out, :($TW.default_attribute(::Type{$name}) = $(QuoteNode(tdefault))))
     if np > 0
         push!(out, :($TW.trait_params(::Type{$name}) = $(Tuple(pnames))))
         for (i, (p, b)) in enumerate(params)

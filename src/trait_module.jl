@@ -140,7 +140,7 @@ end
 
 """
 A trait's name in a struct field or a container means a value of the trait with its attribute,
-as an abstract type's name there means a boxed value (traits reference §10): `plots::Vector{Plot}`
+as an abstract type's name there means a boxed value (traits reference §7): `plots::Vector{Plot}`
 is `Vector{Kept{Plot}}`, `bg::ColorSpec` is `Kept{ColorSpec}`, each item `Compiled{X}` or
 `Dynamic{X}` as it was stored. `Vector{<:ColTable}` keeps its meaning, one representation.
 """
@@ -175,7 +175,7 @@ end
 _paramname(p) = p isa Expr && p.head === :(<:) ? p.args[1] : p
 
 """
-A struct with parameters bounded by a trait (traits reference §10.5, lowering §13.2): the bounds
+A struct with parameters bounded by a trait (traits reference §7.4, lowering §13.2): the bounds
 stripped from its header (a trait is not a Julia type), Julia's constructor with explicit parameters
 kept as it is, and the constructor without parameters an entry for the bounded fields: each field
 typed exactly by a bounded parameter takes that parameter's bound, where the caller's cast or the
@@ -258,7 +258,7 @@ end
 """
 A type with each trait's name in it (and `Callable{A, S}`) made `Kept{X}`, the one spelling of a
 value kept with its attribute; `Dynamic{X}` and `Compiled{X}` written out stay the plain types
-(traits reference §10). In an argument's type (`arg`), a trait's name as a parameter is
+(traits reference §7). In an argument's type (`arg`), a trait's name as a parameter is
 `<:HeldValue{X}`: Julia's parameters are invariant, so `cs::Vector{Column}` takes a
 `Vector{Dynamic{Column}}`, a `Vector{Compiled{Column}}` and a `Vector{Kept{Column}}` alike.
 """
@@ -287,7 +287,7 @@ function _dynamic_containers(mod::Module, ex::Expr)
     sig, body = ex.args[1], ex.args[2]
     return Expr(ex.head, _dyn_sig(mod, sig), _dyn_body(mod, body))
 end
-"Whether `x` names `Dynamic` or `Compiled`: an attribute on a bound (traits reference §6.1)."
+"Whether `x` names `Dynamic` or `Compiled`: an attribute on a bound (traits reference §5.1)."
 _isattribute(mod::Module, x) = (x isa Symbol || (x isa Expr && x.head === :.)) && (v = _tryeval(mod, x); v === Dynamic || v === Compiled)
 "Whether `T` is `Kept{X}` or `HeldValue{X}` written out: the storage type itself."
 _iskepttype(mod::Module, T) = T isa Expr && T.head === :curly && (h = _tryeval(mod, T.args[1]); h === Kept || h === HeldValue)
@@ -322,7 +322,7 @@ function _dyn_arg(mod::Module, a)
 end
 """
 A bound's parameters are types, values of the trait's associated types: a trait's name there is an
-item position (traits reference §10.2), `xs::Iterable{Shape}`, items seen through `Shape`, each
+item position (traits reference §8.2), `xs::Iterable{Shape}`, items seen through `Shape`, each
 `Compiled` or `Dynamic` by its type; `Iterable{Compiled{Shape}}` and `Iterable{Dynamic{Shape}}` set
 the attribute. Lowered to `Through{Shape, A}` (`:default`, `:compiled`, `:dynamic`), also inside
 another parameter (`Pair{String, Shape}`). The bound's own name stays a bound.
@@ -339,6 +339,9 @@ function _item_param(mod::Module, p)
     elseif p isa Expr && p.head === :curly && length(p.args) == 2 && _isattribute(mod, p.args[1]) && _istraitname(mod, p.args[2])
         a = _tryeval(mod, p.args[1]) === Compiled ? :compiled : :dynamic
         return :($TraitWorld.Through{$(p.args[2]), $(QuoteNode(a))})
+    elseif p isa Expr && p.head === :curly && _iskepttype(mod, p)
+        error("@trait_module: an item parameter is a trait's name, `Compiled{X}` or `Dynamic{X}`; `$p` is not one " *
+              "(items keep their attribute: write the trait's name)")
     elseif p isa Expr && p.head === :curly
         return Expr(:curly, p.args[1], Any[(q isa Expr && q.head === :(<:)) ? q : _item_param(mod, q) for q in p.args[2:end]]...)
     end
@@ -414,7 +417,7 @@ function _attributed_bound(@nospecialize(v))
     return (X, v.name === Base.typename(Compiled) ? :compiled : :dynamic)
 end
 
-function _classify(mod::Module, a, unbounded::Vector{Symbol} = Symbol[]; attr_bounds::Bool = true)
+function _classify(mod::Module, a, unbounded::Vector{Symbol} = Symbol[]; attr_bounds::Bool = true, wheres::Vector{Any} = Any[])
     if a isa Expr && a.head === :macrocall && a.args[1] === Symbol("@specialize")
         error("@trait_module: `@specialize` is retired; write the attribute in the bound, `f::Compiled{Callable{A, S}}`, " *
               "or let the caller choose with `compiled_for(f)`")
@@ -422,12 +425,12 @@ function _classify(mod::Module, a, unbounded::Vector{Symbol} = Symbol[]; attr_bo
     if a isa Symbol
         return _Arg(a, nothing, :untyped, Any[], nothing, nothing, nothing)
     elseif a isa Expr && a.head === :...
-        inner = _classify(mod, a.args[1], unbounded; attr_bounds)
+        inner = _classify(mod, a.args[1], unbounded; attr_bounds, wheres)
         inner.kind === :trait && return _Arg(inner.name, inner.ann, :vararg_trait, inner.traits, nothing, nothing, inner.M)
         inner.kind in (:callable, :callables) && error("@trait_module: a vararg of `Callable` is not supported")
         return _Arg(a, nothing, :vararg, Any[], nothing, nothing, nothing)
     elseif a isa Expr && a.head === :kw
-        x = _classify(mod, a.args[1], unbounded; attr_bounds)
+        x = _classify(mod, a.args[1], unbounded; attr_bounds, wheres)
         return _Arg(x.name, x.ann, x.kind, x.traits, x.A, x.S, x.M, a.args[2], false)
     elseif a isa Expr && a.head === :(::)
         name, ann = length(a.args) == 2 ? (a.args[1], a.args[2]) : (gensym(:arg), a.args[1])
@@ -448,6 +451,18 @@ function _classify(mod::Module, a, unbounded::Vector{Symbol} = Symbol[]; attr_bo
             return _Arg(name, ann, :trait, traits, nothing, nothing, nothing)
         end
         v = _tryeval(mod, ann)
+        if v === nothing && ann isa Expr && ann.head === :curly
+            # a bound that names a method's `where` variables (traits reference §5.1): evaluated with them open
+            used = Any[w for w in wheres if _uses(ann, _wherevar(w))]
+            if !isempty(used)
+                h = _tryeval(mod, ann.args[1])
+                (h === Callable || h === Compiled || h === Dynamic) && _callable_args_use(mod, ann, used) &&
+                    error("@trait_module: argument `$name`: a `Callable` bound's argument types are a constant type; `$ann` names " *
+                          "the method's `where` variables. Write one method per signature (traits reference §5.8)")
+                v = _tryeval(mod, Expr(:where, ann, used...))
+                v isa Type && is_trait(v) && return _Arg(name, ann, :trait, bound_traits(v), nothing, nothing, nothing)
+            end
+        end
         cp = _callable_params(v)
         # in a method of an operation's function, `Dynamic{X}` is a type (traits reference §3.1)
         ab = attr_bounds ? _attributed_bound(v) : nothing
@@ -462,6 +477,25 @@ function _classify(mod::Module, a, unbounded::Vector{Symbol} = Symbol[]; attr_bo
         return _Arg(name, ann, :plain, Any[], nothing, nothing, nothing)
     end
     return _Arg(a, nothing, :plain, Any[], nothing, nothing, nothing)
+end
+
+"Whether argument `a` is bounded by a trait whose parameters name the `where` variable `w` (`prob::ODEProblemTrait{T}`)."
+function _bound_names(mod::Module, a, w)
+    a isa Expr && a.head === :kw && (a = a.args[1])
+    a isa Expr && a.head === :(::) && length(a.args) == 2 || return false
+    ann = a.args[2]
+    ann isa Expr && ann.head === :curly || return false
+    h = _tryeval(mod, ann.args[1])
+    return h isa Type && is_trait(h) && _uses(ann, _wherevar(w))
+end
+"Whether the `Callable` in bound `ann` (or under an attribute) names one of the `where` variables `used` in its argument types `A`."
+function _callable_args_use(mod::Module, ann, used)
+    ann isa Expr && ann.head === :curly || return false
+    if _tryeval(mod, ann.args[1]) === Callable
+        length(ann.args) >= 2 || return false
+        return any(w -> _uses(ann.args[2], _wherevar(w)), used)
+    end
+    return any(a -> _callable_args_use(mod, a, used), ann.args[2:end])
 end
 
 function _tryeval(mod::Module, ex)
@@ -603,9 +637,9 @@ function _rewrite_fdef(mod::Module, ex)
         kwparams = rawargs[1].args
         rawargs = rawargs[2:end]
     end
-    unbounded = Symbol[w for w in wheres if w isa Symbol]
+    unbounded = Symbol[w for w in wheres if w isa Symbol && !any(a -> _bound_names(mod, a, w), rawargs)]
     attr_bounds = !_is_operation_function(mod, fname)
-    args = [_classify(mod, a, unbounded; attr_bounds) for a in rawargs]
+    args = [_classify(mod, a, unbounded; attr_bounds, wheres) for a in rawargs]
     kws = [_classify_kw(mod, p, unbounded) for p in kwparams]
     istraitdef = any(x -> x.kind in (:trait, :callable, :callables, :vararg_trait), args) ||
                  any(x -> x.kind in (:trait, :callable), kws)
@@ -629,6 +663,46 @@ function _rewrite_fdef(mod::Module, ex)
     nva = count(x -> x.kind in (:vararg, :vararg_trait), args)
     nva <= 1 && (nva == 0 || args[end].kind in (:vararg, :vararg_trait)) ||
         error("@trait_module: `$fname` has a vararg that is not last")
+    # `where` variables named in bounds (traits reference §5.1): read from the values' parameters at the
+    # start of the body, or checked against the value something else fixes for them
+    wbind = Any[]
+    for x in args
+        x.kind === :trait && x.ann isa Expr && x.ann.head === :curly || continue
+        h = _tryeval(mod, x.ann.args[1])
+        h isa Type && is_trait(h) || continue
+        for (i, p) in enumerate(x.ann.args[2:end])
+            if p isa Symbol && any(w -> _wherevar(w) === p, wheres)
+                push!(wbind, (p, x.name, _family(h), i))
+            elseif any(w -> _uses(p, _wherevar(w)), wheres)
+                error("@trait_module: argument `$(x.name)`: a bound names a `where` variable only as a whole parameter, `$(x.ann.args[1]){…, T, …}`; `$p` is not one")
+            end
+        end
+    end
+    elsewhere(v) = any(x -> x.kind !== :trait && x.ann !== nothing && _uses(x.ann, v), args) ||
+                   any(x -> x.ann !== nothing && x.kind !== :trait && _uses(x.ann, v), kws) ||
+                   any(w -> _wherevar(w) !== v && _uses(w, v), wheres)
+    boundonly = unique(Symbol[v for (v, _, _, _) in wbind if !elsewhere(v)])
+    ret !== nothing && any(v -> _uses(ret, v), boundonly) &&
+        error("@trait_module: `$fname`'s result type names a `where` variable that only a bound fixes; assert the result in the body instead")
+    if !isempty(wbind)
+        prefix = Any[]
+        seen = Symbol[]
+        for (v, nm, F, i) in wbind
+            val = :($TraitWorld._trait_param($nm, $F, Val($i)))
+            if v in boundonly && !(v in seen)
+                push!(prefix, :($v = $val))
+                w = wheres[findfirst(w -> _wherevar(w) === v, wheres)]
+                if w isa Expr && w.head === :(<:)
+                    push!(prefix, :($v <: $(w.args[2]) || $TraitWorld._param_mismatch($(QuoteNode(nm)), $F, $i, $(QuoteNode(v)), $(w.args[2]), $v)))
+                end
+            else
+                push!(prefix, :($val === $v || $TraitWorld._param_mismatch($(QuoteNode(nm)), $F, $i, $(QuoteNode(v)), $v, $val)))
+            end
+            push!(seen, v)
+        end
+        body = Expr(:block, prefix..., body)
+        wheres = Any[w for w in wheres if !(_wherevar(w) in boundonly)]
+    end
     # --- the worker
     wargs = Any[]
     newwheres = Any[]

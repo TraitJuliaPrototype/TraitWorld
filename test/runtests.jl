@@ -54,7 +54,7 @@ struct Ramp; base::Vector{Float64}; n::Int; end
     col(r, i) = r.base .* i
 end
 struct Reversed; cols::Vector{Vector{Float64}}; end
-@implement ColTable Reversed begin                       # (was `dynamic`, removed: traits reference §5.9)
+@implement ColTable Reversed begin                       # (was `dynamic`, removed: traits reference §4.9)
     ncols(r) = length(r.cols)
     col(r, i) = r.cols[end - i + 1]
 end
@@ -67,7 +67,7 @@ end
     @test meandiff(m, r, 1) == 0.0
     @test colmean([[1.0, 3.0]], 1) == 2.0                    # a representation is its own projection
     @test colrange([1.0 5.0; 3.0 2.0], 1) == 2.0
-    # `dynamic` is not part of the language (traits reference §5.9): refused at the declaration
+    # `dynamic` is not part of the language (traits reference §4.9): refused at the declaration
     e = try toplevel(quote
         struct RevD; cols::Vector{Vector{Float64}}; end
         @implement ColTable RevD dynamic begin
@@ -205,7 +205,7 @@ end
 
 @testset "Callable" begin
     @test colmap(x -> 2x, [[1.0, 2.0]], 1) == [2.0, 4.0]          # erased
-    @test colsum(abs2, [[1.0, 2.0]], 1) == 5.0                     # Base's function: not affected by Callable's @dynamic
+    @test colsum(abs2, [[1.0, 2.0]], 1) == 5.0                     # Base's function: not affected by Callable's Dynamic default
     @test colsum(x -> x + 1, [[1.0, 2.0]], 1) == 5.0               # the bound's attribute: Compiled
     @test_throws TypeError colmap(x -> 1, [[1.0, 2.0]], 1)       # a result of another type: an error, not widening
     e = TraitWorld.enter_callable(Tuple{Float64}, Float64, nothing, x -> x, Val(true))
@@ -664,7 +664,7 @@ userdbl(x) = 2x
 @testset "poc3 M2: Callable, Compiled and Dynamic" begin
     v = [[1.0, 2.0]]
     @test cmap(userdbl, v, 1) == [2.0, 4.0] && csum(userdbl, v, 1) == 6.0
-    @test TraitWorld.enter_callable(Tuple{Float64}, Float64, nothing, userdbl, Val(true)).f isa TraitWorld.Erased   # Callable's @dynamic
+    @test TraitWorld.enter_callable(Tuple{Float64}, Float64, nothing, userdbl, Val(true)).f isa TraitWorld.Erased   # Callable's Dynamic default
     @test TraitWorld.enter_callable(Tuple{Float64}, Float64, :compiled, userdbl, Val(true)).f === userdbl
     @test TraitWorld.enter_callable(Tuple{Float64}, Float64, :dynamic, compiled_for(userdbl), Val(true)).f === userdbl   # the conversion wins
     @test TraitWorld.enter_callable(Tuple{Float64}, Float64, :compiled, with_dynamic(userdbl), Val(true)).f isa TraitWorld.Erased
@@ -672,7 +672,7 @@ userdbl(x) = 2x
     # a Dynamic function at another signature: the same function, Dynamic, through its own pointer
     @test TraitWorld.enter_callable(Tuple{Float64}, Float64, nothing, Dynamic{Callable{Tuple{Int},Int}}(userdbl), Val(true)).f isa TraitWorld.Erased{Tuple{Float64},Float64}
     @test cmap(compiled_for(userdbl), v, 1) == [2.0, 4.0] && csum(with_dynamic(userdbl), v, 1) == 6.0
-    @test csum(abs2, v, 1) == 5.0 && cmap(abs2, v, 1) == [1.0, 4.0]   # Base's function: not affected by Callable's @dynamic
+    @test csum(abs2, v, 1) == 5.0 && cmap(abs2, v, 1) == [1.0, 4.0]   # Base's function: not affected by Callable's Dynamic default
     @test cboth(with_dynamic(x -> x + one(x)), 1.5, 2) == (2.5, 3)
     @test_throws LoadError Core.eval(Main, :(@trait_module module OldSpec
         using TraitWorld, ..Columns
@@ -846,3 +846,4 @@ include("redeclare.jl")
 include("basetraits.jl")
 include("attributes.jl")
 include("carry.jl")
+include("wherevars.jl")

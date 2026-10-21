@@ -1,4 +1,4 @@
-# `Compiled` and `Dynamic` (traits reference §6.6, §3.8, §9, §10; lowering §5, §8.2, §13): every value
+# `Compiled` and `Dynamic` (traits reference §6, §6.3, §5.8, §7; lowering §5, §8.2, §13): every value
 # in trait code is one or the other, decided where a plain value enters, kept inside the trait world.
 # A mode chooses speed, never results. Runs inside runtests.jl, or alone: julia --project=. test/attributes.jl
 using Test, TraitWorld
@@ -9,7 +9,7 @@ toplevel(quote
     using TraitWorld
     export Shape, area, kind, kind_d, kind_c, pass, with_dyn, comp_of, atotal, kwkind, vkind,
            Visitor, visit, doit, PF, getd, setd!, SV, first_of, first_dyn, Model, mval, mkind, MyModel,
-           cm, cm_c, cm_kind, cmc_kind, AFBox
+           cm, cm_c, cm_kind, cmc_kind, AFBox, Hotm, hval, hkind, hkind_d, hkinds, HBox
     public kind_hidden
     @trait Shape begin
         area(s::Shape)::Float64
@@ -43,8 +43,18 @@ toplevel(quote
     first_dyn(s::Dynamic{SV{Float64}}) = s.u[1]
 
     @trait Model begin
-        @dynamic
+        @default_with_dynamic_self
         mval(m::Model)::Int
+    end
+    @trait Hotm begin
+        @default_compiled_for_self
+        hval(h::Hotm)::Int
+    end
+    hkind(h::Hotm) = TraitWorld.is_dynamic(h) ? :dynamic : :compiled
+    hkind_d(h::Dynamic{Hotm}) = hkind(h)
+    hkinds(hs::Iterable{Hotm}) = (r = Symbol[]; for h in hs; push!(r, hkind(h)); end; r)
+    struct HBox{H <: Hotm}
+        h::H
     end
     mkind(m::Model) = TraitWorld.is_dynamic(m) ? :dynamic : :compiled
     struct MyModel; k::Int; end                      # a type of the trait world: its own module's
@@ -59,7 +69,7 @@ toplevel(quote
         f::Dynamic{Callable{Tuple{Float64},Float64}}
     end
     kind_hidden(s::Dynamic{Shape}) = TraitWorld.is_dynamic(s) ? :dynamic : :compiled
-    # item positions (traits reference §10.2): each item's attribute when it is read
+    # item positions (traits reference §8.2): each item's attribute when it is read
     ikinds(ms::Iterable{Shape}) = (r = Symbol[]; for m in ms; push!(r, kind(m)); end; r)
     ikinds_c(ms::Iterable{Compiled{Shape}}) = (r = Symbol[]; for m in ms; push!(r, kind(m)); end; r)
     ikinds_d(ms::Iterable{Dynamic{Shape}}) = (r = Symbol[]; for m in ms; push!(r, kind(m)); end; r)
@@ -83,6 +93,8 @@ toplevel(quote
     TraitWorld.@implement AttrG.SV ASV
     struct AUserModel; k::Int; end
     TraitWorld.@implement AttrG.Model AUserModel begin mval(m) = m.k end
+    struct AHot; k::Int; end
+    TraitWorld.@implement AttrG.Hotm AHot begin hval(h) = h.k end
 
     # callers that know the type, and callers that do not
     a_typed(c::ACircle) = kind(c)
@@ -99,6 +111,7 @@ toplevel(quote
     a_va_typed(c::ACircle) = vkind(c, c)
     a_va_untyped(v::Vector{Any}) = vkind(v[1])
     a_m_user(m::AUserModel) = mkind(m)
+    a_h_d(h::AHot) = AttrG.hkind_d(h)
     a_m_tw(m::AttrG.MyModel) = mkind(m)
     a_m_cf(m::AUserModel) = mkind(compiled_for(m))
     a_cm_closure(r::Float64) = cm_kind(x -> r * x)
@@ -169,13 +182,37 @@ end)
         end
         @test err isa LoadError && err.error isa TraitBoundError         # refused when the method is defined
     end
-    @testset "a trait's default, @dynamic (rule 3): not for types of the trait world" begin
+    @testset "a trait's default, @default_compiled_for_self: Compiled whatever the caller knew" begin
+        h = AHot(2)
+        @test Core.eval(Main, :(AttrG.hkind(AHot(2)))) === :compiled            # at the prompt, too
+        @test AttrG.hkind(with_dynamic(h)) === :dynamic                          # a cast wins
+        @test a_h_d(h) === :dynamic                                              # an annotation wins
+        @test AttrG.hkinds(Any[h, AHot(3)]) == [:compiled, :compiled]            # plain items of a Vector{Any}
+        @test getfield(Kept{AttrG.Hotm}(h), :compiled)
+        @test typeof(Core.eval(Main, :(AttrG.HBox(AHot(2))))).parameters[1] === AHot   # a struct parameter: the value itself
+        err = try
+            toplevel(quote
+                @trait_module module AttrOld
+                using TraitWorld
+                @trait OldD begin
+                    @dynamic
+                    oval(o::OldD)::Int
+                end
+                end
+            end)
+            nothing
+        catch e
+            e
+        end
+        @test err isa LoadError                                                  # the old spelling is refused
+    end
+    @testset "a trait's default, @default_with_dynamic_self (rule 3): not for types of the trait world" begin
         @test a_m_user(AUserModel(1)) === :dynamic
         @test a_m_tw(AttrG.MyModel(1)) === :compiled
         @test a_m_cf(AUserModel(1)) === :compiled
         @test AttrG.mval(Dynamic{AttrG.Model}(AUserModel(3))) == 3
     end
-    @testset "Callable: @dynamic, Compiled{Callable}, conversions, Dynamic{Callable}" begin
+    @testset "Callable: its Dynamic default, Compiled{Callable}, casts, Dynamic{Callable}" begin
         @test a_cm_closure(2.0) === :dynamic
         @test a_cm_abs2(2.0) === :compiled                            # a function of the trait world, its type known
         @test Core.eval(Main, :(cm_kind(abs2))) === :dynamic          # at the prompt
@@ -202,7 +239,7 @@ end)
         @test kkind(Dict{String, Any}("a" => ACircle(1.0)), "a") === :dynamic
         @test_throws TraitBoundError ikinds_c(Any[ACircle(1.0), 1])     # an item that does not conform: when read
     end
-    @testset "functions held: Compiled, Dynamic, Kept; constructors never cast (traits §9)" begin
+    @testset "functions held: Compiled, Dynamic, Kept; constructors never cast (traits §5.8)" begin
         C = Callable{Tuple{Float64}, Float64}
         sq(x) = x^2
         d = Dynamic{C}(sq); c = Compiled{C}(sq)

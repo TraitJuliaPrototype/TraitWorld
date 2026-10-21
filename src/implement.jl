@@ -986,7 +986,7 @@ end
     # --- projections: @implement X T …, @implement (X, Y) T …, @implement X{R} T …
     if !isempty(rest) && !(rest[1] isa Expr && rest[1].head === :block)
         # an implementation declared again in the session, in any form: refused with the reason
-        # (traits reference §5.10), not with what the new form lacks
+        # (traits reference §4.10), not with what the new form lacks
         T = try Core.eval(mod, rest[1]) catch; nothing end
         for xex in (head isa Expr && head.head === :tuple ? head.args : Any[head])
             xex isa Expr && xex.head === :curly && (xex = xex.args[1])         # stated parameters: `X{P…}`
@@ -1340,8 +1340,8 @@ function _implement_projection(mod::Module, head, rest; field::Int = 0, fmap = n
     length(rest) == 1 || error("@implement: expected `project(t) = …` or a begin … end block after the type")
     body = rest[1]
     dynamic = :dynamic in flags
-    dynamic && throw(ImplementError("`dynamic` is not part of the language (traits reference §5.9): pass the value as a " *
-                                    "`Dynamic{X}`, bound the position with `Dynamic{X}`, or declare `@dynamic` in the trait"))
+    dynamic && throw(ImplementError("`dynamic` is not part of the language (traits reference §4.9): pass the value as a " *
+                                    "`Dynamic{X}`, bound the position with `Dynamic{X}`, or declare `@default_with_dynamic_self` in the trait"))
     copies = :copies in flags
     defs = body isa Expr && body.head === :block ? _defs(body) : Any[body]
     pdefs = filter(d -> d isa Expr && d.args[1] isa Expr && d.args[1].args[1] === :project, defs)

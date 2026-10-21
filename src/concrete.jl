@@ -135,7 +135,7 @@ _machinery(frames) = any(n -> _frame_module(n) === TraitWorld, frames)
 """
 Whether an abstract value is the object a `Dynamic` value or a `Dynamic` trait object holds (field `t`
 of a `Dynamic`, field `o` of a view at the erased key): abstract by declaration, as the operations on it
-are (traits reference §13), not a fault.
+are (traits reference §11), not a fault.
 """
 function _declared_dynamic(src, sptypes, @nospecialize(a))
     a isa Core.SSAValue || return false

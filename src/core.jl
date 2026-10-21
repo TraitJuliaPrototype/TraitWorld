@@ -21,7 +21,7 @@ is_trait(@nospecialize(X)) = X isa Type && X !== Union{} && X <: Trait
 
 The built-in trait for a function argument: called with arguments of the tuple type `A`, it
 returns an `S`. Any callable conforms; every call is checked. Its default attribute is `Dynamic`
-(traits reference §9): a function from plain code is erased to a pointer to its code compiled for
+(traits reference §5.8): a function from plain code is erased to a pointer to its code compiled for
 `A`, and the worker is compiled once per signature; `Compiled{Callable{A, S}}` at the position, or
 `compiled_for(f)` at the call, compiles the worker per function type. Functions of the trait world
 are not affected by the default.
@@ -214,7 +214,7 @@ _isptag(@nospecialize(X)) = X isa DataType && X <: PTag
 """
     Through{Y, A}
 
-A bound's item parameter that names a trait (traits reference §10.2): items seen through `Y`, with
+A bound's item parameter that names a trait (traits reference §8.2): items seen through `Y`, with
 the attribute `A` the bound gives them (`:default`, `:compiled`, `:dynamic`). In a worker's bound it is
 the value of the parameter's tag; a trait object whose item type is a held value of `Y` (`Compiled{Y}`,
 `Dynamic{Y}`, `Kept{Y}`) or a trait object carrying `Y` has the tag for every `A`, so one worker
@@ -401,7 +401,7 @@ only by stakeholders and pirates. Untyped, `length(u.parameters)` left an edge a
     Dynamic{X}
 
 A value of any type conforming to trait `X`, kept beyond a call and reached through `X`'s
-operations (note "Dynamic values"). It holds the user's object (traits reference §10; lowering
+operations (note "Dynamic values"). It holds the user's object (traits reference §7; lowering
 §13): the view of `X` for the object's type is made when an operation runs, folded where the type
 is one of the call site's candidates. Made from a value, `Dynamic{X}(x)`, or from a trait object
 inside a trait module, `Dynamic{X}(t)`, or by storing one where a `Dynamic{X}` is declared.
@@ -450,7 +450,7 @@ end
     Compiled{X}
 
 A value of any type conforming to trait `X` whose attribute is `Compiled`, held where the code does
-not know its type (traits reference §10; lowering §13): `compiled_for(d)` of a `Dynamic{X}`, or made
+not know its type (traits reference §7; lowering §13): `compiled_for(d)` of a `Dynamic{X}`, or made
 from a value, `Compiled{X}(x)`, or from a trait object at its key. Like `Dynamic{X}` it holds the
 user's object, and an operation or a field read on it is the same call-site split. Passed to a
 function bounded by `X`, it is opened by its type: the code compiled for its key is selected once
@@ -489,13 +489,13 @@ end
     Kept{X}
 
 A value of any type conforming to trait `X`, with its attribute as data: `Compiled` or `Dynamic`
-(traits reference §10). What a trait's name means as the type of a field or of a container's items
+(traits reference §7). What a trait's name means as the type of a field or of a container's items
 in a trait module, where values of both attributes sit side by side: one concrete type, so it is
 stored inline and reading or making one allocates nothing. It holds the user's object, as
 `Compiled{X}` and `Dynamic{X}` do; an operation or a field read on it is the same call-site split;
 at a bound its attribute decides. Made by storing a trait object (its key gives the attribute) or
 any value of the trait world (it keeps its attribute), or `Kept{X}(x)` from a plain value (the
-trait's default: `Dynamic` under `@dynamic`, else `Compiled`).
+trait's default: `Dynamic` under `@default_with_dynamic_self`, else `Compiled`).
 """
 struct Kept{X}
     t::Any            # the user's object, or a trait object (as for `Dynamic`)
@@ -561,7 +561,7 @@ const _NARROW = IdDict{Any,Any}()
     views = getfield(t, :views)
     return TObj(Tuple(views[i] for i in keep))
 end
-# Constructors make or keep a value, never cast (traits reference §6.6): only `compiled_for` and
+# Constructors make or keep a value, never cast (traits reference §6): only `compiled_for` and
 # `with_dynamic` change an attribute. On a value that has one they keep it where it matches, else
 # they refuse, naming the cast.
 Dynamic{X}(d::Dynamic{X}) where {X} = d
@@ -580,13 +580,14 @@ function Kept{X}(t::TObj{T,V}) where {X,T,V}
     d = Dynamic{X}(Val(:keep), t)
     return Kept{X}(Val(:checked), getfield(d, :t), !_is_erased(V))
 end
-"A plain value kept: the trait's default (`@dynamic`), else `Compiled`."
+"A plain value kept: the trait's default, `Dynamic` under `@default_with_dynamic_self` for a value not of the trait world, else `Compiled`."
 @inline function Kept{X}(x) where {X}
     c = Compiled{X}(x)
-    return Kept{X}(Val(:checked), getfield(c, :t), default_attribute(_family_of(X)) !== :dynamic)
+    dyn = default_attribute(_family_of(X)) === :dynamic && !_from_trait_world(x)
+    return Kept{X}(Val(:checked), getfield(c, :t), !dyn)
 end
 Base.convert(::Type{Kept{X}}, k::Kept{X}) where {X} = k
-"A plain value assigned where a trait's name is declared: first seen there, the trait's default (traits reference §10)."
+"A plain value assigned where a trait's name is declared: first seen there, the trait's default (traits reference §7)."
 Base.convert(::Type{Kept{X}}, x) where {X} = Kept{X}(x)
 Base.convert(::Type{Kept{X}}, t::Union{TObj,Dynamic{X},Compiled{X}}) where {X} = Kept{X}(t)
 Base.convert(::Type{Dynamic{X}}, t::TObj) where {X} = Dynamic{X}(t)
@@ -679,7 +680,7 @@ end
     @kept_of X x attr
 
 A value `x` of unknown type read where it is seen through `X`, an item of a user's container
-(traits reference §10.3), as a `Kept{X}`: a value that carries its attribute keeps it (`Kept{X}`,
+(traits reference §8.3), as a `Kept{X}`: a value that carries its attribute keeps it (`Kept{X}`,
 `Compiled{X}`, `Dynamic{X}`, `compiled_for(y)`, `with_dynamic(y)`); any other value is first seen
 here, `Compiled` if `attr` is `:compiled`, else `Dynamic`. The tests are `isa`, builtins; the
 conformance of a plain value is split as in `@dynamic_of`; the `Kept{X}` is made by an `invoke` at
@@ -717,6 +718,26 @@ struct _ConformsTo{X} end
     _register_candidate!(_family_of(X), typeof(x))
     return true
 end
+
+"""
+Parameter `i` of trait family `F` as the trait object `t` carries it: the value a `where` variable named
+in a bound takes (traits reference §5.1). A constant of the compiled body, per key.
+"""
+@generated function _trait_param(t::TObj{T,V}, ::Type{F}, ::Val{i}) where {T,V,F,i}
+    for Vt in (V::DataType).parameters
+        X = Base.unwrap_unionall((Vt::DataType).parameters[1])
+        X isa DataType && X.name.wrapper === F || continue
+        p = X.parameters[i]
+        p isa TypeVar && break
+        p === OpenParam && return :(Base.inferencebarrier(_param_open)($F, $i))
+        return p isa Type ? :($p) : QuoteNode(p)
+    end
+    return :(Base.inferencebarrier(_param_open)($F, $i))
+end
+@noinline _param_open(@nospecialize(F), i::Int) =
+    throw(TraitBoundError("parameter $i of $F is not known for this value: fix it in the bound, or pass the value Compiled"))
+@noinline _param_mismatch(nm::Symbol, @nospecialize(F), i::Int, v::Symbol, @nospecialize(want), @nospecialize(got)) =
+    throw(TraitBoundError("argument `$nm`: parameter $i of $F is $got, but `$v` is $want"))
 
 "The trait family of `X`, a constant of the specialized caller (the key of the call-site splits)."
 @generated _family_of(::Type{X}) where {X} = :($(_family(X)))

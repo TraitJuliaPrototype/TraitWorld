@@ -1,4 +1,4 @@
-# BaseTraits (traits reference §18): collection traits for Base's containers, a user's containers
+# BaseTraits (traits reference §16): collection traits for Base's containers, a user's containers
 # seen with `Dynamic{X}` items without a copy, and the `Dynamic` that holds the user's object.
 # Runs inside runtests.jl, or alone: julia --project=. test/basetraits.jl
 using Test, TraitWorld
@@ -116,7 +116,7 @@ end
     v = Any[i for i in 1:200]
     d = DynamicItems{C.Cell}(v)
     # measured in typed code: Julia's `@allocated f(x)` calls through `Base.allocated(f, x)`, a dispatch
-    # at run time, where the value is `Dynamic` (traits reference §6.6)
+    # at run time, where the value is `Dynamic` (traits reference §6)
     allocs(f::F, x::X) where {F,X} = (b0 = Base.gc_bytes(); f(x); Base.gc_bytes() - b0)
     allocs(C.countnums, d); allocs(C.countnums, d)
     @test allocs(C.countnums, d) < 200                           # no allocation per item read (200 items)
@@ -132,7 +132,7 @@ end
     @test sum(O.tag(Dynamic{O.Tag}(x)) for x in (O.O1(), O.O5(), O.O6())) == 12   # beyond the split: the fallback
 end
 
-# The crossing (traits reference §10.3): a function bounded with dynamic items takes the user's
+# The crossing (traits reference §8.3): a function bounded with dynamic items takes the user's
 # container itself; its entry translates it by its bound into the view.
 toplevel(quote
     @trait_module module BTCross
@@ -192,7 +192,7 @@ end)
     # fails the Iterable family's check, and its slow path cost 2.7 ms per call)
     big = Dict{String, Any}(string(i) => i for i in 1:1000)
     # measured in typed code: Julia's `@allocated f(x)` calls through `Base.allocated(f, x)`, a dispatch
-    # at run time, where the value is `Dynamic` (traits reference §6.6)
+    # at run time, where the value is `Dynamic` (traits reference §6)
     allocs(f::F, x::X) where {F,X} = (b0 = Base.gc_bytes(); f(x); Base.gc_bytes() - b0)
     allocs(C.valsc, big); allocs(C.valsc, big)
     @test allocs(C.valsc, big) < 1000

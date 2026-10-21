@@ -39,7 +39,7 @@ end
 HAS_PRINTERS && @testset "Printing by bound and representation" begin
     P = Main.PrintLib
     # the function by a constant path: through a local variable (`P.boom`) the call is dispatched at run
-    # time, and the value is `Dynamic` there (traits reference §6.6)
+    # time, and the value is `Dynamic` there (traits reference §6)
     bt = allframes(() -> Main.PrintLib.boom([1.0, 2.0]))
     @test occursin("PVec{Float64} at Vector{Float64}", bt)
     @test occursin("PVec{Float64} at Dynamic", allframes(() -> P.boom([1.0, 2.0])))
