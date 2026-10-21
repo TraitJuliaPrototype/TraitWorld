@@ -949,8 +949,9 @@ _cdecl(@nospecialize(T)) = isbitstype(T) && sizeof(T) > 0 ? T : isconcretetype(T
     return Expr(:cfunction, Ptr{Cvoid}, QuoteNode(_CallWrap{S}()), _ctype(S),
                 :(Core.svec($(Ref{F}), $(ats...))), QuoteNode(:caller_world))
 end
-Erased{A,S}(f::F) where {A,S,F} = Erased{A,S}(_PtrCell(_fptr(A, S, F)), f)
-"The pointer of `e` in this session: made again after an image load reset it."
+"`f` erased to `Callable{A, S}`, not specialized on `f`: its pointer is made at the first call, so a function kept and never called compiles nothing."
+Erased{A,S}(@nospecialize(f)) where {A,S} = Erased{A,S}(_PtrCell(C_NULL), f)
+"The pointer of `e` in this session: made at its first call, and again after an image load reset it."
 @noinline function _erased_ptr_slow(e::Erased{A,S}) where {A,S}
     p = Base.invokelatest(_fptr, A, S, typeof(getfield(e, :obj)))::Ptr{Cvoid}
     @atomic getfield(e, :cell).ptr = p
