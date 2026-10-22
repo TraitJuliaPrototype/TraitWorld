@@ -118,3 +118,32 @@ struct SOk; part::SPart; end
     @test TraitWorld.implementation(SB, SOk) !== nothing || TraitWorld.projection(SB, SOk) !== nothing
 end
 
+
+# A bounded method in a trait module defines a method of the function its name resolves to, as in
+# Julia (traits §5.5; T-66, found by E-156 X1): a name the module has only by an implicit `using`
+# (Base's `peek`) is a new function of the module; one imported by name is that function.
+toplevel(quote
+    @trait_module module DeclName
+    using TraitWorld
+    export XN, xv
+    @trait XN begin
+        xv(x::XN)::Int
+    end
+    peek(x::XN) = xv(x)                  # Base exports `peek`: here a new function DeclName.peek
+    end
+    struct XNv; v::Int; end
+    DeclName.xv(x::XNv) = x.v
+    @implement DeclName.XN XNv
+end)
+@testset "a bounded method's name resolves as in Julia" begin
+    @test DeclName.peek !== Base.peek && parentmodule(DeclName.peek) === DeclName
+    @test DeclName.peek(XNv(3)) == 3
+    e = try toplevel(quote
+        @trait_module module DeclNameImp
+        using TraitWorld, ..DeclName
+        import Base: peek
+        peek(x::DeclName.XN) = 1         # imported by name: Base's function, which this module does not own
+        end
+    end); nothing catch err; err end
+    @test inner(e) isa ErrorException && occursin("belongs to Base", sprint(showerror, inner(e)))
+end

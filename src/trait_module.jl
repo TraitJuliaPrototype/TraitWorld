@@ -547,7 +547,10 @@ _wherevar(w) = w isa Symbol ? w : (w isa Expr && w.head in (:<:, :>:) ? w.args[1
 "The key under which a function's entries are recorded: (owning module, name)."
 function _fkey(mod::Module, fname)
     if fname isa Symbol
-        if isdefined(mod, fname)
+        # as Julia defines a method (`jl_get_existing_strong_gf`): a name the module has only by an
+        # implicit `using` (Base's `peek`) is a new function of the module; one it defines, or imports
+        # by name (`import Base: peek`, `using Base: peek`), is that function (traits reference §5.5)
+        if isdefined(mod, fname) && !Base.is_some_implicit(Base.binding_kind(mod, fname))
             f = getfield(mod, fname)
             f isa Function && return (parentmodule(f), nameof(f))
         end
