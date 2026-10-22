@@ -949,7 +949,7 @@ end
 _defname(d) = d.args[1].args[1]::Symbol
 
 "Turn `name(r, i) = body` into a method of the operation's function at `R`, annotating unannotated arguments as declared."
-function _op_method(mod::Module, @nospecialize(X), d, Rex; precheck::Bool = true)
+function _op_method(mod::Module, @nospecialize(X), d, Rex; precheck::Bool = true, wheres = Any[])
     call = d.args[1]
     name = call.args[1]::Symbol
     op = name
@@ -973,7 +973,7 @@ function _op_method(mod::Module, @nospecialize(X), d, Rex; precheck::Bool = true
     # rule 3 before anything is defined: someone else's function (Base.size) may get a method
     # only for a representation the defining package owns
     if precheck && !owns(owner(mod), owner(parentmodule(f)))
-        Rv = _tryeval(mod, Rex)
+        Rv = _tryeval(mod, isempty(wheres) ? Rex : Expr(:where, Rex, wheres...))   # a family: its `where`
         if !(Rv isa Type && _owns(owner(mod), Rv))
             throw(ImplementError(
                 "$(mod) may not implement `$op` of $X for $(Rex): `$(nameof(f))` belongs to $(parentmodule(f)), and $(mod) does not own " *
@@ -1046,6 +1046,11 @@ function _keys_implement(mod::Module, args)
     # X A where {…}, with or without a block
     if T isa Expr && T.head === :where && T.args[1] isa Symbol
         return (Expr(:where, withR(T.args[1]), T.args[2:end]...), rest...)
+    end
+    # X S{P} where {P} begin … end, and the joint X{P} S{P} where {P} begin … end: a family with a
+    # block of methods (traits reference §4.7); without a block, the projection's family forms
+    if T isa Expr && T.head === :where && length(rest) == 1 && rest[1] isa Expr && rest[1].head === :block
+        return (Expr(:where, withR(T.args[1]), T.args[2:end]...), rest[1])
     end
     # X T begin … end without `project`: an implementation for T
     if length(rest) == 1 && rest[1] isa Expr && rest[1].head === :block &&
@@ -1277,7 +1282,7 @@ function _implement_family(mod::Module, @nospecialize(X), tr, wheres::Vector{Any
         given = Tuple(unique(_defname.(defs)))
         defaults = _missing_and_defaults(X, given)
         for d in defs
-            m = _op_method(mod, X, d, Rex)
+            m = _op_method(mod, X, d, Rex; wheres)
             push!(out, Expr(m.head, Expr(:where, m.args[1], wheres...), m.args[2]))
         end
         push!(out, :(const $rec = $TW.ImplRec(:methods, $defaults)))
