@@ -169,3 +169,55 @@ end)
     kept_call(kf); kept_call(kd); kept_call(kf); kept_call(kd)
     @test (@allocated kept_call(kf)) == (@allocated kept_call(kd))
 end
+
+# The table's crossing whatever the ordinary arguments are declared as (lowering §9.3; W-49): abstract
+# annotations, an annotation naming a `where` variable, and entries of more arguments than the pointer's wrapper.
+toplevel(quote
+    @trait_module module UTab3
+    using TraitWorld
+    @trait Bt begin
+        bval(b::Bt)::Float64
+    end
+    struct BFam{F}; f::F; end
+    bval(b::BFam) = b.f()
+    @implement Bt B where {B <: BFam}
+    struct BD; v::Float64; end
+    bval(b::BD) = b.v
+    @implement Bt BD
+    run_abs(m::Bt, bs::Vector, k::Int, args::Base.RefValue) = (s = 0.0; for x in bs[k]; s += x * bval(m) + args[][1]; end; s)
+    run_unt(m::Bt, bs, k, args) = (s = 0.0; for x in bs[k]; s += x * bval(m) + args[][1]; end; s)
+    run_where(m::Bt, bs::Vector{Vector{Float64}}, args::Base.RefValue{A}) where {A} = (A, bval(m) + sum(bs[1]) + args[][1])
+    run_nine(m::Bt, a1, a2, a3, a4::Int, a5, a6, a7::Real, a8) = bval(m) + a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8
+    run_17(m::Bt, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16::Real) =
+        bval(m) + a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9 + a10 + a11 + a12 + a13 + a14 + a15 + a16
+    end
+end)
+
+@testset "untyped calls of Compiled values: the table, whatever the ordinary arguments' annotations (W-49)" begin
+    served(f) = [e.T for e in (@atomic TraitWorld._ptable(only(t for (g, n, t, p) in UTab3.__tw_untyped__ if g === f)).entries) if e.fp != C_NULL]
+    tabled(f) = any(g === f for (g, n, t, p) in UTab3.__tw_untyped__)
+    ks = Kept{UTab3.Bt}[compiled_for(UTab3.BFam(() -> 2.0)), compiled_for(UTab3.BD(3.0))]
+    bs = [[1.0, 2.0], [4.0]]
+    abs_call(ks, bs) = (args = Ref((0.5, :x)); r = 0.0; for k in eachindex(ks); r += UTab3.run_abs(compiled_for(ks[k]), bs, k, args)::Float64; end; r)
+    unt_call(ks, bs) = (args = Ref((0.5, :x)); r = 0.0; for k in eachindex(ks); r += UTab3.run_unt(compiled_for(ks[k]), bs, k, args)::Float64; end; r)
+    @test abs_call(ks, bs) == unt_call(ks, bs) == 1.0 * 2.0 + 0.5 + 2.0 * 2.0 + 0.5 + 4.0 * 3.0 + 0.5
+    @test issubset([UTab3.BFam{typeof(getfield(ks[1], :t).f)}, UTab3.BD], served(UTab3.run_abs))
+    # an abstract annotation is not checked again behind the entry: the same cost as the untyped form
+    abs_call(ks, bs); unt_call(ks, bs)
+    @test (@allocated abs_call(ks, bs)) == (@allocated unt_call(ks, bs))
+    # the entry's dispatch still checks the annotations
+    @test_throws MethodError UTab3.run_abs(compiled_for(ks[2]), bs, 1.0, Ref((0.5,)))
+    # an annotation naming a `where` variable: the entry is tabled, the variable bound in the worker
+    @test tabled(UTab3.run_where)
+    wcall(ks, bs) = (args = Ref((0.5, 1)); r = Any[]; for k in eachindex(ks); push!(r, UTab3.run_where(compiled_for(ks[k]), bs, args)); end; r)
+    @test wcall(ks, bs) == Any[(Tuple{Float64,Int}, 5.5), (Tuple{Float64,Int}, 6.5)]
+    @test UTab3.BD in served(UTab3.run_where)
+    @test_throws MethodError UTab3.run_where(compiled_for(ks[2]), [[1]], Ref(1))
+    # nine arguments, through the pointer; seventeen, through a dispatch on the builder
+    nine(ks) = (r = 0.0; for k in ks; r += UTab3.run_nine(compiled_for(k), 1, 2, 3, 4, 5, 6, 7.0, 8); end; r)
+    @test nine(ks) == (2.0 + 36) + (3.0 + 36)
+    @test UTab3.BD in served(UTab3.run_nine)
+    s17(ks) = (r = 0.0; for k in ks; r += UTab3.run_17(compiled_for(k), 1:16...); end; r)
+    @test s17(ks) == (2.0 + 136) + (3.0 + 136)
+    @test tabled(UTab3.run_17)
+end

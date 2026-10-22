@@ -180,11 +180,17 @@ end
 # is called directly: a call with an `Any` argument would be a run-time site where the wrapper is
 # compiled by facts.
 struct _UWrap end
-for n in 0:8                       # as many as `checked_call`'s fixed arities
+for n in 0:_UWRAP_MAX              # as many as `checked_call`'s fixed arities
     as = [Symbol(:a, k) for k in 1:n]
     hs = [Expr(:new, :XAny, a) for a in as]
     @eval (::_UWrap)(o::_UCall{G,B}, $([:(@nospecialize($a)) for a in as]...)) where {G,B} = G.instance(getfield(o, :b)::B, $(hs...))
 end
+"""
+An ordinary argument of the pattern's method, as the entry received it. The entry's dispatch has checked
+its declared type `T` already. A concrete `T` is asserted, so that the worker's call is a fact; any other
+is not checked again (a subtype test at run time), and the worker is selected by the argument's own type.
+"""
+@inline _held_as(xa::XAny, ::Type{T}) where {T} = isconcretetype(T) ? getfield(xa, :x)::T : getfield(xa, :x)
 "A pointer to `o(args...)` for the callable type `F` and `N` arguments, all passed boxed, in the caller's world."
 @generated function _ufptr(::Type{F}, ::Val{N}) where {F,N}
     return Expr(:cfunction, Ptr{Cvoid}, QuoteNode(_UWrap()), Any,
