@@ -681,6 +681,8 @@ _declare_conformance(mod::Module, @nospecialize(X), @nospecialize(T)) = _refusin
     isempty(warns) || @warn "$T conforms to $X with abstract parts: code compiled for it dispatches at run time where it uses them:\n  " * join(warns, "\n  ")
     ps = _agreement_problems(X, T, p)
     isempty(ps) || throw(ImplementError("$T's implementation of $X disagrees with its implementation of a related trait:\n  " * join(ps, "\n  ")))
+    ps = _super_param_problems(X, T, p)
+    isempty(ps) || throw(ImplementError("$T does not conform to $X: its parameters disagree with a supertrait's:\n  " * join(ps, "\n  ")))
     for Y in trait_closure(X)
         w = Y === X ? proj_witness(X, T, p) : witness(Y, p.R)
         (w isa Impl && p.R !== Nothing) || continue
@@ -712,6 +714,42 @@ function _param_bound_problems(@nospecialize(X), @nospecialize(T), p::ProjRec)
             ok || push!(out, "$Y's parameter $n is $v, outside its bound $n <: $b")
         end
     end
+    return out
+end
+
+"""
+Where `T` implements `X`, or one of its supertraits, at parameters its supertraits with parameters
+do not agree with (traits reference §3.6): after `@trait X{U, T, P} <: S{U, T, P}`, a type implements
+`X` at `U, T, P` only if it implements `S` at the same values.
+"""
+function _super_param_problems(@nospecialize(X), @nospecialize(T), p::ProjRec)
+    out = String[]
+    for Y in trait_closure(X), S in _supers(Y)
+        _super_param_problem!(out, Y, S, T, p, Y === X ? proj_witness(X, T, p) : witness(Y, p.R))
+    end
+    # a subtrait `T` was declared for before (its supertrait's implementation is checked now)
+    for Z in _declared_traits(T)
+        (Z === X || !(X in trait_closure(Z))) && continue
+        q = proj_lookup(Z, T)
+        q isa ProjRec || continue
+        for Y in trait_closure(Z), S in _supers(Y)
+            (S === X || X in trait_closure(S)) || continue
+            _super_param_problem!(out, Y, S, T, q, Y === Z ? proj_witness(Z, T, q) : witness(Y, q.R))
+        end
+    end
+    return out
+end
+function _super_param_problem!(out, @nospecialize(Y), @nospecialize(S), @nospecialize(T), p::ProjRec, @nospecialize(wY))
+    hasmethod(supertrait_args, Tuple{Type{Y},Type{S}}) || return out
+    wS = witness(S, p.R)
+    (wY === nothing || wS === nothing) && return out      # a missing implementation is reported by its own check
+    KY, _ = _key_and_slots(Y, p, T, wY)
+    KS, _ = _key_and_slots(S, p, T, wS)
+    vY = Any[param(Y, Val(n), KY) for n in trait_params(Y)]
+    want = supertrait_args(Y, S)(vY...)
+    got = Tuple(param(S, Val(n), KS) for n in trait_params(S))
+    isequal(want, got) || push!(out, "$T implements $Y at $(join(string.(vY), ", ")) and $S at $(join(string.(got), ", ")); " *
+                                      "$Y{…} <: $S{…} asks for $S at $(join(string.(want), ", ")) (the same values by name)")
     return out
 end
 
@@ -858,6 +896,7 @@ single type's implementation is at its declaration, its declared fields, and the
             append!(out, _field_problems(Y, U, p.fmap, isempty(_ops(Y)) ? Nothing : U))
         end
         append!(out, _param_bound_problems(X, U, p))
+        append!(out, _super_param_problems(X, U, p))
         errs, warns = _concrete_problems(X, U, p)
         append!(out, errs)
         isempty(out) && !isempty(warns) &&
@@ -1250,6 +1289,9 @@ value an implementation states: then the stated value is not defined again. A di
 refused: an equation always holds. `false` when the trait does not define `p` at `R`.
 """
 function _param_agrees(@nospecialize(X), p::Symbol, @nospecialize(R), @nospecialize(stated))
+    # taken from a supertrait's field: the stated value is defined, and checked against the supertrait's
+    # at the declaration (`_super_param_problems`)
+    p in Base.invokelatest(trait_super_params, X)::Tuple && return false
     Base.invokelatest(hasmethod, param, Tuple{Type{X}, Val{p}, Type{R}}) || return false
     v = try
         Base.invokelatest(param, X, Val(p), R)
@@ -1499,7 +1541,8 @@ function _implement_projection(mod::Module, head, rest; field::Int = 0, fmap = n
         X = Core.eval(mod, traits[1])
         if pexs === nothing
             # a family conforming by its fields: the trait's parameters are defined by the fields' types
-            all(q -> q in _in_decision_world(trait_field_params, X), trait_params(X)) ||
+            byfields = (_in_decision_world(trait_field_params, X)..., _in_decision_world(trait_super_params, X)...)
+            all(q -> q in byfields, trait_params(X)) ||
                 error("@implement: a family `$Tex` needs the trait's parameters")
             Tb, wh = Tex.args[1], Tex.args[2:end]
             Iex = isempty(_ops(X)) ? :Nothing : Tb

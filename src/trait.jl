@@ -332,7 +332,37 @@ macro trait(header, block = nothing)
     sigs = [(d.name, length(d.args)) for d in decls]
     length(unique(sigs)) == length(sigs) || error("@trait: an operation is declared twice with the same arity in `$name`")
     names = unique([d.name for d in decls])
-    isempty(supers) || push!(out, :($TW.supertraits(::Type{$name}) = ($(supers...),)))
+    # supertraits by their families; a supertrait with parameters (`<: IntegratorView{U, T, P}`) takes the
+    # subtrait's parameters by name (traits reference §3.6): its parameters as a function of the subtrait's
+    # (`supertrait_args`), and a subtrait parameter written bare there, that the supertrait's fields define,
+    # takes its value from the supertrait at the same type (`trait_super_params`)
+    owndef = Symbol[p for (p, _, _) in fieldparams]
+    for ex in block.args
+        ex isa Expr && ex.head === :(=) && ex.args[1] isa Symbol && ex.args[1] in pnames && push!(owndef, ex.args[1])
+    end
+    superfams = Any[]
+    superparams = Any[]                          # (p, S, i): the subtrait's `p` is parameter `i` of `S`
+    for s in supers
+        if s isa Expr && s.head === :curly
+            S, as = s.args[1], s.args[2:end]
+            push!(superfams, S)
+            push!(out, :($TW.supertrait_args(::Type{$name}, ::Type{$S}) = $(Expr(:->, Expr(:tuple, pnames...), Expr(:tuple, as...)))))
+            for (i, a) in enumerate(as)
+                (a isa Symbol && a in pnames && !(a in owndef) && !any(x -> x[1] === a, superparams)) || continue
+                push!(superparams, (a, S, i))
+                push!(out, Expr(:if, :($TW._super_field_param($S, $i)),
+                                :($TW.param(::Type{$name}, ::Val{$(QuoteNode(a))}, ::Type{K__}) where {K__} =
+                                      $TW.param($S, Val($TW.trait_params($S)[$i]), $TW._impl(K__)))))
+            end
+        else
+            push!(superfams, s)
+        end
+    end
+    isempty(superfams) || push!(out, :($TW.supertraits(::Type{$name}) = ($(superfams...),)))
+    isempty(superparams) ||
+        push!(out, :($TW.trait_super_params(::Type{$name}) =
+                         Tuple(p for (p, S, i) in $(Expr(:tuple, [Expr(:tuple, QuoteNode(p), S, i) for (p, S, i) in superparams]...))
+                               if $TW._super_field_param(S, i))))
     push!(out, :($TW.trait_ops(::Type{$name}) = $(Tuple(names))))
     done = Symbol[]
     for d in decls

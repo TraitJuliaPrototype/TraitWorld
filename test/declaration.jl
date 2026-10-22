@@ -147,3 +147,70 @@ end)
     end); nothing catch err; err end
     @test inner(e) isa ErrorException && occursin("belongs to Base", sprint(showerror, inner(e)))
 end
+
+# A supertrait with parameters takes the subtrait's parameters by name (traits §3.6; T-67, W-46,
+# E-156 P5): a type implements the subtrait at `U, T` only if it implements the supertrait at the
+# same values; a parameter the supertrait's fields define comes from there; the supertrait's
+# parameters may be written with constants and type constructors.
+toplevel(quote
+    @trait_module module DeclSup
+    using TraitWorld
+    export PView, PInt, pstep!, QInt, qn, supkind, iparams, drive!, qparams
+    @trait PView{U, T} begin
+        u::U
+        t::T
+    end
+    @trait PInt{U, T} <: PView{U, T} begin
+        pstep!(i::PInt)::Nothing
+    end
+    @trait QInt{T} <: PView{Vector{T}, Float64} begin
+        qn(q::QInt)::Int
+    end
+    supkind(i::PView) = :view
+    supkind(i::PInt) = :integrator
+    iparams(i::PInt{U, T}) where {U, T} = (U, T)
+    drive!(i::PInt{U, T}) where {U, T} = (pstep!(i); pstep!(i); i.t)    # the supertrait's field through the subtrait
+    qparams(q::QInt{T}) where {T} = (T, q.t)
+    end
+end)
+using .DeclSup
+mutable struct PI{U, T}; u::U; t::T; end
+DeclSup.pstep!(i::PI) = (i.t += one(i.t); nothing)
+mutable struct PS; u::Vector{Float64}; t::Float64; end
+DeclSup.pstep!(i::PS) = nothing
+mutable struct PS2; u::Vector{Float64}; t::Float64; end
+DeclSup.pstep!(i::PS2) = nothing
+mutable struct PF{U, T}; u::U; t::T; end
+DeclSup.pstep!(i::PF) = nothing
+mutable struct QS; u::Vector{Float32}; t::Float64; end
+DeclSup.qn(q::QS) = length(q.u)
+mutable struct QS2; u::Vector{Float32}; t::Float64; end
+DeclSup.qn(q::QS2) = length(q.u)
+toplevel(quote
+    @implement PView PI{U, T} where {U, T}
+    @implement PInt PI{U, T} where {U, T}                 # the parameters from PView's fields
+    @implement PView PS
+    @implement PView PS2
+    @implement PView PF{U, T} where {U, T}
+    @implement PInt{U, Float32} PF{U, T} where {U, T}     # a member at T ≠ Float32 disagrees with PView
+    @implement PView QS
+    @implement PView QS2
+end)
+@testset "a supertrait with parameters takes the subtrait's parameters by name" begin
+    @test supkind(PI([1.0], 0.0)) === :integrator && supkind(PS([1.0], 0.0)) === :view
+    @test iparams(PI(Float32[1], 0.0f0)) === (Vector{Float32}, Float32)
+    typed_drive(i::PI{Vector{Float64}, Float64}) = drive!(i)
+    @test typed_drive(PI([1.0], 0.0)) === 2.0
+    toplevel(:(@implement PInt{Vector{Float64}, Float64} PS2))          # the same values as PView's: accepted
+    @test iparams(PS2([1.0], 0.0)) === (Vector{Float64}, Float64)
+    e = try toplevel(:(@implement PInt{Vector{Float32}, Float64} PS)); nothing catch err; err end
+    @test inner(e) isa ImplementError && occursin("disagree", sprint(showerror, inner(e)))
+    @test supkind(PS([1.0], 0.0)) === :view                               # nothing defined
+    @test supkind(PF([1.0], 0.0f0)) === :integrator                       # a member at Float32 agrees
+    e = try supkind(PF([1.0], 0.0)); nothing catch err; err end
+    @test e isa ImplementError && occursin("asks for", sprint(showerror, e))
+    toplevel(:(@implement QInt{Float32} QS))                           # PView at Vector{Float32}, Float64
+    @test qparams(QS(Float32[1], 2.0)) === (Float32, 2.0)
+    e = try toplevel(:(@implement QInt{Float64} QS2)); nothing catch err; err end
+    @test inner(e) isa ImplementError && occursin("asks for", sprint(showerror, inner(e)))
+end

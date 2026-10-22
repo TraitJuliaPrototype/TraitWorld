@@ -1025,6 +1025,14 @@ trait_concreteness(@nospecialize(X)) = ()
 Base.Experimental.@max_methods 1 function supertraits end
 "`supertraits(X)`: traits whose operations `X` includes; their views travel with every `X` view."
 supertraits(@nospecialize(X)) = ()
+Base.Experimental.@max_methods 1 function supertrait_args end
+"`supertrait_args(X, S)`: for `@trait X{P…} <: S{A…}`, the function from `X`'s parameters to `S`'s, `(P…) -> (A…)`."
+supertrait_args
+Base.Experimental.@max_methods 1 function trait_super_params end
+"`trait_super_params(X)`: the parameters of `X` that a supertrait's fields define (`@trait X{U} <: S{U}`, `S`'s `u::U`)."
+trait_super_params(@nospecialize(X)) = ()
+"Whether parameter `i` of trait `S` is defined by its fields (its own, or a supertrait's)."
+_super_field_param(@nospecialize(S), i::Int) = (q = trait_params(S)[i]; q in trait_field_params(S) || q in trait_super_params(S))
 Base.Experimental.@max_methods 1 function bundle end
 "`bundle(X)`: for a bundle trait, the traits it names; `t::Table` means `t::(ColTable, RowTable)`."
 bundle(@nospecialize(X)) = nothing
