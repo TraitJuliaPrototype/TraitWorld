@@ -309,7 +309,13 @@ _closed_build() = Base.JLOptions().trim != 0
 @generated checked_call(f, args...) = _checked_call_body(f, args, [:(args[$i]) for i in 1:length(args)])
 # fixed arities: a call from an untyped entry dispatches on these through Julia's fast cache
 # (a varargs method makes every dynamic call build its argument tuple type)
-for n in 1:8
+"""
+The largest number of arguments with a fixed arity of `checked_call`, and of the table's pointer wrapper
+(`_UWrap`, untyped.jl). A tabled entry with more is called by a dispatch on its builder, as one with several
+trait positions.
+"""
+const _UWRAP_MAX = 16
+for n in 1:_UWRAP_MAX
     as = [Symbol(:a, i) for i in 1:n]
     @eval @generated checked_call(f, $(as...)) = _checked_call_body(f, Any[$(as...)], $(as))
 end

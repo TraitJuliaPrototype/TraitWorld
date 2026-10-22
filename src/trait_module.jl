@@ -837,8 +837,7 @@ function _rewrite_fdef(mod::Module, ex)
         # an entry of trait positions and ordinary arguments reaches the table of declared
         # implementations for `Compiled` values whose caller does not know their types (untyped.jl)
         tabled = nva == 0 && isempty(kws) && all(x -> x.kind in (:trait, :plain, :untyped), args) &&
-                 any(x -> x.kind === :trait, args) &&
-                 !any(w -> any(x -> x.kind === :plain && x.ann !== nothing && _uses(x.ann, _wherevar(w)), args), wheres)   # a holder binds no type variable
+                 any(x -> x.kind === :trait, args)
         eargs = Any[]
         stmts = Any[]
         callnames = Any[]
@@ -965,7 +964,7 @@ function _rewrite_fdef(mod::Module, ex)
                                                                      $(Expr(:new, :($TraitWorld.XAny), usyms[i])), $wsym)))
             end
             found = foldl((a, b) -> :($a & $b), [:($(bsyms[j]) isa $TraitWorld.Builder) for j in eachindex(tpos)])
-            if length(tpos) == 1
+            if length(tpos) == 1 && length(args) <= TraitWorld._UWRAP_MAX
                 # one trait position: through the pattern's pointer for the type (no second dispatch)
                 i1 = tpos[1]
                 esym = gensym(:e)
@@ -1005,8 +1004,11 @@ function _rewrite_fdef(mod::Module, ex)
                     push!(cstmts, :($TraitWorld.keeps($TraitWorld.KeepOf{typeof($fname)}()) && ($v = $TraitWorld._with_object_any($v, $xa))))
                     push!(cnames, v)
                 else
-                    # an ordinary argument: as declared (an untyped one stays `Any`, as in plain Julia)
-                    push!(cstmts, x.ann === nothing ? :($(x.name) = getfield($xa, :x)) : :($(x.name) = getfield($xa, :x)::$(x.ann)))
+                    # an ordinary argument: the entry's dispatch has checked its declared type. A concrete type is
+                    # asserted (the worker's call a fact); any other, an untyped one and one naming a `where`
+                    # variable stay as they came, and the worker is selected by the value's own type (lowering §9.3)
+                    plainval = x.ann === nothing || any(w -> _uses(x.ann, _wherevar(w)), wheres)
+                    push!(cstmts, plainval ? :($(x.name) = getfield($xa, :x)) : :($(x.name) = $TraitWorld._held_as($xa, $(x.ann))))
                     push!(cnames, x.name)
                 end
             end
