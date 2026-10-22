@@ -146,8 +146,9 @@ function _worker_problems(@nospecialize(sig), seen, out, root::Bool)
             # a call without trait objects: any Julia code (wrapping by facts)
             any(k -> _hastobj(ats[k]), 2:length(ats)) || continue
             line = _line_of(src, mi, i)
-            # a field its traits declare: `t.f`, and `t.f = x` unless the field is `const`
-            if (f === Base.getproperty || f === Base.setproperty!) && length(ats) >= 3 && _istobj(ats[2])
+            # a field its traits declare: `t.f`, and `t.f = x` unless the field is `const`; `t.f .+= x`
+            # reads the field by `Base.dotgetproperty` (Julia's lowering of a dotted update)
+            if (f === Base.getproperty || f === Base.dotgetproperty || f === Base.setproperty!) && length(ats) >= 3 && _istobj(ats[2])
                 nm = _CC.argextype(ex.args[3], src, sptypes)
                 fname = nm isa _CC.Const ? nm.val : nothing
                 fname isa Symbol && _declares_field(ats[2], fname, f === Base.setproperty!) && continue
@@ -215,7 +216,7 @@ function _worker_problems(@nospecialize(sig), seen, out, root::Bool)
                         if f isa Function && !isempty(traits_at(f, k - 1, length(ats) - 1))
                             push!(out, "$line: a trait object carrying $(_traitnames(ats[k])) is passed to `$fname`, whose " *
                                        "methods need other traits at argument $(k-1). Declare the bounds it needs, so the caller projects each (rule 2)")
-                        elseif f === Base.getproperty || f === Base.setproperty!
+                        elseif f === Base.getproperty || f === Base.dotgetproperty || f === Base.setproperty!
                             push!(out, "$line: `t.field`: the user's data is reached only through the trait's operations")
                         else
                             push!(out, "$line: a trait object carrying $(_traitnames(ats[k])) is passed to `$fname`, an ordinary " *

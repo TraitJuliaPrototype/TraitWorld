@@ -156,3 +156,31 @@ end)
     e = firstuse(() -> setflag!(FamMiss(1)))
     @test e isa ImplementError && occursin("no field", sprint(showerror, e))
 end
+
+# a dotted update of a declared field, `t.u .+= x`: Julia lowers it to `Base.dotgetproperty`,
+# a read of the field (traits §5.3; T-65, found by E-156 P11)
+toplevel(quote
+    @trait_module module FieldDot
+    using TraitWorld
+    export Integ, bump!, bumpsecret!
+    @trait Integ begin
+        @const u::Vector{Float64}
+        @const du::Vector{Float64}
+    end
+    bump!(i::Integ) = (i.u .+= i.du; i.u .*= 2.0; i.u[1])
+    end
+    using .FieldDot
+    @trait_module module FieldDotBad
+    using TraitWorld, ..FieldDot
+    bumpsecret!(i::Integ) = (i.secret .+= 1.0; nothing)     # a field no trait declares
+    end
+    struct DotInteg; u::Vector{Float64}; du::Vector{Float64}; secret::Vector{Float64}; end
+    @implement Integ DotInteg
+end)
+@testset "a dotted update of a declared field" begin
+    @test isempty(check_definitions(Main.FieldDot))
+    d = DotInteg([1.0], [2.0], [0.0])
+    @test FieldDot.bump!(d) == 6.0 && d.u == [6.0]
+    e = try check_definitions(Main.FieldDotBad); nothing catch err; err end
+    @test e isa TraitUseError && occursin("secret", join(e.problems))
+end
