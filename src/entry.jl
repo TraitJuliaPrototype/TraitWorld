@@ -597,6 +597,16 @@ function _pmatch(@nospecialize(Xi), @nospecialize(Yp))
     return true
 end
 
+"Whether trait object type `V` carries `RT` at the parameters `RT` fixes."
+@generated function _tobj_matches(::Type{V}, ::Type{RT}) where {V,RT}
+    V <: TObj || return false
+    F = _family(RT)
+    for Vt in ((V::DataType).parameters[2]::DataType).parameters
+        Xi = Base.unwrap_unionall((Vt::DataType).parameters[1])
+        _family(Xi) === F && return _pmatch(Xi, RT)
+    end
+    return false
+end
 """
 A worker signature no method of `f` accepts: a value conforms, but at parameters no bound
 accepts. Raised at the signature's first call (`_check_once`), naming the bounds.

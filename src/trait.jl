@@ -384,10 +384,11 @@ macro trait(header, block = nothing)
         # the declared result at the parameters the `Dynamic` fixes (`Any` where it names `Self` or an
         # open parameter), as a declared field's type is read (lowering §13); a constant where it is compiled
         X__ = gensym(:X)
+        # (a `Dynamic{Y}` where the declared result is a trait `Y`, traits reference §6.2)
         retx = _mentions(d.ret, Rsym) ? :Any :
                any(p -> _mentions(d.ret, p), pnames) ?
-                   :($TW._erased_ft($TW.op_ret($name, Val($(QuoteNode(d.name))), $TW._erased_key_of($X__), Val($(length(d.args)))))) :
-               d.ret
+                   :($TW._result_decl($TW._erased_ft($TW.op_ret($name, Val($(QuoteNode(d.name))), $TW._erased_key_of($X__), Val($(length(d.args))))))) :
+               :($TW._result_decl($(d.ret)))
         # a constructor operation (result R) gives a dynamic value of the same implementation
         call = :($(d.fexpr)($TW.opened(dyn), $(syms...)))
         if d.ret === Rsym

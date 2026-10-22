@@ -269,12 +269,27 @@ function conformance_problems(@nospecialize(X), @nospecialize(R), ops)
             T = Base.infer_return_type(f, sig; _check_kw_at(sig)...)
             if T === Union{}
                 push!(problems, "`$op` at $sig always throws (inferred `Union{}`): a fallback, not an implementation")
-            elseif !(T <: D)
+            elseif !_result_conforms(T, D)
                 push!(problems, "`$op` at $sig returns `$T`, declared `$D`")
             end
         end
     end
     return problems
+end
+
+"""
+Whether an operation's inferred result `T` meets its declared result `D`: `T <: D`; where `D` is a
+trait (traits reference §6.2), every type `T` may be conforms to `D` at the parameters `D` fixes, or
+is already a `Dynamic{D}`.
+"""
+function _result_conforms(@nospecialize(T), @nospecialize(D))
+    T <: D && return true
+    D isa Type && is_trait(D) || return false
+    for Ti in Base.uniontypes(T)
+        Ti <: Dynamic{D} && continue
+        (Ti isa DataType && isconcretetype(Ti) && conforms(Ti, D)) || return false
+    end
+    return true
 end
 
 # keyed by Pair{Any,Any}: one specialization of the dictionary code, held in this image (a tuple key
@@ -413,7 +428,7 @@ function _generic_problems(@nospecialize(X), k::Symbol, g::GenericRec, sub::Tupl
             T = Base.infer_return_type(generic_op, Tuple{Type{X},Val{k},Val{op},S,A.parameters...}; _check_kw()...)
             if T === Union{}
                 push!(problems, "`$op` always throws at $R (inferred `Union{}`)")
-            elseif !(T <: D)
+            elseif !_result_conforms(T, D)
                 push!(problems, "`$op` returns `$T` at $R, declared `$D`")
             end
         end

@@ -1056,8 +1056,31 @@ the declared type. Everything folds for a known view type.
     # at the erased key (a `Dynamic` trait object): the call-site split over the held object
     getfield(v, :w) isa ErasedWit && return _erased_op(X, f, RT, v, args...)
     x = _dispatch(X, Val(op), f, getfield(v, :w), _rep(v), t, args...)
-    return x::RT
+    return _op_result(RT, x)
 end
+
+"""
+The result of an operation declared `RT`: asserted to `RT`; where `RT` is a trait (an operation's
+result declared with a trait, traits reference §6.2), a `Dynamic{RT}` of the returned value, refused
+if the value does not conform to `RT` at the parameters it fixes. A generator, so the choice folds.
+"""
+@generated function _op_result(::Type{RT}, x) where {RT}
+    is_trait(RT) || return :(x::RT)
+    return :(_trait_result(RT, x))
+end
+"The type an operation declared `RT` returns: `Dynamic{RT}` where `RT` is a trait, else `RT`."
+@generated _result_decl(::Type{RT}) where {RT} = is_trait(RT) ? :($(Dynamic{RT})) : :($RT)
+"A value returned where a trait is declared: kept as a `Dynamic` of that trait, its conformance checked."
+@inline function _trait_result(::Type{RT}, x) where {RT}
+    x isa HeldValue && return Dynamic{RT}(x)::Dynamic{RT}       # one that carries an attribute keeps it, or is refused
+    v = _assemble(_family_list(RT), x)
+    v === NOTRAIT && _result_nonconforming(RT, x)
+    _tobj_matches(typeof(v), RT) || _result_nonconforming(RT, x)
+    _register_candidate!(_family_of(RT), typeof(x))
+    return invoke(Dynamic{RT}, Tuple{Val{:checked},Any}, Val(:checked), x)::Dynamic{RT}
+end
+@noinline _result_nonconforming(@nospecialize(RT), @nospecialize(x)) =
+    throw(TraitBoundError("an operation declared to return $RT returned a $(typeof(x)), which does not conform to $RT"))
 
 # A default receives the whole trait object, with its supertraits' views, so it
 # may call their operations too (`lastel(r) = r[length(r)]` with `length` from HasLength).

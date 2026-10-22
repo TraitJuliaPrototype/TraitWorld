@@ -143,3 +143,59 @@ end)
     @test typeof(TraitWorld.opened(cs[1])) === typeof(TraitWorld.opened(Dynamic{D.DCol}([1.0])))
     @test fieldcount(typeof(getfield(TraitWorld.opened(gs[1]), :views))) == 2
 end
+
+# An operation's result declared with a trait is `Dynamic`: its declared type is the trait
+# (traits reference §6.2; E-156 P12, P14). The value returned is checked to conform at the
+# parameters the declared trait fixes; a member's result check accepts a conforming type.
+toplevel(quote
+    @trait_module module DynRes
+    using TraitWorld
+    export Box, bval, Maker, make, readmade, readdyn, madeup, Fac, fmake, fread
+    @trait Box{T} begin
+        @const v::T
+        bval(b::Box{T})::T
+    end
+    @trait Maker{T} begin
+        @const seed::T
+        make(m::Maker{T}, k)::Box{T}                 # a trait-typed result, at the maker's parameter
+    end
+    readmade(m::Maker{T}, k::Int) where {T} = (b = make(m, k); bval(compiled_for(b)) + b.v)
+    readdyn(m::Maker{T}, k::Int) where {T} = bval(make(m, k))
+    madeup(m::Maker{T}, k::Int) where {T} = make(m, k)  # handed to plain code: a kept value may go up
+    @trait Fac{T} begin
+        fmake(f::Fac{T})::Box{T}
+    end
+    fread(f::Fac{T}) where {T} = bval(fmake(f))
+    end
+    using .DynRes
+
+    struct RBox{T}; v::T; end
+    DynRes.bval(b::RBox) = b.v
+    @implement Box RBox{T} where {T}
+    struct RMaker{T}; seed::T; end
+    DynRes.make(m::RMaker, k) = RBox(m.seed * k)
+    @implement Maker RMaker{T} where {T}
+    struct WrongMaker; seed::Float64; end
+    DynRes.make(m::WrongMaker, k) = RBox(Float32(m.seed * k))   # a Box at another parameter: `k` untyped,
+    @implement Maker WrongMaker                                   # so refused at the call
+    struct RFac{T}; x::T; end
+    DynRes.fmake(f::RFac) = RBox(f.x)                     # infers RBox{T}: conforms to Box{T}
+    @implement Fac{T} RFac{T} where {T}
+    struct BadFac{T}; x::T; end
+    DynRes.fmake(f::BadFac) = f.x                         # not a Box
+    @implement Fac{T} BadFac{T} where {T}
+end)
+
+@testset "an operation's result declared with a trait is Dynamic" begin
+    R = Main.DynRes
+    @test R.madeup(Main.RMaker(2.0), 3) isa Dynamic{R.Box{Float64}}
+    typed_read(m::Main.RMaker{Float64}) = R.readmade(m, 3)
+    @test typed_read(Main.RMaker(2.0)) == 12.0
+    @test R.readmade(Main.RMaker(2), 3) === 12
+    @test R.readdyn(Main.RMaker(2.0), 2) == 4.0
+    @test R.fread(Main.RFac(1.5)) == 1.5                  # the member's result check accepts a conforming type
+    e = try R.readdyn(Main.WrongMaker(1.0), 2); nothing catch err; err end
+    @test e isa TraitBoundError && occursin("does not conform", sprint(showerror, e))
+    e = try R.fread(Main.BadFac(1.5)); nothing catch err; err end
+    @test e isa ImplementError && occursin("declared", sprint(showerror, e))
+end

@@ -97,7 +97,7 @@ of the new value.
     RT === ErasedSelf && return f(invoke(Dynamic{X}, Tuple{Val{:checked},Any}, Val(:checked), o)::Dynamic{X}, args...)
     Xp = _view_trait(typeof(v))
     d = invoke(Dynamic{Xp}, Tuple{Val{:checked},Any}, Val(:checked), o)::Dynamic{Xp}
-    return f(d, args...)::RT
+    return _op_result(RT, f(d, args...))
 end
 """
 The trait of view type `Vw` at the parameter values its key carries, without the key
