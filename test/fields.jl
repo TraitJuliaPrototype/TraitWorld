@@ -117,3 +117,42 @@ end)
 
     @test isempty(check_definitions(Main.FieldSolv))
 end
+
+# a family member's declared fields are checked at its first use, as a single type's at its
+# declaration (traits §4.7, §4.9; T-63, found by E-156 P9): a trait's write goes by pointer, so a
+# `const` field must be refused before it is written
+toplevel(quote
+    @trait_module module FieldFam
+    using TraitWorld
+    export Flagged, setflag!
+    @trait Flagged begin
+        u_modified::Bool
+    end
+    setflag!(f::Flagged) = (f.u_modified = true; nothing)
+    end
+    using .FieldFam
+    mutable struct FamGood{T}; x::T; u_modified::Bool; end
+    mutable struct FamBad{T}; x::T; u_modified::Int; end
+    mutable struct FamConst{T}; x::T; const u_modified::Bool; end
+    struct FamMiss{T}; x::T; end
+    @implement Flagged FamGood{T} where {T}
+    @implement Flagged FamBad{T} where {T}
+    @implement Flagged FamConst{T} where {T}
+    @implement Flagged FamMiss{T} where {T}
+end)
+@testset "family members: declared fields checked at first use" begin
+    firstuse(f) = try Base.invokelatest(f); nothing catch err
+        while err isa LoadError || (hasfield(typeof(err), :error) && getfield(err, :error) isa Exception); err = getfield(err, :error); end
+        err
+    end
+    g = FamGood(1, false)
+    @test firstuse(() -> setflag!(g)) === nothing && g.u_modified
+    c = FamConst(1, false)
+    e = firstuse(() -> setflag!(c))
+    @test e isa ImplementError && occursin("const", sprint(showerror, e))
+    @test c.u_modified == false                          # the const field was not written
+    e = firstuse(() -> setflag!(FamBad(1, 0)))
+    @test e isa ImplementError && occursin("exactly that type", sprint(showerror, e))
+    e = firstuse(() -> setflag!(FamMiss(1)))
+    @test e isa ImplementError && occursin("no field", sprint(showerror, e))
+end

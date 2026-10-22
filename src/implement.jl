@@ -825,7 +825,7 @@ end
 """
 The problems of concrete type `U` as a member of a family implementation of `X`: the operations the
 family's methods serve (those written in its block, or the existing methods), checked at `U` as a
-single type's implementation is at its declaration, and the parameters' bounds.
+single type's implementation is at its declaration, its declared fields, and the parameters' bounds.
 """
 @machinery function _member_problems(@nospecialize(X), @nospecialize(U))
     (U isa DataType && isconcretetype(U)) || return String[]
@@ -837,6 +837,11 @@ single type's implementation is at its declaration, and the parameters' bounds.
     end
     p = proj_lookup(X, U)
     if p !== nothing
+        # the declared fields, as at a single type's declaration (`_check_own_fields_now`): a write
+        # through the trait goes by pointer, so a `const` or missing field must be refused here
+        for Y in trait_closure(X)
+            append!(out, _field_problems(Y, U, p.fmap, isempty(_ops(Y)) ? Nothing : U))
+        end
         append!(out, _param_bound_problems(X, U, p))
         errs, warns = _concrete_problems(X, U, p)
         append!(out, errs)
