@@ -211,5 +211,10 @@ end)
     holes(m) = filter(h -> !h.errorpath, Base.invokelatest(verify_main, getglobal(Main, m), (Vector{String},)).holes)
     cr = holes(:cross_main)
     @test !any(h -> h.callee in (TraitWorld.crossed, TraitWorld._satisfies, TraitWorld._cross_decide), cr)
-    @test Set(h.kind for h in cr) ⊆ Set(h.kind for h in holes(:explicit_main))
+    # with a family member's builder folded (W-40), the crossing's call into the worker is static with the
+    # user's untyped container as its argument: verify_main reports that site as a trait argument of unknown
+    # type (`:trait_arg`) where the call was a dispatch before; the same sites, no new ones
+    ex = holes(:explicit_main)
+    @test Set(h.kind for h in cr) ⊆ union(Set(h.kind for h in ex), Set([:trait_arg]))
+    @test all(h -> h.kind !== :trait_arg || h.callee === TraitWorld.checked_call, cr)
 end
