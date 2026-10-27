@@ -191,7 +191,44 @@ first-seen rule applies, and the parameter becomes the stored form's type (the u
 `Compiled` value, `Dynamic{X}` for a `Dynamic` one). Returns the struct and that constructor, or
 `nothing` for a struct without such parameters.
 """
+"""
+The bound at the field (traits reference §7.4): `f::(F <: Bound)` in a trait module's struct adds
+`F <: Bound` to the struct's parameters, after the header's, in field order, and types the field
+`f::F`. Then `F` is a bounded parameter as if written in the header.
+"""
+function _field_bounds(ex::Expr)
+    body = ex.args[3]
+    body isa Expr && body.head === :block || return ex
+    added = Any[]
+    newbody = Any[]
+    isfb(t) = t isa Expr && t.head === :(<:) && length(t.args) == 2 && t.args[1] isa Symbol
+    for f in body.args
+        g = f isa Expr && f.head === :const ? f.args[1] : f
+        if g isa Expr && g.head === :(::) && length(g.args) == 2 && isfb(g.args[2])
+            F = g.args[2].args[1]
+            push!(added, g.args[2])
+            ng = Expr(:(::), g.args[1], F)
+            push!(newbody, f isa Expr && f.head === :const ? Expr(:const, ng) : ng)
+        else
+            push!(newbody, f)
+        end
+    end
+    isempty(added) && return ex
+    header = ex.args[2]
+    sup = header isa Expr && header.head === :(<:) ? header.args[2] : nothing
+    h = sup === nothing ? header : header.args[1]
+    hc = h isa Expr && h.head === :curly ? h : Expr(:curly, h)
+    have = Set{Any}(_paramname(p) for p in hc.args[2:end])
+    for a in added
+        a.args[1] in have && error("@trait_module: struct $(hc.args[1]): parameter `$(a.args[1])` is bounded at a field and declared in the header too")
+        push!(have, a.args[1])
+    end
+    nh = Expr(:curly, hc.args..., added...)
+    return Expr(:struct, ex.args[1], sup === nothing ? nh : Expr(:(<:), nh, sup), Expr(:block, newbody...))
+end
+
 function _bounded_struct(mod::Module, ex::Expr)
+    ex = _field_bounds(ex)
     header = ex.args[2]
     sup = header isa Expr && header.head === :(<:) ? header.args[2] : nothing
     h = sup === nothing ? header : header.args[1]

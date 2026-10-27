@@ -35,6 +35,11 @@ toplevel(quote
         x::T
     end
     applyh(h::Holder) = h.f(h.x)
+    struct HolderF{T}                                  # the bound at the field (traits reference §7.4, W-42): the same type as Holder's
+        f::(F <: Callable{Tuple{T}, T})
+        x::T
+    end
+    applyhf(h::HolderF) = h.f(h.x)
     struct ShapeBox{S <: Shape}
         s::S
     end
@@ -148,4 +153,16 @@ end
         e
     end
     @test err isa LoadError                                              # a bounded parameter types one field
+end
+
+@testset "the bound at the field: the same struct as the bound in the header (W-42)" begin
+    C = Main.Carry
+    @test length(C.HolderF.parameters) == 2 && C.HolderF.parameters[2].name === :F
+    sq(x) = x^2
+    h1, h2 = C.Holder(sq, 3), C.HolderF(sq, 3)
+    @test typeof(h1).parameters == typeof(h2).parameters                  # F the stored form's type, as Callable's default gives it
+    @test C.applyh(h1) == C.applyhf(h2) == 9
+    h3 = C.HolderF(compiled_for(sq), 3)
+    @test typeof(h3).parameters[2] === typeof(sq)
+    @test fieldtype(typeof(h3), :f) === typeof(sq)
 end
