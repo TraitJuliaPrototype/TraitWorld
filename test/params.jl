@@ -169,3 +169,27 @@ end)
     while e isa LoadError; e = e.error; end
     @test e isa ImplementError && occursin("rule 3", sprint(showerror, e))
 end
+
+# A kept form fixes the trait's parameters (traits reference §7.1, T-70, W-48): a value whose type
+# implements the trait only at other parameters is refused when the kept value is made
+@testset "kept forms check the fixed parameters" begin
+    toplevel(quote
+        @trait_module module KPar
+        using TraitWorld
+        export KShape, karea
+        @trait KShape{P} begin
+            karea(s::KShape{P}, p::P)::Float64
+        end
+        struct KSq end
+        karea(s::KSq, p::Vector{Float64}) = p[1]^2
+        @implement KShape{Vector{Float64}} KSq
+        end
+    end)
+    M = Base.invokelatest(getglobal, Main, :KPar)
+    S, Sq = Base.invokelatest(getglobal, M, :KShape), Base.invokelatest(getglobal, M, :KSq)
+    for K in (Kept, Dynamic, Compiled)
+        @test_throws TraitBoundError Base.invokelatest(K{S{Int}}, Base.invokelatest(Sq))
+        k = Base.invokelatest(K{S{Vector{Float64}}}, Base.invokelatest(Sq))
+        @test Base.invokelatest(Base.invokelatest(getglobal, M, :karea), k, [3.0]) == 9.0
+    end
+end

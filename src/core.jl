@@ -394,6 +394,18 @@ only by stakeholders and pirates. Untyped, `length(u.parameters)` left an edge a
 ::Any)`, which Unitful matches, and a package loaded before TraitWorld made the image's code invalid.
 """
 @generated _carries_static(::Type{T}, ::Type{X}) where {T,X} = _carries(T, X)
+"""
+The trait object of `x` for a kept form of `X`, or `NOTRAIT`: `x`'s type must implement `X`'s family,
+and at the parameters `X` fixes (traits reference §7.1): `Kept{Shape{Int}}(x)` refuses a value whose
+type implements `Shape` only at other parameters. The parameters are compared on the trait object's
+tags, a constant where `x`'s type is known.
+"""
+@inline function _assemble_at(::Type{X}, x) where {X}
+    v = _assemble(_family_list(X), x)
+    v === NOTRAIT && return NOTRAIT
+    return _carries_static(_tags_of(typeof(v)), X) ? v : NOTRAIT
+end
+_tags_of(::Type{<:TObj{T}}) where {T} = T
 
 # --- dynamic values ----------------------------------------------------------
 
@@ -433,7 +445,7 @@ struct Dynamic{X}
         return new{X}(o)
     end
     @inline function Dynamic{X}(x) where {X}
-        v = _assemble(_family_list(X), x)
+        v = _assemble_at(X, x)
         v === NOTRAIT && _dyn_nonconforming(X, x)
         _register_candidate!(_family_of(X), typeof(x))
         return new{X}(x)
@@ -474,7 +486,7 @@ struct Compiled{X}
         return new{X}(o)
     end
     @inline function Compiled{X}(x) where {X}
-        v = _assemble(_family_list(X), x)
+        v = _assemble_at(X, x)
         v === NOTRAIT && _dyn_nonconforming(X, x)
         _register_candidate!(_family_of(X), typeof(x))
         return new{X}(x)
@@ -720,7 +732,7 @@ end
 "Whether `x` conforms to `X`, registering its type as a candidate (the check `@dynamic_of` splits; folded for a candidate)."
 struct _ConformsTo{X} end
 @inline function (::_ConformsTo{X})(x) where {X}
-    _assemble(_family_list(X), x) === NOTRAIT && return false
+    _assemble_at(X, x) === NOTRAIT && return false
     _register_candidate!(_family_of(X), typeof(x))
     return true
 end

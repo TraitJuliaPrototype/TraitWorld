@@ -218,7 +218,7 @@ function _compiled_item_type(::Type{X}, ::Type{E}) where {X, E}
 end
 "The trait object of an item at its own key, or an error if it does not conform."
 @inline function _item_tobj(::Type{X}, x) where {X}
-    v = TraitWorld._assemble(TraitWorld._family_list(X), x)
+    v = TraitWorld._assemble_at(X, x)
     v === TraitWorld.NOTRAIT && TraitWorld._dyn_nonconforming(X, x)
     return v
 end
