@@ -38,12 +38,16 @@ function _on_package_load_callback(id::Base.PkgId)
     return nothing
 end
 
+
+include("ownership.jl")
+include("compiler.jl")
+
 """
 After a package load: the generation moves (a load can bring implementations
 without running `@implement` here), and the overrides the image hook left
 inactive are reported.
 """
-function _on_package_load(id::Base.PkgId)
+@machinery function _on_package_load(id::Base.PkgId)   # compiled by facts: later loads do not invalidate it (E-169)
     _bump!()
     m = get(Base.loaded_modules, id, nothing)
     m isa Module || return nothing
@@ -53,8 +57,6 @@ function _on_package_load(id::Base.PkgId)
     return nothing
 end
 
-include("ownership.jl")
-include("compiler.jl")
 include("core.jl")
 include("trait.jl")
 include("implement.jl")
@@ -188,6 +190,10 @@ if ccall(:jl_generating_output, Cint, ()) == 1
     precompile(_on_image_methods_hook, (Vector{Any}, String))
     precompile(_on_method_definition_hook, (Method, Bool))
     precompile(_on_package_load_callback, (Base.PkgId,))
+    # the hooks' bodies, reached through `invokelatest`: without these, every session compiles them at its
+    # first image load (0.26 s of D's 0.81 s load, E-169)
+    precompile(_on_image_methods, (Vector{Any}, String))
+    precompile(_on_method_definition, (Method, Bool))
 end
 
 end
