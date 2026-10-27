@@ -620,7 +620,8 @@ A plain value assigned where a trait's name is declared: first seen there, the t
 no TraitWorld type: `Base.convert(::Type{ColorSpec}, c::Symbol) = RGBA(c)`.
 """
 function Base.convert(::Type{Kept{X}}, x) where {X}
-    _assemble_at(X, x) === NOTRAIT || return Kept{X}(x)
+    # a `Callable` takes a function by its signature, through its own constructors (entry.jl)
+    (X <: Callable || _assemble_at(X, x) !== NOTRAIT) && return Kept{X}(x)
     return Kept{X}(convert(X, x))
 end
 Base.convert(::Type{Kept{X}}, t::Union{TObj,Dynamic{X},Compiled{X}}) where {X} = Kept{X}(t)
