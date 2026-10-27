@@ -337,6 +337,31 @@ function _cache_antichain(deps::Vector{Base.PkgId}, closure)
     return sort!([p for p in deps if !any(q -> q != p && p in get(closure, q, ()), deps)]; by = string)
 end
 
+"The packages a part's key implies: the key's and everything they depend on."
+_cache_reach(key::Vector{Base.PkgId}, closure) = union(Set(key), (get(closure, k, Set{Base.PkgId}()) for k in key)...)
+
+"""
+A part costs about 8 ms to load whatever its size (E-180), so a part with fewer than `JULIA_TW_CACHE_MIN_PART`
+entries (64) joins a part whose key implies its own (its packages are loaded whenever that part's are), the one
+that implies the fewest packages. A small part that no other covers stays.
+"""
+function _cache_merge_small!(groups::Dict{Vector{Base.PkgId},Vector{UInt64}}, closure)
+    minpart = parse(Int, get(ENV, "JULIA_TW_CACHE_MIN_PART", "64"))
+    reach = Dict(k => _cache_reach(k, closure) for k in keys(groups))
+    for small in sort!([k for (k, v) in groups if length(v) < minpart]; by = k -> length(groups[k]))
+        haskey(groups, small) || continue
+        best = nothing
+        for (k, r) in reach
+            (k == small || !haskey(groups, k)) && continue
+            all(p -> p in r, small) || continue
+            (best === nothing || length(r) < length(reach[best])) && (best = k)
+        end
+        best === nothing && continue
+        append!(groups[best], pop!(groups, small))
+    end
+    return groups
+end
+
 """
     _cache_build(dir)
 
@@ -373,6 +398,7 @@ function _cache_build(dir::String)
         for (h, (_, deps)) in store.entries
             push!(get!(groups, _cache_antichain(_cache_id.(deps), closure), UInt64[]), h)
         end
+        _cache_merge_small!(groups, closure)
         parts = joinpath(dir, "parts")
         mkpath(parts)
         tw = Base.PkgId(@__MODULE__)
