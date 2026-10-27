@@ -1163,14 +1163,9 @@ struct Erased{A,S}
     obj::Any
 end
 struct _CallWrap{S} end
-# fixed arities: a varargs callee would not be specialized behind the pointer
-(::_CallWrap{S})(o) where {S} = o()::S
-(::_CallWrap{S})(o, a) where {S} = o(a)::S
-(::_CallWrap{S})(o, a, b) where {S} = o(a, b)::S
-(::_CallWrap{S})(o, a, b, c) where {S} = o(a, b, c)::S
-(::_CallWrap{S})(o, a, b, c, d) where {S} = o(a, b, c, d)::S
-(::_CallWrap{S})(o, a, b, c, d, e) where {S} = o(a, b, c, d, e)::S
-(::_CallWrap{S})(o, a, b, c, d, e, f) where {S} = o(a, b, c, d, e, f)::S
+# one method for every arity: `Vararg{Any,N}` specializes on the arity, so the `cfunction` compiles the exact
+# call behind the pointer (E-197: as fast as fixed arities, no dynamic call at 12 arguments)
+(::_CallWrap{S})(o, args::Vararg{Any,N}) where {S,N} = o(args...)::S
 # The callee side declares concrete types (`Ref{T}` for non-bits values), so
 # the call inside is static; the caller passes non-bits values as boxes
 # (`Any`): the same pointer, without allocating a `RefValue`.
@@ -1195,9 +1190,7 @@ Erased{A,S}(@nospecialize(f)) where {A,S} = Erased{A,S}(_PtrCell(C_NULL), f)
     return p
 end
 @generated function (e::Erased{A,S})(args...) where {A,S}
-    aps = (A::DataType).parameters
-    length(aps) <= 6 || return :(error("Erased: at most 6 arguments"))
-    ats = Any[_ctype(a) for a in aps]
+    ats = Any[_ctype(a) for a in (A::DataType).parameters]
     argex = [:(args[$i]) for i in 1:length(ats)]
     return quote
         Base.@_inline_meta

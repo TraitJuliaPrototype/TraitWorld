@@ -682,6 +682,9 @@ userdbl(x) = 2x
     @test cmap(compiled_for(userdbl), v, 1) == [2.0, 4.0] && csum(with_dynamic(userdbl), v, 1) == 6.0
     @test csum(abs2, v, 1) == 5.0 && cmap(abs2, v, 1) == [1.0, 4.0]   # Base's function: not affected by Callable's Dynamic default
     @test cboth(with_dynamic(x -> x + one(x)), 1.5, 2) == (2.5, 3)
+    # any number of arguments behind the pointer (T-51 retired, E-197)
+    @test TraitWorld.Erased{NTuple{8,Float64},Float64}(+)(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0) == 36.0
+    @test TraitWorld.Erased{NTuple{7,String},Int}((xs...) -> sum(length, xs))("a", "bb", "", "c", "d", "e", "f") == 7
     @test_throws LoadError Core.eval(Main, :(@trait_module module OldSpec
         using TraitWorld, ..Columns
         f(@specialize(g::Callable{Tuple{Float64},Float64}), t::ColTable) = g(1.0)
