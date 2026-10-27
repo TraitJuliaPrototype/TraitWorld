@@ -157,7 +157,7 @@ end
 
 @testset "the bound at the field: the same struct as the bound in the header (W-42)" begin
     C = Main.Carry
-    @test length(C.HolderF.parameters) == 2 && C.HolderF.parameters[2].name === :F
+    @test (u = Base.unwrap_unionall(C.HolderF); length(u.parameters) == 2 && u.parameters[2].name === :F)
     sq(x) = x^2
     h1, h2 = C.Holder(sq, 3), C.HolderF(sq, 3)
     @test typeof(h1).parameters == typeof(h2).parameters                  # F the stored form's type, as Callable's default gives it
