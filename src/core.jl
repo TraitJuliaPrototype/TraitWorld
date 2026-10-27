@@ -613,8 +613,16 @@ end
     return Kept{X}(Val(:of), c, !dyn)
 end
 Base.convert(::Type{Kept{X}}, k::Kept{X}) where {X} = k
-"A plain value assigned where a trait's name is declared: first seen there, the trait's default (traits reference §7)."
-Base.convert(::Type{Kept{X}}, x) where {X} = Kept{X}(x)
+"""
+A plain value assigned where a trait's name is declared: first seen there, the trait's default
+(traits reference §7). A value that does not conform is translated first by the library's
+`convert(X, x)` to its trait (traits reference §7.3), a method the trait's owner defines, naming
+no TraitWorld type: `Base.convert(::Type{ColorSpec}, c::Symbol) = RGBA(c)`.
+"""
+function Base.convert(::Type{Kept{X}}, x) where {X}
+    _assemble_at(X, x) === NOTRAIT || return Kept{X}(x)
+    return Kept{X}(convert(X, x))
+end
 Base.convert(::Type{Kept{X}}, t::Union{TObj,Dynamic{X},Compiled{X}}) where {X} = Kept{X}(t)
 Base.convert(::Type{Dynamic{X}}, t::TObj) where {X} = Dynamic{X}(t)
 Base.convert(::Type{Compiled{X}}, t::TObj) where {X} = Compiled{X}(t)

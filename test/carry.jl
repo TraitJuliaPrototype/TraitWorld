@@ -166,3 +166,32 @@ end
     @test typeof(h3).parameters[2] === typeof(sq)
     @test fieldtype(typeof(h3), :f) === typeof(sq)
 end
+
+@testset "a library's conversion to its trait at a store (traits reference §7.3, W-44)" begin
+    toplevel(quote
+        @trait_module module ConvLib
+        using TraitWorld
+        export Hue, hue
+        @trait Hue begin
+            hue(h::Hue)::Float64
+        end
+        struct Deg; d::Float64; end
+        hue(x::Deg) = x.d
+        @implement Hue Deg
+        Base.convert(::Type{Hue}, s::Symbol) = s === :red ? Deg(0.0) : Deg(120.0)   # the library's translation
+        mutable struct Pen
+            h::Hue                                        # Kept{Hue}
+        end
+        penhue(p::Pen) = hue(p.h)
+        end
+    end)
+    M = Base.invokelatest(getglobal, Main, :ConvLib)
+    g(s) = Base.invokelatest(getglobal, M, s)
+    p = Base.invokelatest(g(:Pen), Base.invokelatest(g(:Deg), 30.0))
+    @test Base.invokelatest(g(:penhue), p) == 30.0
+    Base.invokelatest(setproperty!, p, :h, :green)                     # translated by convert(Hue, :green)
+    @test Base.invokelatest(g(:penhue), p) == 120.0
+    Base.invokelatest(setproperty!, p, :h, with_dynamic(Base.invokelatest(g(:Deg), 5.0)))   # a cast keeps its attribute
+    @test !TraitWorld._held_compiled(getfield(p, :h)) && Base.invokelatest(g(:penhue), p) == 5.0
+    @test_throws MethodError Base.invokelatest(setproperty!, p, :h, 1)  # no translation for an Int
+end
