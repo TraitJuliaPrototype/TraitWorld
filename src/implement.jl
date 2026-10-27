@@ -897,6 +897,11 @@ single type's implementation is at its declaration, its declared fields, and the
         end
         append!(out, _param_bound_problems(X, U, p))
         append!(out, _super_param_problems(X, U, p))
+        # a subtrait's implementation requires one of each supertrait (traits reference §3.6, T-71)
+        for Y in trait_closure(X)
+            _family(Y) === _family(X) && continue
+            witness(Y, p.R) === nothing && push!(out, "$U does not implement $Y, a supertrait of $X: implement it too (for a family, by a family of $Y)")
+        end
         errs, warns = _concrete_problems(X, U, p)
         append!(out, errs)
         isempty(out) && !isempty(warns) &&

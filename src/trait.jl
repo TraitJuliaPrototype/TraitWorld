@@ -441,6 +441,18 @@ macro trait(header, block = nothing)
         # the candidates known when it is compiled
         push!(out, :(Base.@constprop :aggressive @inline $(d.fexpr)(dyn::$TW.HeldValue{$X__}, $(syms...)) where {$X__<:$name} = $rhs))
     end
+    # a supertrait's operations on a held value of this trait (traits reference §3.6, T-72): the value
+    # seen through the supertrait, which runs the supertrait's own method; its supertraits chain the same way
+    for S in superfams
+        Sv = _tryeval(__module__, S)
+        (Sv isa Type && is_trait(Sv)) || continue
+        for op in trait_ops(Sv)
+            f = op_function(Sv, Val(op))
+            fr = GlobalRef(parentmodule(f), nameof(f))
+            X__ = gensym(:X)
+            push!(out, :(@inline $fr(dyn::$TW.HeldValue{$X__}, args...) where {$X__<:$name} = $fr($TW._as_super($S, dyn), args...)))
+        end
+    end
     # fields: properties of the representation, or (type R) the projection, read through a lens when written
     if !isempty(fdecls)
         push!(out, :($TW.trait_fields(::Type{$name}) = $(Tuple((f, w) for (f, _, w) in fdecls))))

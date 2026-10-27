@@ -237,3 +237,41 @@ end
     @test Base.invokelatest(conforms, G4, A4) && Base.invokelatest(conforms, G4, B4)
     @test Base.invokelatest(Base.invokelatest(getglobal, D, :both), Base.invokelatest(G4, 1)) == 3
 end
+
+# A subtrait's implementation requires the supertrait's (traits reference §3.6): a family member that
+# lacks it does not conform and is refused at its first use (T-71, W-50); a supertrait's operation on a
+# kept value of the subtrait runs from plain code (T-72, W-50)
+@testset "supertraits: kept values and families" begin
+    toplevel(quote
+        @trait_module module SupF
+        using TraitWorld
+        export CompD, VertD, chasf, cvf, probe
+        @trait CompD begin
+            chasf(m::CompD)::Bool
+        end
+        @trait VertD <: CompD begin
+            cvf(m::VertD)::Int
+        end
+        struct FD{F}; f::F; end
+        chasf(d::FD) = true
+        cvf(d::FD) = 1
+        @implement CompD D where {D <: FD}
+        @implement VertD D where {D <: FD}
+        struct GD{F}; f::F; end                 # VertD only: CompD missing
+        cvf(d::GD) = 2
+        @implement VertD D where {D <: GD}
+        probe(m::VertD) = (cvf(m), chasf(m))
+        end
+    end)
+    M = Base.invokelatest(getglobal, Main, :SupF)
+    g(s) = Base.invokelatest(getglobal, M, s)
+    fd = Base.invokelatest(g(:FD), 0)
+    for K in (Kept, Dynamic, Compiled)
+        @test Base.invokelatest(g(:chasf), Base.invokelatest(K{g(:VertD)}, fd)) === true
+    end
+    @test Base.invokelatest(g(:probe), fd) == (1, true)
+    gd = Base.invokelatest(g(:GD), 0)
+    @test !Base.invokelatest(conforms, typeof(gd), g(:VertD))
+    e = try Base.invokelatest(g(:probe), gd); nothing catch err; err end
+    @test e isa ImplementError && occursin("supertrait", sprint(showerror, e))
+end

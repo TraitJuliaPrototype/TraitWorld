@@ -1188,5 +1188,10 @@ function conforms(@nospecialize(T::Type), @nospecialize(X::Type))
     end
     p = proj_lookup(F, T)
     p === nothing && return false
+    # a subtrait's implementation requires one of each supertrait (traits reference §3.6, T-71)
+    for Y in trait_closure(F)
+        Y === F && continue
+        witness(Y, p.R) === nothing && return false
+    end
     return _pmatch(_instance(F, p.R), X)
 end

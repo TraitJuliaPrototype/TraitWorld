@@ -523,6 +523,14 @@ struct Kept{X}
 end
 "Any value of `X` that holds the user's object: `Compiled{X}`, `Dynamic{X}`, `Kept{X}`."
 const HeldValue{X} = Union{Compiled{X},Dynamic{X},Kept{X}}
+"""
+A held value of a subtrait seen through its supertrait `S`: the same object, the same attribute
+(traits reference §3.6, T-72). The object conforms to `S`, since its type's implementation of the
+subtrait requires one of `S`; so it is not checked again.
+"""
+_as_super(::Type{S}, d::Dynamic) where {S} = Dynamic{S}(Val(:checked), getfield(d, :t))
+_as_super(::Type{S}, c::Compiled) where {S} = Compiled{S}(Val(:checked), getfield(c, :t))
+_as_super(::Type{S}, k::Kept) where {S} = Kept{S}(Val(:checked), getfield(k, :t), getfield(k, :compiled))
 "Whether a held value is `Compiled`."
 @inline _held_compiled(::Compiled) = true
 @inline _held_compiled(::Dynamic) = false
