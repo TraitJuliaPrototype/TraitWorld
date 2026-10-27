@@ -202,7 +202,6 @@ Kept{X}(c::CompiledFor) where {X} = Kept{X}(Compiled{X}(getfield(c, :x)))
 Kept{X}(w::WithDynamic) where {X} = Kept{X}(Dynamic{X}(getfield(w, :x)))
 "A cast stored where a trait's name is declared: its attribute kept (not the library's translation, which is for plain values)."
 Base.convert(::Type{Kept{X}}, c::Union{CompiledFor,WithDynamic}) where {X} = Kept{X}(c)
-Base.convert(::Type{Kept{X}}, c::Union{CompiledFor,WithDynamic}) where {X} = Kept{X}(c)
 # the same at `Callable`, whose constructors take any argument (entry.jl): stated, so that neither is ambiguous
 for T in (:Dynamic, :Compiled, :Kept), W in (:CompiledFor, :WithDynamic)
     h = T === :Dynamic ? :_callable_dynamic : T === :Compiled ? :_callable_compiled : :_callable_kept

@@ -183,15 +183,6 @@ end
 _paramname(p) = p isa Expr && p.head === :(<:) ? p.args[1] : p
 
 """
-A struct with parameters bounded by a trait (traits reference §7.4, lowering §13.2): the bounds
-stripped from its header (a trait is not a Julia type), Julia's constructor with explicit parameters
-kept as it is, and the constructor without parameters an entry for the bounded fields: each field
-typed exactly by a bounded parameter takes that parameter's bound, where the caller's cast or the
-first-seen rule applies, and the parameter becomes the stored form's type (the user's object for a
-`Compiled` value, `Dynamic{X}` for a `Dynamic` one). Returns the struct and that constructor, or
-`nothing` for a struct without such parameters.
-"""
-"""
 The bound at the field (traits reference §7.4): `f::(F <: Bound)` in a trait module's struct adds
 `F <: Bound` to the struct's parameters, after the header's, in field order, and types the field
 `f::F`. Then `F` is a bounded parameter as if written in the header.
@@ -227,6 +218,15 @@ function _field_bounds(ex::Expr)
     return Expr(:struct, ex.args[1], sup === nothing ? nh : Expr(:(<:), nh, sup), Expr(:block, newbody...))
 end
 
+"""
+A struct with parameters bounded by a trait (traits reference §7.4, lowering §13.2): the bounds
+stripped from its header (a trait is not a Julia type), Julia's constructor with explicit parameters
+kept as it is, and the constructor without parameters an entry for the bounded fields: each field
+typed exactly by a bounded parameter takes that parameter's bound, where the caller's cast or the
+first-seen rule applies, and the parameter becomes the stored form's type (the user's object for a
+`Compiled` value, `Dynamic{X}` for a `Dynamic` one). Returns the struct and that constructor, or
+`nothing` for a struct without such parameters.
+"""
 function _bounded_struct(mod::Module, ex::Expr)
     ex = _field_bounds(ex)
     header = ex.args[2]
