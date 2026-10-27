@@ -391,6 +391,12 @@ _noescape(::Union{TObj,AbstractView,CObj,CMulti,LikeResult}) = throw(TraitUseErr
         isempty(ps) || throw(TraitUseError(unique(ps)))
     end
     _latest(_check_fully_typed, sig)
+    @lock _LOCK push!(_CHECKED_IN_SESSION, sig)
     flag[] = true
     return nothing
 end
+"""
+The worker signatures whose first-call check ran and passed in this session, in order: what a cache across
+sessions keeps with the code it keeps, so that a later session need not check them again (E-175).
+"""
+const _CHECKED_IN_SESSION = Any[]
