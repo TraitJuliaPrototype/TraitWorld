@@ -886,7 +886,6 @@ function _family_registry end
     return (b::Builder)(u)
 end
 @machinery @noinline function _conf_family_slow(reg::Base.RefValue{IdDict{Any,Any}}, @nospecialize(X), @nospecialize(u))
-    _flush_warnings()
     b = _member_fix!(reg, X, typeof(u))
     return b isa Builder ? b(u) : _conformance_slow(X, u)
 end
@@ -941,6 +940,7 @@ implementation's predicate, and fixes a member only in the latest world.
         r === nothing && _fold_final!(key)
         return r
     catch e
+        e isa _FoldDefer && return _undecided()        # a warning is due at the first use: the run-time path gives it
         (e isa ImplementError || e isa TraitBoundError || e isa _FoldAbort) || return _undecided()
         _fold_final!(key)
         return nothing
@@ -971,6 +971,8 @@ end
 "While a member is folded in inference (W-40): warnings are queued, generic predicates abort."
 const _IN_FOLD = Base.ScopedValues.ScopedValue{Bool}(false)
 struct _FoldAbort <: Exception end
+"A check that would warn: not folded now, so the run-time path checks the member and warns at its first use."
+struct _FoldDefer <: Exception end
 "The fold's third outcome: not now (the compiler's `Undecided` where it has one)."
 _undecided() = isdefined(CC, :Undecided) ? CC.Undecided() : nothing
 mutable struct _FoldFinal
@@ -986,17 +988,8 @@ function _fold_final!(@nospecialize(key))
         ok && return nothing
     end
 end
-"Warnings made while folding, shown by the run-time path (`_flush_warnings`)."
-const _WARN_QUEUE = String[]
-_tw_warn(msg::String) = _IN_FOLD[] ? (@lock _LOCK push!(_WARN_QUEUE, msg); nothing) : (@warn msg; nothing)
-function _flush_warnings()
-    isempty(_WARN_QUEUE) && return nothing
-    msgs = @lock _LOCK (m = copy(_WARN_QUEUE); empty!(_WARN_QUEUE); m)
-    for m in msgs
-        @warn m
-    end
-    return nothing
-end
+"A warning of the member check: while folding nothing is written, and the member is left to the run-time path (`_FoldDefer`)."
+_tw_warn(msg::String) = _IN_FOLD[] ? throw(_FoldDefer()) : (@warn msg; nothing)
 """
 The problems of concrete type `U` as a member of a family implementation of `X`: the operations the
 family's methods serve (those written in its block, or the existing methods), checked at `U` as a
