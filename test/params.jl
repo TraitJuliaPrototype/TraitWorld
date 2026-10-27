@@ -193,3 +193,32 @@ end
         @test Base.invokelatest(Base.invokelatest(getglobal, M, :karea), k, [3.0]) == 9.0
     end
 end
+
+# Inside a trait module a trait's name with parameters as a container's element type means
+# `Kept{X{…}}`, in a function body too (traits reference §7.2, T-69, W-48)
+@testset "a parametric trait's name as an element type" begin
+    toplevel(quote
+        @trait_module module TArr
+        using TraitWorld
+        export AShape
+        @trait AShape{P} begin
+            aarea(s::AShape{P}, p::P)::Float64
+        end
+        struct ASq end
+        aarea(s::ASq, p::Float64) = p^2
+        @implement AShape{Float64} ASq
+        const_param() = AShape{Float64}[]
+        where_param(::Type{P}) where {P} = AShape{P}[]
+        vec_param() = Vector{AShape{Float64}}()
+        end
+    end)
+    M = Base.invokelatest(getglobal, Main, :TArr)
+    S = Base.invokelatest(getglobal, M, :AShape)
+    for f in (:const_param, :vec_param)
+        v = Base.invokelatest(Base.invokelatest(getglobal, M, f))
+        @test eltype(v) == Kept{S{Float64}}
+        push!(v, Base.invokelatest(Base.invokelatest(getglobal, M, :ASq)))
+        @test length(v) == 1
+    end
+    @test eltype(Base.invokelatest(Base.invokelatest(getglobal, M, :where_param), Float64)) == Kept{S{Float64}}
+end
