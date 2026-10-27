@@ -387,6 +387,8 @@ function _witness(@nospecialize(X), @nospecialize(R))
             !isempty(conformance_problems(X, R, Tuple(op for op in _ops(X) if !(op in D)))) && return nothing
         return Impl{D}()
     end
+    # while folding in inference (W-40), no generic implementation's predicate runs: it is user code
+    isempty(_generic_keys(X)) || !_IN_FOLD[] || throw(_FoldAbort())
     found = Any[]
     for k in _generic_keys(X)
         g = _in_decision_world(generic_rec, X, Val(k))::GenericRec
@@ -868,7 +870,12 @@ function _family_conformance_methods(@nospecialize(Xex), Tpat, wheres)
         # each process, so a name made while one image was built can recur in another package's
         :($TW._family_registry(::Val{$(QuoteNode(reg))}, ::Val{Symbol(join(fullname(@__MODULE__), "."))}) = $reg),
         Expr(:(=), Expr(:where, :($TW.conformance(::$TW.As{$Xex}, u::$Tpat)), wheres...),
-             :($TW._conf_family($reg, $Xex, u)))]
+             _HAS_FOLD ? quote
+                 # the member's builder fixed in the caller's code where its type is known (W-40)
+                 b = $TW.CC.fold_call($TW._member_fold, $reg, $Xex, typeof(u))
+                 b === nothing || return b(u)
+                 $TW._conf_family($reg, $Xex, u)
+             end : :($TW._conf_family($reg, $Xex, u)))]
 end
 "`_family_registry(Val(name))`: a family implementation's builder registry, for the index of default-served operations."
 function _family_registry end
@@ -879,21 +886,116 @@ function _family_registry end
     return (b::Builder)(u)
 end
 @machinery @noinline function _conf_family_slow(reg::Base.RefValue{IdDict{Any,Any}}, @nospecialize(X), @nospecialize(u))
-    U = typeof(u)
+    _flush_warnings()
+    b = _member_fix!(reg, X, typeof(u))
+    return b isa Builder ? b(u) : _conformance_slow(X, u)
+end
+
+const _MOVED = :moved                       # the world moved while a member was checked (W-40)
+"""
+Fix member `U` of a family implementation of `X` (traits reference §4.7): its check, its builder, the
+registry entry and the override index, so a later override of an operation its defaults serve is
+refused. The one place a member's builder is decided, for the run-time path and the fold (W-40).
+Returns the builder, or `nothing` for one that holds a session's pointers; throws `ImplementError`
+for a member that does not conform. With a world `w`, nothing is published if the world moved
+since (`_MOVED`). The first builder published stands.
+"""
+@machinery function _member_fix!(reg::Base.RefValue{IdDict{Any,Any}}, @nospecialize(X), @nospecialize(U), w::UInt = UInt(0))
     _check_member(X, U)
-    r = _conformance_slow(X, u)
-    b = r === NOTRAIT ? nothing : _latest(_family_builder, X, U)
-    if b isa Builder
-        @lock _LOCK begin
-            d = copy(reg[])
-            d[U] = b
-            reg[] = d                                   # readers see the old table or the new one
-        end
-        # the member's implementation is now fixed: a later override of an operation its defaults
-        # serve is refused, as for a single type's declaration (note "Declaring a trait")
-        _OVR_BUILT[] && _index_builder!(X, U, b)
+    b = _latest(_family_builder, X, U)
+    b isa Builder || return nothing
+    @lock _LOCK begin
+        w == 0 || Base.get_world_counter() == w || return _MOVED
+        e = get(reg[], U, nothing)
+        e isa Builder && return e
+        d = copy(reg[])
+        d[U] = b
+        reg[] = d                                       # readers see the old table or the new one
     end
-    return r
+    _OVR_BUILT[] && _index_builder!(X, U, b)
+    return b
+end
+
+"""
+    _member_fold(reg, X, U)
+
+The fold of a family member's builder while a caller is inferred (W-40; the design note §4.2, §11):
+the builder, `nothing` for a member that never folds (remembered), or `_undecided()` for not now.
+Called from inference: it never waits for a lock, never yields, writes nothing, runs no generic
+implementation's predicate, and fixes a member only in the latest world.
+"""
+@machinery function _member_fold(reg::Base.RefValue{IdDict{Any,Any}}, @nospecialize(X), @nospecialize(U))
+    b = get(reg[], U, nothing)                          # lock-free: the registry is replaced, never mutated
+    b isa Builder && return b
+    key = Pair{Any,Any}(X, U)
+    key in (@atomic _FOLD_FINAL.s) && return nothing
+    w = Base.tls_world_age()
+    w == Base.get_world_counter() || return _undecided()
+    _LOCK.locked_by === Base.current_task() && return _undecided()   # re-entrant: trylock would succeed
+    trylock(_LOCK) || return _undecided()
+    try
+        r = Base.ScopedValues.with(_IN_FOLD => true) do
+            _member_fix!(reg, X, U, w)
+        end
+        r === _MOVED && return _undecided()
+        r === nothing && _fold_final!(key)
+        return r
+    catch e
+        (e isa ImplementError || e isa TraitBoundError || e isa _FoldAbort) || return _undecided()
+        _fold_final!(key)
+        return nothing
+    finally
+        unlock(_LOCK)
+    end
+end
+"""
+`_member_fold` when a package image that folded the member loads (`Compiler.AtLoad`): not in
+inference, so it may wait for the lock; the member is fixed in this session, or `nothing`.
+"""
+function _member_fold_at_load(reg::Base.RefValue{IdDict{Any,Any}}, @nospecialize(X), @nospecialize(U))
+    b = get(reg[], U, nothing)
+    b isa Builder && return b
+    try
+        return _member_fix!(reg, X, U)
+    catch e
+        (e isa ImplementError || e isa TraitBoundError) || rethrow()
+        return nothing
+    end
+end
+"Whether the patched Julia has `Compiler.fold_call` (W-40)."
+const _HAS_FOLD = isdefined(CC, :fold_call)
+@static if isdefined(CC, :AtLoad)
+    _member_fold(::CC.AtLoad, reg::Base.RefValue{IdDict{Any,Any}}, @nospecialize(X), @nospecialize(U)) =
+        _member_fold_at_load(reg, X, U)
+end
+"While a member is folded in inference (W-40): warnings are queued, generic predicates abort."
+const _IN_FOLD = Base.ScopedValues.ScopedValue{Bool}(false)
+struct _FoldAbort <: Exception end
+"The fold's third outcome: not now (the compiler's `Undecided` where it has one)."
+_undecided() = isdefined(CC, :Undecided) ? CC.Undecided() : nothing
+mutable struct _FoldFinal
+    @atomic s::Base.IdSet{Any}
+end
+"The members that never fold in this session, by `Pair(X, U)`: replaced on each addition."
+const _FOLD_FINAL = _FoldFinal(Base.IdSet{Any}())
+function _fold_final!(@nospecialize(key))
+    while true
+        old = @atomic _FOLD_FINAL.s
+        new = copy(old); push!(new, key)
+        (_, ok) = @atomicreplace _FOLD_FINAL.s old => new
+        ok && return nothing
+    end
+end
+"Warnings made while folding, shown by the run-time path (`_flush_warnings`)."
+const _WARN_QUEUE = String[]
+_tw_warn(msg::String) = _IN_FOLD[] ? (@lock _LOCK push!(_WARN_QUEUE, msg); nothing) : (@warn msg; nothing)
+function _flush_warnings()
+    isempty(_WARN_QUEUE) && return nothing
+    msgs = @lock _LOCK (m = copy(_WARN_QUEUE); empty!(_WARN_QUEUE); m)
+    for m in msgs
+        @warn m
+    end
+    return nothing
 end
 """
 The problems of concrete type `U` as a member of a family implementation of `X`: the operations the
@@ -925,7 +1027,7 @@ single type's implementation is at its declaration, its declared fields, and the
         errs, warns = _concrete_problems(X, U, p)
         append!(out, errs)
         isempty(out) && !isempty(warns) &&
-            @warn "$U conforms to $X with abstract parts: code compiled for it dispatches at run time where it uses them:\n  " * join(warns, "\n  ")
+            _tw_warn("$U conforms to $X with abstract parts: code compiled for it dispatches at run time where it uses them:\n  " * join(warns, "\n  "))
     end
     return out
 end

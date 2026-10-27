@@ -59,7 +59,28 @@ end
 
 # --- the index of operations served by defaults -----------------------------------------
 
-const _OVR_INDEX = IdDict{Any,Vector{Any}}()      # operation function => [(Y, op, R, X, T)]
+"""
+The index of operations served by defaults, operation function => [(Y, op, R, X, T)]: replaced on each
+addition, never mutated, published by an atomic replace, so the definition hook reads it on any thread
+without a lock, and an addition never waits (W-40's discipline).
+"""
+mutable struct _OvrBox
+    @atomic d::IdDict{Any,Vector{Any}}
+end
+const _OVR = _OvrBox(IdDict{Any,Vector{Any}}())
+"Add records `(f, rec)` to the index."
+function _ovr_push!(pairs)
+    isempty(pairs) && return nothing
+    while true
+        old = @atomic _OVR.d
+        new = copy(old)
+        for (f, rec) in pairs
+            new[f] = push!(copy(get(new, f, Any[])), rec)
+        end
+        (_, ok) = @atomicreplace _OVR.d old => new
+        ok && return nothing
+    end
+end
 const _OVR_BUILT = Ref(false)
 
 "Add the records of one `_declared_defaults(X, T)` method to the index."
@@ -70,10 +91,7 @@ function _index_declared!(m::Method)
     (ps[2] isa DataType && ps[3] isa DataType && ps[2] <: Type && ps[3] <: Type) || return nothing
     X, T = ps[2].parameters[1], ps[3].parameters[1]
     for (Y, R, D) in Base.invokelatest(_declared_defaults, X, T)
-        for op in D
-            f = _opfn(Y, op)
-            push!(get!(_OVR_INDEX, f, Any[]), (Y, op, R, X, T))
-        end
+        _ovr_push!(Any[(_opfn(Y, op), (Y, op, R, X, T)) for op in D])
     end
     return nothing
 end
@@ -83,16 +101,14 @@ The implementations' default-served operations by operation function: built once
 """
 function _override_index()
     if !_OVR_BUILT[]
-        empty!(_OVR_INDEX)
+        @atomic _OVR.d = IdDict{Any,Vector{Any}}()
         for m in methods(_declared_defaults)
             _index_declared!(m)
         end
-        for (Y, op, R, X, U) in _family_records()      # family members whose builders were fixed
-            push!(get!(_OVR_INDEX, _opfn(Y, op), Any[]), (Y, op, R, X, U))
-        end
+        _ovr_push!(Any[(_opfn(Y, op), (Y, op, R, X, U)) for (Y, op, R, X, U) in _family_records()])   # family members whose builders were fixed
         _OVR_BUILT[] = true
     end
-    return _OVR_INDEX
+    return @atomic _OVR.d
 end
 "The default-served operations of a family member's fixed builder: records `(Y, op, R, X, T)`."
 function _builder_records(@nospecialize(X), @nospecialize(U), b::Builder)
@@ -111,9 +127,7 @@ function _builder_records(@nospecialize(X), @nospecialize(U), b::Builder)
 end
 "Add a family member's records to the index (when its builder is fixed in the session)."
 function _index_builder!(@nospecialize(X), @nospecialize(U), b::Builder)
-    for (Y, op, R, X2, U2) in _builder_records(X, U, b)
-        push!(get!(_OVR_INDEX, _opfn(Y, op), Any[]), (Y, op, R, X2, U2))
-    end
+    _ovr_push!(Any[(_opfn(Y, op), (Y, op, R, X2, U2)) for (Y, op, R, X2, U2) in _builder_records(X, U, b)])
     return nothing
 end
 "Every family member whose builder is fixed (in this session or in an image), as records `(Y, op, R, X, T)`."
