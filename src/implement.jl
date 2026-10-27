@@ -1201,6 +1201,15 @@ end
     end
     head = args[1]
     rest = collect(args[2:end])
+    # a bundle is the tuple of its traits (traits reference §3.6, §3.7):
+    # `@implement Table T …` is `@implement (ColTable, RowTable) T …`
+    if head isa Symbol || (head isa Expr && head.head === :.)
+        B = _tryeval(mod, head)
+        if B isa Type && is_trait(B)
+            ms = _bundle(B)
+            ms isa Tuple && !isempty(ms) && (head = Expr(:tuple, ms...))
+        end
+    end
     # --- projections: @implement X T …, @implement (X, Y) T …, @implement X{R} T …
     if !isempty(rest) && !(rest[1] isa Expr && rest[1].head === :block)
         # an implementation declared again in the session, in any form: refused with the reason

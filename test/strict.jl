@@ -146,6 +146,31 @@ end)
         @test thrown_strict(:(@eval AbsA Base.length(::AT) = 5)) === nothing
         @test latest(G(:cnt), bs) == 10
 
+        # stakeholders per arity (facts §1, F-19, W-53): `g(::Int, ::MyT...)` by MyT's owner names nothing of
+        # its definer's at `g(::Int)`, wins over `g(::Integer)` there, and is refused
+        toplevel(:(module VLib; g(x::Integer) = 1; end))
+        toplevel(quote
+            @trait_module module StrictLib5
+            using TraitWorld
+            import ..VLib
+            export VB, vsum
+            @trait VB{R} begin
+                vints(r::R)::Vector{Int}
+            end
+            @implement VB{Vector{Int}} begin
+                vints(r) = r
+            end
+            vsum(b::VB) = (s = 0; for x in vints(b); s += VLib.g(x); end; s)
+            end
+            using .StrictLib5
+        end)
+        @test latest(G(:vsum), [1, 2]) == 2
+        @test Tuple{typeof(sin), Int} in TraitWorld._sig_alternatives(Tuple{typeof(sin), Int, Vararg{Float32}})
+        @test Tuple{typeof(sin), Tuple{}} in TraitWorld._sig_alternatives(Tuple{typeof(sin), Tuple{Vararg{Float32}}})
+        @test length(TraitWorld._sig_alternatives(Tuple{typeof(sin), Vararg{Float32, 2}})) == 1
+        @test thrown_strict(:(module VP; struct MyT end; Main.VLib.g(x::Int, y::MyT...) = 2; end)) isa TraitWorld.PirateError
+        @test latest(G(:vsum), [1, 2]) == 2
+
         @test isempty(TraitWorld._STRICT_MISSES)          # the check before the definition missed nothing
     finally
         TraitWorld.strict!(false)

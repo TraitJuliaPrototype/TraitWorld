@@ -214,3 +214,26 @@ end)
     e = try toplevel(:(@implement QInt{Float64} QS2)); nothing catch err; err end
     @test inner(e) isa ImplementError && occursin("asks for", sprint(showerror, inner(e)))
 end
+
+# `@implement` of a bundle is the tuple's (traits reference §3.6, §3.7; T-73, W-54): it implements
+# each member, by the type's own methods
+@testset "@implement of a bundle" begin
+    toplevel(quote
+        @trait_module module DeclB
+        using TraitWorld
+        export A4, B4, AB4, fa, fb, both
+        @trait A4 begin; fa(x::A4)::Int; end
+        @trait B4 begin; fb(x::B4)::Int; end
+        @trait AB4 <: (A4, B4)
+        both(x::AB4) = fa(x) + fb(x)
+        end
+        struct G4; n::Int; end
+        DeclB.fa(g::G4) = g.n
+        DeclB.fb(g::G4) = 2g.n
+    end)
+    toplevel(:(@implement DeclB.AB4 G4))
+    D, G4 = Base.invokelatest(getglobal, Main, :DeclB), Base.invokelatest(getglobal, Main, :G4)
+    A4, B4 = Base.invokelatest(getglobal, D, :A4), Base.invokelatest(getglobal, D, :B4)
+    @test Base.invokelatest(conforms, G4, A4) && Base.invokelatest(conforms, G4, B4)
+    @test Base.invokelatest(Base.invokelatest(getglobal, D, :both), Base.invokelatest(G4, 1)) == 3
+end

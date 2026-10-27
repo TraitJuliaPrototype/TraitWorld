@@ -184,7 +184,18 @@ packages extend, and the ownership check must not be invalidated by their loads.
 sig_owners(@nospecialize(sig)) = _owners!(Base.IdSet{Any}(), sig)
 
 # one signature per Union member at the top level of each argument (and of a
-# type variable's upper bound), at most `limit` combinations
+# type variable's upper bound), at most `limit` combinations; a `Vararg` tail that may be empty, at
+# the top level or in a tuple argument, gives the alternative without it too: a method applies at
+# that arity, where the tail's types are not in the signature (facts §1, stakeholders per arity)
+const _NO_ARG = Ref(:no_arg)                     # an alternative that drops the trailing argument
+_may_be_empty(@nospecialize(v)) = !isdefined(v, :N) || v.N isa TypeVar || v.N == 0
+function _without_tail(@nospecialize(p))
+    q = Base.unwrap_unionall(p)
+    (q isa DataType && q.name === Tuple.name && !isempty(q.parameters)) || return nothing
+    v = q.parameters[end]
+    (v isa Core.TypeofVararg && _may_be_empty(v)) || return nothing
+    return Tuple{q.parameters[1:end-1]...}
+end
 function _sig_alternatives(@nospecialize(sig), limit::Int = 256)
     body = Base.unwrap_unionall(sig)
     body isa DataType || return Any[sig]
@@ -194,8 +205,11 @@ function _sig_alternatives(@nospecialize(sig), limit::Int = 256)
             push!(alts, Base.uniontypes(p))
         elseif p isa TypeVar && p.ub isa Union
             push!(alts, Base.uniontypes(p.ub))
+        elseif p isa Core.TypeofVararg && _may_be_empty(p)
+            push!(alts, Any[p, _NO_ARG])
         else
-            push!(alts, Any[p])
+            e = _without_tail(p isa TypeVar ? p.ub : p)
+            push!(alts, e === nothing ? Any[p] : Any[p, e])
         end
     end
     n = 1
@@ -214,7 +228,7 @@ function _sig_alternatives(@nospecialize(sig), limit::Int = 256)
     end
     out = Any[]
     for c in combos
-        push!(out, Tuple{c...})
+        push!(out, Tuple{filter(x -> x !== _NO_ARG, c)...})
     end
     return out
 end
@@ -223,7 +237,9 @@ end
     owned_method(m::Method)
 
 Rule 3: the package that defined `m` owns, in each alternative of `m`'s own signature
-(each `Union` member taken separately), the function or one of the types. Unlike Aqua's
+(each `Union` member taken separately, and each arity a `Vararg` tail admits), the function or one
+of the types. So `g(::Int, ::Mine...)` is not owned by `Mine`'s owner: at `g(::Int)` it names nothing
+of the definer's. Unlike Aqua's
 rule, `f(::Union{Mine, Int})` is not owned: its alternative `f(::Int)` names nothing of
 the definer's. A method on an abstract type is owned by the type's owner also where it
 applies to another package's subtype (note "Ownership": stakeholders include supertypes' owners).
