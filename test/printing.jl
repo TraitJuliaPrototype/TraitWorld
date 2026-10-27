@@ -17,7 +17,9 @@ toplevel(quote
         plen(r) = length(r)
     end
 
-    boom(s::PVec) = plen(s) > 0 ? error("boom") : 0
+    # a frame of its own: with the member's builder folded in (W-40) the worker would be inlined, and an
+    # inlined frame prints no argument types
+    @noinline boom(s::PVec) = plen(s) > 0 ? error("boom") : 0
     apply(f::Callable{Tuple{Float64}, Float64}, s::PVec) = plen(s) > 0 ? error("apply") : f(1.0)
     end
 end)
