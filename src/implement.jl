@@ -1133,6 +1133,10 @@ function _op_method(mod::Module, @nospecialize(X), d, Rex; precheck::Bool = true
     # only for a representation the defining package owns
     if precheck && !owns(owner(mod), owner(parentmodule(f)))
         Rv = _tryeval(mod, isempty(wheres) ? Rex : Expr(:where, Rex, wheres...))   # a family: its `where`
+        Rv isa Type || throw(ImplementError(
+            "$(Rex) is not defined where `@implement $(nameof(X))` is expanded, so its owner is unknown: define the type in a " *
+            "top-level statement of its own before the `@implement` (the macros of one block expand before any of its " *
+            "statements runs)"))
         if !(Rv isa Type && _owns(owner(mod), Rv))
             throw(ImplementError(
                 "$(mod) may not implement `$op` of $X for $(Rex): `$(nameof(f))` belongs to $(parentmodule(f)), and $(mod) does not own " *
