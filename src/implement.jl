@@ -668,10 +668,12 @@ What an implementation's declaration fixes, after its checks: the builder of its
 (`nothing` when it must be built per session) and the operations its defaults serve,
 without those the receiver type already had a method for.
 """
-_declare_conformance(mod::Module, @nospecialize(X), @nospecialize(T)) = _refusing(_declare_conformance_now, mod, X, X, T)
-@machinery function _declare_conformance_now(@nospecialize(X), @nospecialize(T))
+_declare_conformance(mod::Module, @nospecialize(X), @nospecialize(T)) = _refusing(_declare_conformance_now, mod, X, mod, X, T)
+@machinery function _declare_conformance_now(mod::Module, @nospecialize(X), @nospecialize(T))
     recs = Any[]
     (T isa DataType && isconcretetype(T)) || return (b = nothing, recs = ())
+    pr = _member_override_problem(mod, X, T)
+    pr === nothing || throw(ImplementError(pr))
     p = proj_lookup(X, T)
     p === nothing && return (b = nothing, recs = ())
     ps = _param_bound_problems(X, T, p)
@@ -789,6 +791,24 @@ function _declared_traits(@nospecialize(T))
         push!(out, ps[2].parameters[1])
     end
     return out
+end
+
+"""
+A declaration for one member of a family implementation of `X` (traits reference §4.7, decision 63):
+refused in a package extension, which loads after its triggers, and after the member's first use,
+when its implementation is fixed. `nothing` if `T` is no family member or the declaration may stand.
+"""
+function _member_override_problem(mod::Module, @nospecialize(X), @nospecialize(T))
+    m = Base._which(Tuple{typeof(conformance),As{X},T}; raise = false)
+    m === nothing && return nothing
+    sigT = Base.unwrap_unionall(m.method.sig).parameters[3]
+    (sigT !== T && sigT !== Any && m.method.module !== TraitWorld) || return nothing     # not a family's method
+    _extension_parent(Base.moduleroot(mod)) === nothing ||
+        return "$T is a member of a family implementation of $X: its own declaration belongs in the package that owns its parameter type, not in a package extension (which loads after its triggers)"
+    F = _family(X)
+    used = @lock _LOCK any(k -> k.second === T && _family(k.first) === F, _MEMBERS_CHECKED)
+    used && return "$T is a member of a family implementation of $X, fixed at its first use in this session: a declaration of its own is refused after that"
+    return nothing
 end
 
 "Whether `T` has a declaration of its own for `X`: a `conformance` method at `T` itself, not a family's (a member may still declare its own) nor the fallback."

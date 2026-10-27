@@ -275,3 +275,30 @@ end
     e = try Base.invokelatest(g(:probe), gd); nothing catch err; err end
     @test e isa ImplementError && occursin("supertrait", sprint(showerror, e))
 end
+
+# A family member's own declaration is refused after the member's first use (traits reference §4.7,
+# decision 63; T-28, L-23); before it, it stands as a more specific implementation
+@testset "a member's own declaration after its first use" begin
+    toplevel(quote
+        @trait_module module MemO
+        using TraitWorld
+        export MV, mval, usev
+        @trait MV begin
+            mval(v::MV)::Float64
+        end
+        struct Box{T}; x::T; end
+        mval(b::Box) = Float64(b.x)
+        @implement MV B where {B <: Box}
+        usev(v::MV) = mval(v)
+        end
+    end)
+    M = Base.invokelatest(getglobal, Main, :MemO)
+    g(s) = Base.invokelatest(getglobal, M, s)
+    @test Base.invokelatest(g(:usev), Base.invokelatest(g(:Box), 2)) == 2.0        # Box{Int} used
+    e = try toplevel(:(Core.eval(MemO, :(@implement MV Box{Int} begin mval(b) = 99.0 end)))); nothing catch err; err end
+    while e isa LoadError; e = e.error; end
+    @test e isa ImplementError && occursin("first use", sprint(showerror, e))
+    @test Base.invokelatest(g(:usev), Base.invokelatest(g(:Box), 2)) == 2.0        # the family's implementation stands
+    toplevel(:(Core.eval(MemO, :(@implement MV Box{Float32} begin mval(b) = 7.0 end))))   # not used yet: it stands
+    @test Base.invokelatest(g(:usev), Base.invokelatest(g(:Box), 1.0f0)) == 7.0
+end
