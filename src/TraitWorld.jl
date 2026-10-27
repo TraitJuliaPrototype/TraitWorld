@@ -30,11 +30,13 @@ function __init__()
     _register_type_printers()
     _install_frame_filter!()
     _install_error_hints!()
+    _cache_init!()
 end
 
 "The package callback."
 function _on_package_load_callback(id::Base.PkgId)
     Base.invokelatest(_on_package_load, id)
+    _CACHE_ON[] && Base.invokelatest(_cache_load_ready!)    # the cache's parts whose packages are now loaded
     return nothing
 end
 
@@ -71,6 +73,7 @@ include("concrete.jl")
 include("certificate.jl")
 include("defcheck.jl")
 include("hooks.jl")
+include("cache.jl")
 # piece 5 for TraitWorld's own image: its workload compiles, by facts, the Base code its machinery's
 # run-time sites reach (no backedge leads there): kept, else every session compiles it again (about
 # 200 ms at the first `@implement`). `__init__` switches this on for the packages built after it.
@@ -156,6 +159,19 @@ PrecompileTools.@compile_workload begin
     _sig_alternatives(Tuple{typeof(sum),Union{Int,Float64},Union{Int,Float32},Union{Int8,Int16}})
     _sig_alternatives(Tuple{typeof(sum),Union{Int,Float64},Union{Int,Float32}})
     owned_method(first(methods(TraitWorld.owner)))
+    # the cache's own code (cache.jl), on a few CodeInstances: else a session with the cache compiles it at the
+    # first package load and again at exit
+    let dir = mktempdir()
+        for m in methods(_PC.pcsum), mi in Base.specializations(m)
+            isdefined(mi, :cache) && push!(_CACHE_NEW, mi.cache)
+        end
+        _cache_record(dir)
+        write(joinpath(dir, "index.txt"), "TWC_0\t", string(Base.uuid5(Base.UUID(0), "TWC_0")), "\t",
+              string(Base.PkgId(TraitWorld).uuid), "=TraitWorld\n")
+        _cache_read_index!(dir)
+        empty!(_CACHE_PARTS); empty!(_CACHE_NEW)
+        rm(dir; recursive = true, force = true)
+    end
 end
 precompile(_on_package_load, (Base.PkgId,))
 precompile(_narrow_slow, (Any, TObj))
@@ -190,6 +206,9 @@ if ccall(:jl_generating_output, Cint, ()) == 1
     precompile(_on_image_methods_hook, (Vector{Any}, String))
     precompile(_on_method_definition_hook, (Method, Bool))
     precompile(_on_package_load_callback, (Base.PkgId,))
+    precompile(_cache_load_ready!, ())
+    precompile(_cache_at_exit, ())
+    precompile(_cache_init!, ())
     # the hooks' bodies, reached through `invokelatest`: without these, every session compiles them at its
     # first image load (0.26 s of D's 0.81 s load, E-169)
     precompile(_on_image_methods, (Vector{Any}, String))
