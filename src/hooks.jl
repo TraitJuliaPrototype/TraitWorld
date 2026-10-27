@@ -205,9 +205,14 @@ end
         else
             err = _strict_check(m, true)
             _OVR_BUILT[] && _is_declared_defaults(m) && _index_declared!(m)
-            # a method added to a complete trait module: its functions' keep flags may change
-            mod = _finished_trait_module(m)
-            mod === nothing || _refresh_keeps!(mod)
+            # a method added to a complete trait module: its functions' keep flags may change. Only trait-module
+            # code can change them: the keep analysis follows no other method (`_keeps_sig`), so a method defined
+            # outside, such as a user's implementation at the prompt, refreshes nothing (E-171: 1.25 s per
+            # `@implement` in a trait module of 100 functions)
+            if _is_trait_module_code(m)
+                mod = _finished_trait_module(m)
+                mod === nothing || _refresh_keeps!(mod)
+            end
         end
     catch e
         # a failure of the machinery must not break definitions: report it once, define the method
