@@ -17,7 +17,7 @@
 "Whether strict mode is on (`JULIA_TW_STRICT=1`, or `strict!()`)."
 const STRICT = Ref(false)
 "Turn strict mode on or off for this session."
-strict!(on::Bool = true) = (STRICT[] = on; nothing)
+strict!(on::Bool = true) = (STRICT[] = on; on ? _validation_log_on!() : _validation_log_off!(); nothing)
 
 "Delegates: an implementation package that counts as a stakeholder wherever the package it implements is (`delegate!(StaticArraysCore => StaticArrays)`)."
 const DELEGATES = IdDict{Any,Vector{Any}}()        # implemented package's owner => delegates' owners
@@ -83,12 +83,20 @@ function Base.showerror(io::IO, e::PirateError)
     e.later && print(io, "\n  (found after the definition by the safety net; the method was deleted again)")
 end
 
-"Code the mode protects: compiled by facts (Julia's owner `:facts`), or a trait module's."
-function _trait_world_code(ci::Core.CodeInstance)
-    ci.owner === FACTS_OWNER && return true
+"Code the mode protects: code of the facts owner (`:facts`; W-66, the facts-first review §2.1)."
+_trait_world_code(ci::Core.CodeInstance) = ci.owner === FACTS_OWNER
+"""
+Plain code that code of the facts owner rests on, which the walk follows up to it: `return_type`'s plain
+answers, the compiler's own code, and Julia's own plain code, which the compiler's code calls (facts code
+that calls the compiler directly rests on it). Other plain code is not followed.
+"""
+function _rests_under_facts(ci::Core.CodeInstance)
+    ci.owner === :facts_plain_return_type && return true
     ci.owner === nothing || return false
-    mi = Core.Compiler.get_ci_mi(ci)
-    return mi.def isa Method && is_trait_world(mi.def.module)
+    m = Core.Compiler.get_ci_mi(ci).def
+    m isa Method || return false
+    ccall(:jl_method_is_plain, Cint, (Any,), m) != 0 && return true
+    return owner(m.module) === :Julia
 end
 
 "Whether `definer` is a stakeholder of the concrete signature `s` (or a delegate of one)."
@@ -163,6 +171,7 @@ function _winning_fact(m::Method, accept)
             return _fact_sig(s) && _would_win_split(m, s, world) && accept(s) ? caller : nothing
         end
         caller in seen && return nothing
+        _rests_under_facts(caller) || return nothing
         si = typeintersect(s, m.sig)                     # a call of plain code may be at an abstract signature
         (si !== Union{} && _would_win(m, si, world) && accept(si)) || return nothing
         return _trait_dependent(caller, seen)
@@ -228,6 +237,7 @@ function _trait_dependent(ci::Core.CodeInstance, seen::Base.IdSet{Any})
         push!(seen, c)
         c.max_world == typemax(UInt) || continue
         _trait_world_code(c) && return c
+        _rests_under_facts(c) || continue
         mi = Core.Compiler.get_ci_mi(c)
         isdefined(mi, :backedges) || continue
         be = mi.backedges
@@ -356,8 +366,125 @@ end
 function _strict_init!()
     STRICT[] = get(ENV, "JULIA_TW_STRICT", "0") == "1"
     empty!(DELEGATES)
+    STRICT[] && _validation_log_on!()
     return nothing
 end
+
+# --- strict mode at an image's load (facts §10.3, row 1): validation's own record ------------------
+# A pirate loaded before a package image whose facts it breaks cannot be refused: it came first, and
+# the image's methods are active before its code is validated. It is reported at the load. Validation
+# writes its own log (`Compiler.ReinferUtils`), apart from the runtime's, which the safety net uses
+# around a definition. In strict mode it stays on for the session; every package callback reads and
+# empties it (W-66's strict-mode note, §4).
+
+"The log array TraitWorld installed in validation's log, or `nothing`."
+const _VAL_LOG = Ref{Any}(nothing)
+_validation_log_ref() = Base.Compiler.ReinferUtils._jl_debug_method_invalidation
+"Turn validation's log on with an array of TraitWorld's own, unless another tool's log is on."
+function _validation_log_on!()
+    r = _validation_log_ref()
+    cur = r[]
+    (cur !== nothing && cur === _VAL_LOG[]) && return nothing
+    cur === nothing || return nothing                 # another tool's record: left alone, not read
+    log = Any[]
+    _VAL_LOG[] = log
+    r[] = log
+    return nothing
+end
+function _validation_log_off!()
+    r = _validation_log_ref()
+    r[] === _VAL_LOG[] && _VAL_LOG[] !== nothing && (r[] = nothing)
+    _VAL_LOG[] = nothing
+    return nothing
+end
+
+"A pirate loaded before a package image, which breaks a fact of the image's code of the facts owner."
+struct PirateAtLoadError <: Exception
+    method::Method
+    definer::Any
+    sig::Any
+    code::Core.CodeInstance
+end
+function Base.showerror(io::IO, e::PirateAtLoadError)
+    mi = Core.Compiler.get_ci_mi(e.code)
+    print(io, "PirateError: `", e.method.name, "(", join((_short(t, 40) for t in Base.unwrap_unionall(e.method.sig).parameters[2:end]), ", "),
+          ")`, defined by ", e.definer, " before a package image was loaded, wins at its trait code's fact `", _short(e.sig),
+          "` in `", mi.def isa Method ? "$(mi.def.module).$(mi.def.name)" : mi, "`.\n  ", e.definer,
+          " owns neither the function nor a type in that signature (a pirate). It came first, so strict mode cannot refuse it:",
+          " the image's code is compiled again with it, and computes its result.\n  Load the package before the pirate, or define the method where a type it is for is owned.")
+end
+
+"The pirates in validation's entries `log` that broke facts of code of the facts owner; warnings for stakeholders' extensions."
+function _load_pirates(log::Vector{Any})
+    out = PirateAtLoadError[]
+    fails = Tuple{Any,Core.CodeInstance}[]            # (fact signature, the CodeInstance whose edge failed)
+    children = IdDict{Any,Vector{Any}}()              # a failed CodeInstance => its callers in the image
+    for k in 2:length(log)
+        tag = log[k]
+        tag isa String || continue
+        if tag == "insert_backedges_callee" && k + 1 <= length(log)
+            edge, ci = log[k-1], log[k+1]
+            ci isa Core.CodeInstance || continue
+            # only call edges: a fold's or a binding's entry carries no matches of its own
+            edge isa Core.MethodInstance ? push!(fails, (edge.specTypes, ci)) :
+                edge isa Type ? push!(fails, (edge, ci)) : nothing
+        elseif tag == "verify_methods" && k + 1 <= length(log)
+            push!(get!(() -> Any[], children, log[k+1]), log[k-1])
+        end
+    end
+    isempty(fails) && return out
+    world = Base.get_world_counter()
+    facts_code(ci) = ci.owner === FACTS_OWNER ? Core.CodeInstance[ci] :
+        ci.owner === :facts_plain_return_type ?
+            Core.CodeInstance[c for c in get(children, ci, Any[]) if c isa Core.CodeInstance && c.owner === FACTS_OWNER] :
+            Core.CodeInstance[]
+    seen = Base.IdSet{Any}()
+    for (s, ci) in fails
+        codes = facts_code(ci)
+        isempty(codes) && continue
+        ss = _fact_sig(s) ? something(_fact_splits(s), Any[s]) : Any[s]
+        for sp in ss
+            ms = Base._methods_by_ftype(sp, nothing, 1, world, false, Ref{UInt}(typemin(UInt)), Ref{UInt}(typemax(UInt)), Ptr{Int32}(C_NULL))
+            (ms isa Vector && length(ms) == 1) || continue
+            m = (ms[1]::Core.MethodMatch).method
+            (m, sp) in seen && continue
+            push!(seen, (m, sp))
+            d = owner(m.module)
+            d === :Julia && continue
+            if _strict_owned(m) || _stakeholder(d, sp)
+                r = Base.moduleroot(m.module)
+                trig = _extension_parent(r) === nothing ? nothing : _extension_triggers(r)
+                if trig !== nothing && !any(o -> o isa Module && String(nameof(o)) in trig, sig_owners(sp))
+                    _extension_warn(m, (sp, first(codes)))
+                end
+                continue
+            end
+            push!(out, PirateAtLoadError(m, d, sp, first(codes)))
+        end
+    end
+    return out
+end
+
+"After a package load, in strict mode: read and empty validation's log, and report the pirates it shows."
+function _strict_at_load!()
+    STRICT[] || return nothing
+    ccall(:jl_generating_output, Cint, ()) == 0 || return nothing     # a precompile worker's report would be lost
+    log = _VAL_LOG[]
+    if log isa Vector{Any} && _validation_log_ref()[] === log
+        isempty(log) && return nothing
+        entries = copy(log)
+        empty!(log)
+        es = _load_pirates(entries)
+        isempty(es) || @error "strict mode: pirates loaded before a package image break its trait code:\n  " *
+                              join(sprint.(showerror, es), "\n  ")
+        append!(_LOAD_PIRATES, es)
+    else
+        _validation_log_on!()                         # switched off or replaced by another tool
+    end
+    return nothing
+end
+"The pirates reported at loads in this session."
+const _LOAD_PIRATES = PirateAtLoadError[]
 """
 Register the known split-core delegates among the packages of an image's methods, while it activates:
 the package is not among the loaded modules yet, so `_strict_known_delegates!` (after the load)

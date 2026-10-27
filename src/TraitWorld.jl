@@ -54,6 +54,7 @@ inactive are reported.
     _note_checked_ahead!(m)
     _strict_known_delegates!()
     _report_refused_at_load()                                                # what the image hook left inactive
+    _strict_at_load!()                                                       # pirates loaded before the image (facts §10.3)
     return nothing
 end
 
