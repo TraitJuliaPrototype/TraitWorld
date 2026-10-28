@@ -670,7 +670,10 @@ function _key_and_slots(@nospecialize(Y), p::ProjRec, @nospecialize(U), @nospeci
     names = Symbol[f for (f, _) in fl]
     idx = Int[Base.fieldindex(U, _mapped(p, f)) for f in names]
     I = _no_implementing_type(Y, w) ? Nothing : p.R
-    F = NamedTuple{Tuple(names),Tuple{Any[fieldtype(U, i) for i in idx]...}}
+    # the key is compiled for what the bound can see: each field at its declared type (lowering §5), which
+    # may use a parameter another field defines, so it is read off the key with the stored types
+    Fs = NamedTuple{Tuple(names),Tuple{Any[fieldtype(U, i) for i in idx]...}}
+    F = NamedTuple{Tuple(names),Tuple{Any[_in_decision_world(field_type, Y, Val(f), Key{I,Fs}) for f in names]...}}
     return Key{I,F}, Tuple(_slot(U, i) for i in idx)
 end
 """
