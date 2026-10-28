@@ -130,7 +130,7 @@ end
 toplevel(quote
     @trait_module module BTNProp
     using TraitWorld
-    export IntegView, ParamInteg, PView, curt, sigma_now, sigma_dyn, x_and_sigma, Saved, keep, sigma_kept, readps
+    export IntegView, ParamInteg, PView, PX, pxsum, curt, sigma_now, sigma_dyn, x_and_sigma, Saved, keep, sigma_kept, readps
     "Parameters read by name, as SciML's `integ.ps[:σ]`."
     struct PView
         names::Vector{Symbol}
@@ -148,6 +148,11 @@ toplevel(quote
     sigma_dyn(i::Dynamic{ParamInteg{PView}}) = i.ps[:σ]                  # a callback compiled once
     x_and_sigma(i::(HasProperty{:ps, PView}, HasProperty{:x, Float64})) = i.x + i.ps[:σ]
     readps(i::HasProperty{:ps, PS}) where {PS} = i.ps
+    # a trait with two properties of one type, by two supertraits of one family each
+    @trait PX <: (HasProperty{:ps, PView}, HasProperty{:x, Float64}) begin
+        nsteps(i::PX)::Int
+    end
+    pxsum(i::Dynamic{PX}) = i.x + i.ps[:ρ] + nsteps(i)
     mutable struct Saved
         integ::ParamInteg{PView}                                         # Kept{ParamInteg{PView}}
     end
@@ -176,6 +181,9 @@ end
 @implement BTNP.ParamInteg{BTNP.PView} BTNInteg begin
     stepcount(i) = i.n
 end
+@implement BTNP.PX BTNInteg begin
+    nsteps(i) = i.n
+end
 struct BTNOther
     t::Float64
 end
@@ -185,6 +193,16 @@ end
 btn_sigma(i::BTNInteg) = BTNP.sigma_now(i)
 btn_ps(d::Dynamic{BTNP.ParamInteg{BTNP.PView}}) = d.ps                 # a plain caller reading a kept value's property
 btn_x(d::Dynamic{HasProperty{:x, Float64}}) = d.x
+btn_pxx(d::Dynamic{BTNP.PX}) = d.x
+
+# trait code reading a name its traits do not carry: a rule of the trait world, reported by name
+toplevel(quote
+    @trait_module module BTNPropBad
+    using TraitWorld
+    using ..BTNProp: IntegView
+    readsecret(i::IntegView) = i.ps
+    end
+end)
 
 @testset "HasProperty: property access at a name, an input parameter" begin
     P = BTNP
@@ -208,9 +226,14 @@ btn_x(d::Dynamic{HasProperty{:x, Float64}}) = d.x
     @test Base.return_types(btn_ps, (Dynamic{P.ParamInteg{P.PView}},)) == Any[P.PView]
     @test btn_x(Dynamic{HasProperty{:x, Float64}}(i)) == 5.0
     @test Base.return_types(btn_x, (Dynamic{HasProperty{:x, Float64}},)) == Any[Float64]
+    # two supertraits of one family each: the call's name selects the family
+    dpx = Dynamic{P.PX}(i)
+    @test dpx.x == 5.0 && dpx.ps[:σ] == 11.0 && P.pxsum(i) == 5.0 + 28.0 + 3
+    @test Base.return_types(btn_pxx, (Dynamic{P.PX},)) == Any[Float64]
     # a value without the property: refused at the bound, and `x.name` on a kept value without it raises
     @test_throws Exception P.sigma_now(BTNOther(1.0))
     @test_throws Exception Dynamic{P.IntegView}(i).ps
+    @test_throws TraitUseError Main.BTNPropBad.readsecret(i)
     # an input parameter is stated as a value; a bound fixes it
     @test thrown_btn(:(@implement HasProperty BTNOther begin property(i, ::Val{:t}) = i.t end)) isa ImplementError
 end
