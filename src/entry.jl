@@ -217,11 +217,29 @@ evaluated in the entry's own body. Specialized: for a known type it folds to the
     t isa WithDynamic && return _enter_erased(p, getfield(t, :x))
     # a kept value keeps its attribute: a dynamic one is never opened at a bound, a compiled one is
     # opened by its object's type (the table serves it where the entry has one)
-    t isa Dynamic && return _enter_erased(p, _dyn_held(t))
-    t isa Compiled && return _enter_compiled(p, _dyn_held(t))
-    t isa Kept && return getfield(t, :compiled) ? _enter_compiled(p, _dyn_held(t)) : _enter_erased(p, _dyn_held(t))
+    t isa HeldValue && return _enter_held(p, t)
     _enters_dynamic(p, t, Val(kn)) && return _enter_erased(p, t)
     return _enter_compiled(p, t)
+end
+"""
+A kept value at a bound: seen through every trait its held object conforms to (traits reference §6.5),
+with its attribute. One whose object conforms to none of the position's traits is refused: it is a
+trait-world value, so it does not reach an ordinary fallback.
+"""
+@inline function _enter_held(p::EntryPos, t::HeldValue)
+    v = t isa Dynamic ? _enter_erased(p, _dyn_held(t)) :
+        t isa Compiled ? _enter_compiled(p, _dyn_held(t)) :
+        getfield(t, :compiled) ? _enter_compiled(p, _dyn_held(t)) : _enter_erased(p, _dyn_held(t))
+    v === NOTRAIT && Base.inferencebarrier(_held_refused)(typeof(p), t)
+    return v
+end
+@noinline function _held_refused(@nospecialize(P), @nospecialize(t))
+    F, pos = P.parameters[1], P.parameters[2]
+    fname = isdefined(F, :instance) ? nameof(F.instance) : F
+    o = _dyn_held(t)
+    ot = o isa TObj ? "a trait object" : string(typeof(o))
+    throw(TraitBoundError("`$fname`, argument $pos: $(typeof(t)) holds $ot, which conforms to none of the traits the " *
+                          "bounds there name (traits reference §6.5)"))
 end
 "The trait object at its key of a plain value: a container crossing where the position asks (§13.1); the whole object kept where the worker may keep it."
 @inline function _enter_compiled(p::EntryPos{F}, t) where {F}
@@ -800,8 +818,10 @@ the function's type (`known`, evaluated in the entry's body). In a closed build 
     f isa CObj{A,S} && return f
     # a function held or cast keeps its attribute, at this signature too (a `Dynamic` one through its own pointer)
     if _held_callable_dynamic(f) && !(f isa WithDynamic)
+        _check_at_signature(A, S, _callable_fn(f))
         return _erased_at(A, S, _callable_fn(f))
     elseif f isa CObj
+        _check_at_signature(A, S, _callable_fn(f))
         return getfield(f, :f) isa Erased ? _erased_at(A, S, f) : CObj{A,S}(_callable_fn(f))
     end
     if _held_callable_compiled(f)
@@ -827,6 +847,27 @@ the function's type (`known`, evaluated in the entry's body). In a closed build 
     return _wrap_callable(A, S, attr, f)
 end
 const _CALLABLE = Ref(Dict{Any,Any}())           # copy-on-write
+"""
+A function kept at one signature, seen at another (traits reference §6.5): checked there, once per
+(signature, function type): a method at the new argument types whose inferred result is not disjoint
+from the declared one, else `TraitBoundError`.
+"""
+function _check_at_signature(::Type{A}, ::Type{S}, @nospecialize(f)) where {A,S}
+    key = (A, S, typeof(f))
+    haskey(_SIG_CHECKED[], key) && return nothing
+    ok = Base.invokelatest(hasmethod, f, A)
+    if ok
+        R = Base.invokelatest(Base.infer_return_type, f, A)
+        ok = typeintersect(R, S) !== Union{}           # a result that always throws (`Union{}`) is disjoint too
+    end
+    ok || throw(TraitBoundError("a function kept at another signature was passed where Callable{$A, $S} is expected, " *
+                                "and has no method there with a result of type $S (traits reference §6.5)"))
+    @lock _LOCK begin
+        d = copy(_SIG_CHECKED[]); d[key] = true; _SIG_CHECKED[] = d
+    end
+    return nothing
+end
+const _SIG_CHECKED = Ref(Dict{Any,Bool}())          # copy-on-write
 @noinline _callable_mismatch(@nospecialize(C), @nospecialize(A), @nospecialize(S)) =
     throw(TraitBoundError("a Dynamic{$C} was passed where Callable{$A, $S} is expected"))
 _wrap_callable(::Type{A}, ::Type{S}, attr::Symbol, @nospecialize(f)) where {A,S} =

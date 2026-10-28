@@ -547,9 +547,13 @@ function _classify(mod::Module, a, unbounded::Vector{Symbol} = Symbol[]; attr_bo
             used = Any[w for w in wheres if _uses(ann, _wherevar(w))]
             if !isempty(used)
                 h = _tryeval(mod, ann.args[1])
-                (h === Callable || h === Compiled || h === Dynamic) && _callable_args_use(mod, ann, used) &&
-                    error("@trait_module: argument `$name`: a `Callable` bound's argument types are a constant type; `$ann` names " *
-                          "the method's `where` variables. Write one method per signature (traits reference §5.8)")
+                if (h === Callable || h === Compiled || h === Dynamic) && _callable_args_use(mod, ann, used)
+                    # argument types that follow the other arguments (traits reference §5.8): kept as
+                    # expressions over the `where` variables; the entry enters the function after them
+                    ce = _callable_exprs(mod, ann)
+                    ce === nothing && error("@trait_module: argument `$name`: `$ann` is not a `Callable` bound")
+                    return _Arg(name, ann, :callable, Any[], ce[1], ce[2], ce[3])
+                end
                 v = _tryeval(mod, Expr(:where, ann, used...))
                 v isa Type && is_trait(v) && return _Arg(name, ann, :trait, bound_traits(v), nothing, nothing, nothing)
             end
@@ -587,6 +591,21 @@ function _callable_args_use(mod::Module, ann, used)
         return any(w -> _uses(ann.args[2], _wherevar(w)), used)
     end
     return any(a -> _callable_args_use(mod, a, used), ann.args[2:end])
+end
+
+"A `Callable` bound's argument and result types as written, and its attribute: `(A, S, M)`; else `nothing`."
+function _callable_exprs(mod::Module, ann)
+    ann isa Expr && ann.head === :curly || return nothing
+    h = _tryeval(mod, ann.args[1])
+    if h === Callable
+        length(ann.args) == 3 || return nothing
+        return (ann.args[2], ann.args[3], nothing)
+    elseif (h === Compiled || h === Dynamic) && length(ann.args) == 2
+        c = _callable_exprs(mod, ann.args[2])
+        c === nothing && return nothing
+        return (c[1], c[2], h === Compiled ? :compiled : :dynamic)
+    end
+    return nothing
 end
 
 function _tryeval(mod::Module, ex)
@@ -926,9 +945,12 @@ function _rewrite_fdef(mod::Module, ex)
         ntname = gensym(:nt)
         haskw && push!(stmts, :($ntname = $kwname))
         newnames = Any[]
+        deferred = Any[]
+        viewof = Dict{Symbol,Any}()
         for (i, x) in enumerate(args)
             if x.kind === :trait
                 v = gensym(Symbol(x.name, :_view))
+                viewof[x.name] = v
                 # `known_type` in the entry's own body: in a helper called with an `Any`-typed value it would be
                 # compiled for the value's type, where it folds to `true` (E-148)
                 push!(stmts, :($v = $TraitWorld.enter($TraitWorld.EntryPos{typeof($fname),$i,$nargs}(), $(x.name),
@@ -945,8 +967,11 @@ function _rewrite_fdef(mod::Module, ex)
                 push!(newnames, Expr(:..., v))
             elseif x.kind === :callable
                 v = gensym(Symbol(x.name, :_fn))
-                push!(stmts, :($v = $TraitWorld.enter_callable($(x.A), $(x.S), $(QuoteNode(x.M)), $(x.name),
-                                                               Val($TraitWorld._known_type($(x.name))))))
+                ent = :($v = $TraitWorld.enter_callable($(x.A), $(x.S), $(QuoteNode(x.M)), $(x.name),
+                                                        Val($TraitWorld._known_type($(x.name)))))
+                cw = Symbol[_wherevar(w) for w in wheres if _uses(x.A, _wherevar(w)) || _uses(x.S, _wherevar(w))]
+                # argument types that follow the other arguments: entered after them (traits reference §5.8)
+                isempty(cw) ? push!(stmts, ent) : push!(deferred, (cw, x.name, ent))
                 push!(newnames, v)
             elseif x.kind === :callables
                 v = gensym(Symbol(x.name, :_fn))
@@ -957,6 +982,25 @@ function _rewrite_fdef(mod::Module, ex)
                 push!(newnames, Expr(:..., x.name))
             else
                 push!(newnames, x.name)
+            end
+        end
+        # the `where` variables a deferred `Callable` names: fixed by a plain argument (the entry's own
+        # `where` list), or read from a trait argument's key; then the function entered at that signature
+        if !isempty(deferred)
+            plainfixed = Set(Symbol[_wherevar(w) for w in wheres if any(x -> x.kind in (:plain, :vararg) && x.ann !== nothing &&
+                                                                           _uses(x.ann, _wherevar(w)), args)])
+            bound = Set{Symbol}()
+            for (cw, nm, ent) in deferred
+                for p in cw
+                    (p in plainfixed || p in bound) && continue
+                    k = findfirst(b -> b[1] === p, wbind)
+                    k === nothing && error("@trait_module: argument `$nm` of `$fname`: its `Callable` names `$p`, which no other " *
+                                           "argument fixes (traits reference §5.8)")
+                    (_, tnm, F, ip) = wbind[k]
+                    push!(stmts, :($p = $TraitWorld._trait_param($(viewof[tnm]), $F, Val($ip))))
+                    push!(bound, p)
+                end
+                push!(stmts, ent)
             end
         end
         for x in kws

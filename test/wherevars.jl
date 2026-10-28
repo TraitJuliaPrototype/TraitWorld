@@ -38,16 +38,26 @@ end)
     @test_throws TraitBoundError W.withvec([1.0], [2])           # shared with an ordinary argument
     @test W.posfirst([3]) == 3
     @test_throws TraitBoundError W.posfirst([3.0])               # the variable's bound
+    # a Callable's argument types may follow the other arguments (traits reference §5.8)
+    toplevel(quote
+        @trait_module module WVFollows
+        using TraitWorld
+        cmapT(f::Callable{Tuple{T}, T}, x::Vector{T}) where {T} = map(f, x)
+        end
+    end)
+    @test Base.invokelatest(Main.WVFollows.cmapT, x -> 2x, [1, 2]) == [2, 4]
+    @test Base.invokelatest(Main.WVFollows.cmapT, x -> 2x, [1.5]) == [3.0]
+    # a variable only the Callable names is refused when the method is defined
     err = try
         toplevel(quote
             @trait_module module WVBad
             using TraitWorld
-            cmapT(f::Callable{Tuple{T}, T}, x::Vector{T}) where {T} = map(f, x)
+            cmapS(f::Callable{Tuple{S}, S}, x::Int) where {S} = f(x)
             end
         end)
         nothing
     catch e
         e
     end
-    @test err isa LoadError && occursin("constant type", sprint(showerror, err))
+    @test err isa LoadError && occursin("no other argument fixes", sprint(showerror, err))
 end
