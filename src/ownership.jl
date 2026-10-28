@@ -62,6 +62,18 @@ file, which lies in the parent's `ext/` directory (session 19: a scan for pirate
 reported such extensions as pirates of their own parents).
 """
 function _extension_parent(r::Module)
+    memo = _EXT_MEMO[]
+    memo === nothing && return _extension_parent_now(r)
+    v = get(memo, r, missing)
+    v === missing || return v
+    return memo[r] = _extension_parent_now(r)
+end
+"""
+Extension parents by module, memoized while an image's methods are scanned (W-75): the image's own package
+is not registered yet, so the negative cache below does not hold it, and every method asked again.
+"""
+const _EXT_MEMO = Ref{Union{Nothing,IdDict{Module,Any}}}(nothing)
+function _extension_parent_now(r::Module)
     p = get(_EXT_PARENTS, r, nothing)
     p === nothing || return p
     v = get(Base.EXT_PRIMED, Base.PkgId(r), nothing)   # extension => [parent, triggers...]

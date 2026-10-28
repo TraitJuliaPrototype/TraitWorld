@@ -152,10 +152,12 @@ function _extension_win(m::Method)
     no_trigger(s) = !any(o -> o isa Module && String(nameof(o)) in trig, sig_owners(s))
     return _winning_fact(m, no_trigger)
 end
+const _EXT_WARNED = Ref(0)
 function _extension_warn(m::Method, v)
+    (_EXT_WARNED[] += 1) > 20 && return nothing   # as `maxlog`, but before the message is built (W-75)
     @warn "The package extension $(Base.moduleroot(m.module)) defines $(m.sig), which wins at $(v[1]), " *
           "a fact of trait code ($(_short(v[2]))) with none of the extension's triggers in it: " *
-          "followed as its parent's change; that trait code compiles again" maxlog = 20
+          "followed as its parent's change; that trait code compiles again"
     return nothing
 end
 
@@ -328,6 +330,7 @@ function _strict_image_refusals(ms::Vector{Any})
     _image_known_delegates!(ms)        # before the check: the image's own package may be a known delegate
     out = Any[]
     _OWNER_MEMO[] = IdDict{Module,Any}()          # owners cannot change while one image's methods are scanned
+    _EXT_MEMO[] = IdDict{Module,Any}()            # nor extension parents
     try
     for m in ms
         m isa Method || continue
@@ -348,6 +351,7 @@ function _strict_image_refusals(ms::Vector{Any})
     end
     finally
         _OWNER_MEMO[] = nothing
+        _EXT_MEMO[] = nothing
     end
     return out
 end
@@ -366,6 +370,7 @@ end
 function _strict_init!()
     STRICT[] = get(ENV, "JULIA_TW_STRICT", "0") == "1"
     empty!(DELEGATES)
+    _EXT_WARNED[] = 0
     STRICT[] && _validation_log_on!()
     return nothing
 end
