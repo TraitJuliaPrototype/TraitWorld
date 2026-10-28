@@ -380,7 +380,7 @@ _noescape(::Union{TObj,AbstractView,CObj,CMulti,LikeResult}) = throw(TraitUseErr
 
 @machinery @noinline function _check_once(flag::Base.RefValue{Bool}, @nospecialize(sig))
     CLOSED_WORLD[] && (flag[] = true; return nothing)      # checked by verify_main at build time
-    sig in _CHECKED_AHEAD[] && (flag[] = true; return nothing)   # checked while a package image was built (ahead.jl)
+    _recorded_check(sig) && (flag[] = true; return nothing)      # checked while a package image was built (ahead.jl)
     _FACTS_DEBUG[] && Core.println("TraitWorld: first-call check of ", sig, ccall(:jl_generating_output, Cint, ()) == 1 ? " (while generating an image)" : "")
     # a value conforming at parameters no bound accepts: no worker for the signature
     ms = Base._methods_by_ftype(_worker_sig(sig), -1, Base.get_world_counter())::Vector
@@ -392,6 +392,8 @@ _noescape(::Union{TObj,AbstractView,CObj,CMulti,LikeResult}) = throw(TraitUseErr
     end
     _latest(_check_fully_typed, sig)
     @lock _LOCK push!(_CHECKED_IN_SESSION, sig)
+    # while an image is built: keep the pass with it, for the sessions that load it
+    ccall(:jl_generating_output, Cint, ()) == 1 && _record_check!(sig, _record_modules(sig))
     flag[] = true
     return nothing
 end

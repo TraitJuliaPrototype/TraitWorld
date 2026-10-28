@@ -20,43 +20,45 @@ function _compile_ahead(mod::Module, @nospecialize(X), @nospecialize(T))
     return nothing
 end
 
-"""
-Worker signatures whose first-call check (`_check_once`) passed while a package image was built:
-each declaring module keeps its own in `__tw_checked__`, saved in its image, and a load adds them here.
-"""
-const _CHECKED_AHEAD = Ref(Base.IdSet{Any}())          # copy-on-write
-"After a package load: the checks its image holds."
-function _note_checked_ahead!(root::Module)
-    found = Any[]
-    seen = Base.IdSet{Module}()
-    todo = Module[root]
-    while !isempty(todo)
-        m = pop!(todo)
-        m in seen && continue
-        push!(seen, m)
-        isdefined(m, :__tw_checked__) && append!(found, getglobal(m, :__tw_checked__))
-        for n in names(m; all = true, imported = false)
-            isdefined(m, n) || continue
-            v = getglobal(m, n)
-            v isa Module && v !== m && parentmodule(v) === m && push!(todo, v)
+# --- A check's record kept with the code it checked (the facts-first review §2.4) -----------------------
+# A first-call check that passes while a package image is built is recorded in a module of that image, as
+# `(sig, the worker methods it checked)` in `__tw_checked__`. A first call looks it up in the few modules
+# the signature names, not in every module after every load; the record holds while dispatch selects
+# the same worker methods, so a redefined worker is checked again.
+
+"The worker methods dispatch selects at `sig` (its methods that are not entries): what a check's record is valid for."
+function _worker_methods(@nospecialize(sig))
+    ms = Base._methods_by_ftype(_worker_sig(sig), -1, Base.get_world_counter())
+    ms isa Vector || return Method[]
+    return Method[(m::Core.MethodMatch).method for m in ms if !_is_entry((m::Core.MethodMatch).method)]
+end
+"The modules a signature names, where its check's record may live: its function's, then its types'."
+function _record_modules(@nospecialize(sig))
+    out = Module[]
+    walk(@nospecialize(x), depth) = depth > 3 ? nothing :
+        x isa DataType ? (push!(out, parentmodule(x)); foreach(p -> walk(p, depth + 1), x.parameters)) :
+        x isa Union ? (walk(x.a, depth); walk(x.b, depth)) : x isa UnionAll ? walk(Base.unwrap_unionall(x), depth) : nothing
+    walk(_worker_ftype(sig), 0)
+    foreach(p -> walk(p, 1), _worker_sig(sig).parameters)
+    return unique!(out)
+end
+"Whether an image holds a record that `sig`'s check passed for the worker methods dispatch selects now."
+function _recorded_check(@nospecialize(sig))
+    ws = nothing
+    for m in _record_modules(sig)
+        isdefined(m, :__tw_checked__) || continue
+        for e in getglobal(m, :__tw_checked__)
+            e isa Tuple{Any,Vector{Method}} && e[1] == sig || continue
+            ws === nothing && (ws = _worker_methods(sig))
+            e[2] == ws && return true
         end
     end
-    isempty(found) && return nothing
-    @lock _LOCK begin
-        s = copy(_CHECKED_AHEAD[])
-        foreach(x -> push!(s, x), found)
-        _CHECKED_AHEAD[] = s
-    end
-    return nothing
+    return false
 end
-"""
-Run the first-call check of a worker signature now, and keep it with the image being built: in the
-module of the implementing type `T`, else the module the declaration was expanded in (an
-implementation with operations is expanded in its trait's module, which belongs to another image).
-"""
-function _check_ahead!(mod::Module, @nospecialize(T), @nospecialize(sig))
-    _check_once(Ref(false), sig)                       # throws as a first call would: the build fails
-    for m in (T isa DataType ? parentmodule(T) : mod, mod)
+"Record that `sig`'s check passed, in the first of `mods` that belongs to the image being built."
+function _record_check!(@nospecialize(sig), mods)
+    rec = (sig, _worker_methods(sig))
+    for m in mods
         # bindings defined by `eval` here are read in the latest world
         if !Base.invokelatest(isdefined, m, :__tw_checked__)
             try
@@ -65,10 +67,20 @@ function _check_ahead!(mod::Module, @nospecialize(T), @nospecialize(sig))
                 continue                               # a closed module: another image's
             end
         end
-        push!(Base.invokelatest(getglobal, m, :__tw_checked__), sig)
-        return nothing
+        push!(Base.invokelatest(getglobal, m, :__tw_checked__), rec)
+        return true
     end
-    return nothing                                     # no open module: checked at the first call
+    return false                                       # no open module: checked at the first call
+end
+"""
+Run the first-call check of a worker signature now, and keep it with the image being built: in the
+module of the implementing type `T`, else the module the declaration was expanded in (an
+implementation with operations is expanded in its trait's module, which belongs to another image).
+"""
+function _check_ahead!(mod::Module, @nospecialize(T), @nospecialize(sig))
+    _check_once(Ref(false), sig)                       # throws as a first call would: the build fails; records it
+    _recorded_check(sig) || _record_check!(sig, (T isa DataType ? parentmodule(T) : mod, mod))
+    return nothing
 end
 
 "The trait modules loaded now: modules (and their submodules) made by `@trait_module`."

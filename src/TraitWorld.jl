@@ -51,7 +51,6 @@ inactive are reported.
     _bump!()
     m = get(Base.loaded_modules, id, nothing)
     m isa Module || return nothing
-    _note_checked_ahead!(m)
     _strict_known_delegates!()
     _report_refused_at_load()                                                # what the image hook left inactive
     _strict_at_load!()                                                       # pirates loaded before the image (facts §10.3)
