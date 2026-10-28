@@ -244,8 +244,17 @@ function _declares_field(@nospecialize(T), f::Symbol, write::Bool)
         for (g, w) in trait_fields(X)
             g === f && (!write || w) && return true
         end
+        # a property its traits carry, `HasProperty{f}` (BaseTraits, traits reference §8.1): read only
+        !write && _is_property_family(X, f) && return true
     end
     return false
+end
+"Whether trait family `X` is BaseTraits' `HasProperty{f}`."
+function _is_property_family(@nospecialize(X), f::Symbol)
+    HP = getglobal(getglobal(TraitWorld, :BaseTraits)::Module, :HasProperty)
+    _wrapper(X) === HP || return false
+    u = Base.unwrap_unionall(X)
+    return u isa DataType && u.parameters[1] === f
 end
 
 """

@@ -113,7 +113,7 @@ its object fixes. The bare trait where it has no parameter, or one is still a ty
     ps = u.parameters
     n = length(ps)::Int
     W = u.name.wrapper
-    (n == 1 || any(p -> p isa TypeVar, ps[1:n-1])) && return :($W)
+    (n == 1 || any(p -> p isa TypeVar, ps[1:n-1])) && return :($(_family(u)))     # with input parameters: the family
     return :($(Core.apply_type(W, ps[1:n-1]...)))
 end
 

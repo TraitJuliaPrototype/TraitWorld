@@ -248,27 +248,83 @@ function _trait_default(block)
     return d, Expr(:block, args...)
 end
 
+"""
+The trait's input parameters (traits reference §3.4), from lines `@input N …` in its body, removed
+from it. They must be the first parameters of the header: the trait applied to them is a family.
+"""
+function _input_decls(block)
+    block isa Expr && block.head === :block || return Symbol[], block
+    ins = Symbol[]
+    args = Any[]
+    for ex in block.args
+        if ex isa Expr && ex.head === :macrocall && ex.args[1] === Symbol("@input")
+            names = Any[a for a in ex.args[2:end] if !(a isa LineNumberNode)]
+            (!isempty(names) && all(a -> a isa Symbol, names)) || error("@trait: `@input` takes the names of input parameters")
+            append!(ins, names)
+        else
+            push!(args, ex)
+        end
+    end
+    return ins, Expr(:block, args...)
+end
+"""
+A method of a trait with input parameters, at its family: `inputs` added to the `where` of a definition
+whose signature names `::Type{fam}` (also inside `@inline` or an `if`). Other expressions as they are.
+"""
+function _family_method(ex, fam, inputs::Vector{Symbol})
+    isempty(inputs) && return ex
+    ex isa Expr || return ex
+    if ex.head === :macrocall || ex.head === :if || ex.head === :block
+        return Expr(ex.head, Any[_family_method(a, fam, inputs) for a in ex.args]...)
+    end
+    (ex.head === :(=) || ex.head === :function) || return ex
+    lhs = ex.args[1]
+    _names_type_of(lhs, fam) || return ex
+    newlhs = lhs isa Expr && lhs.head === :where ? Expr(:where, lhs.args..., inputs...) : Expr(:where, lhs, inputs...)
+    return Expr(ex.head, newlhs, ex.args[2:end]...)
+end
+_names_type_of(ex, fam) = (ex isa Expr && ex.head === :curly && length(ex.args) == 2 && ex.args[1] === :Type && ex.args[2] == fam) ||
+                          (ex isa Expr && any(a -> _names_type_of(a, fam), ex.args))
+
 macro trait(header, block = nothing)
     tdefault, block = _trait_default(block)
+    inputs, block = _input_decls(block)
     cdecls, block = _concreteness_decls(block)
     header, block, fieldparams = _keys_form(header, block)
     name, Rsym, supers, params = _parse_trait_header(header)
     TW = TraitWorld
     pnames = Symbol[p for (p, _) in params]
     np = length(pnames)
-    out = Any[:(Core.@__doc__ abstract type $name{$(pnames...), $Rsym} <: $TW.Trait end)]
-    clevels = _concreteness_levels(cdecls, pnames, name)
-    isempty(clevels) || push!(out, :($TW.trait_concreteness(::Type{$name}) = $(QuoteNode(clevels))))
-    tdefault === nothing || push!(out, :($TW.default_attribute(::Type{$name}) = $(QuoteNode(tdefault))))
+    ni = length(inputs)
+    pnames[1:min(ni, np)] == inputs ||
+        error("@trait $name: input parameters ($(join(inputs, ", "))) come first in the header, in order (traits reference §3.4)")
+    outs = pnames[ni+1:end]                       # the associated types: one value per implementation
+    # the family: the trait at its input values, a variable each in the family's methods (`HasProperty{N}`)
+    nm = ni == 0 ? name : Expr(:curly, name, inputs...)
+    if ni > 0
+        block === nothing && error("@trait $name: a bundle has no input parameters")
+        any(ex -> ex isa Expr && ex.head === :(=) && ex.args[1] in inputs, block.args) &&
+            error("@trait $name: an input parameter is not defined by an equation: each implementation states it")
+    end
+    out = Any[:(Core.@__doc__ abstract type $name{$(pnames...), $Rsym} <: $(ni == 0 ? :($TW.Trait) : :($TW.InputTrait{$ni})) end)]
+    clevels = _concreteness_levels(cdecls, outs, name)
+    isempty(clevels) || push!(out, :($TW.trait_concreteness(::Type{$nm}) = $(QuoteNode(clevels))))
+    tdefault === nothing || push!(out, :($TW.default_attribute(::Type{$nm}) = $(QuoteNode(tdefault))))
     if np > 0
-        push!(out, :($TW.trait_params(::Type{$name}) = $(Tuple(pnames))))
+        push!(out, :($TW.trait_params(::Type{$nm}) = $(Tuple(pnames))))
+        ni > 0 && push!(out, :($TW.trait_params(::Type{$name}) = $(Tuple(pnames))))
         for (i, (p, b)) in enumerate(params)
             key = QuoteNode(p)
+            if i <= ni
+                # an input parameter: its family's value, at every representation
+                push!(out, :($TW.param(::Type{$nm}, ::Val{$key}, ::Type{K__}) where {K__} = $p))
+                continue
+            end
             # at an archetype: the value a bound fixes, else an opaque stand-in
-            push!(out, :($TW.param(::Type{$name}, ::Val{$key}, ::Type{A}) where {A <: $TW.Archetype} = $TW._archparam(A, $name, $key, $i)))
+            push!(out, :($TW.param(::Type{$nm}, ::Val{$key}, ::Type{A__}) where {A__ <: $TW.Archetype} = $TW._archparam(A__, $nm, $key, $i)))
             # at the erased key (a `Dynamic` trait object): the value it carries
-            push!(out, :($TW.param(::Type{$name}, ::Val{$key}, ::Type{E}) where {E <: $TW.ErasedKey} = $TW._erasedparam(E, $i)))
-            b === nothing || push!(out, :($TW.param_bound(::Type{$name}, ::Val{$key}) = $b))
+            push!(out, :($TW.param(::Type{$nm}, ::Val{$key}, ::Type{E__}) where {E__ <: $TW.ErasedKey} = $TW._erasedparam(E__, $i)))
+            b === nothing || push!(out, :($TW.param_bound(::Type{$nm}, ::Val{$key}) = $b))
         end
     end
     if block === nothing
@@ -285,7 +341,7 @@ macro trait(header, block = nothing)
         ex isa LineNumberNode && continue
         if ex isa Expr && ex.head === :(=) && ex.args[1] isa Symbol && ex.args[1] in pnames
             # a defining equation: the parameter as a function of the representation (`T = eltype(R)`)
-            push!(out, :($TW.param(::Type{$name}, ::Val{$(QuoteNode(ex.args[1]))}, ::Type{K__}) where {K__} =
+            push!(out, :($TW.param(::Type{$nm}, ::Val{$(QuoteNode(ex.args[1]))}, ::Type{K__}) where {K__} =
                              (let $Rsym = $TW._impl(K__); $(ex.args[2]); end)))
         elseif ex isa Expr && ex.head === :(::) && length(ex.args) == 2 && ex.args[1] isa Symbol
             push!(fdecls, (ex.args[1], ex.args[2], true))          # a field, writable as in a mutable struct
@@ -298,37 +354,38 @@ macro trait(header, block = nothing)
         end
     end
     length(unique(first.(fdecls))) == length(fdecls) || error("@trait: a field is declared twice in `$name`")
+    ni > 0 && !isempty(fdecls) && error("@trait $name: a trait with input parameters declares no fields (traits reference §3.4)")
     # a parameter that types a field is that field's type (note "Declaring a trait": a field defines its type's parameter)
     matched = Symbol[]
     for (p, f, Tex) in fieldparams
         any(ex -> ex isa Expr && ex.head === :(=) && ex.args[1] === p, block.args) &&
             error("@trait: parameter `$p` of `$name` is defined by the field `$f` and by an equation; define it once")
         # at a conforming type itself (an implementation's check, before a key exists): its field of that name
-        push!(out, :($TW.param(::Type{$name}, ::Val{$(QuoteNode(p))}, ::Type{K__}) where {K__} =
-                         $TW.param($name, Val($(QuoteNode(p))), $TW.Key{K__,NamedTuple{($(QuoteNode(f)),),Tuple{fieldtype(K__, $(QuoteNode(f)))}}})))
+        push!(out, :($TW.param(::Type{$nm}, ::Val{$(QuoteNode(p))}, ::Type{K__}) where {K__} =
+                         $TW.param($nm, Val($(QuoteNode(p))), $TW.Key{K__,NamedTuple{($(QuoteNode(f)),),Tuple{fieldtype(K__, $(QuoteNode(f)))}}})))
         if Tex === p
-            push!(out, :($TW.param(::Type{$name}, ::Val{$(QuoteNode(p))}, ::Type{K__}) where {K__ <: $TW.Key} = $TW._keyfield(K__, $(QuoteNode(f)))))
+            push!(out, :($TW.param(::Type{$nm}, ::Val{$(QuoteNode(p))}, ::Type{K__}) where {K__ <: $TW.Key} = $TW._keyfield(K__, $(QuoteNode(f)))))
         else
             # matched as Julia matches a `where` clause: `data::Vector{T}` against a `Vector{Float64}` field gives `T = Float64`
             if !(f in matched)
                 push!(matched, f)
                 qs = [q for q in pnames if _mentions(Tex, q)]
-                push!(out, :($TW._fieldmatch(::Type{$name}, ::Val{$(QuoteNode(f))}, ::Type{$Tex}) where {$(qs...)} =
+                push!(out, :($TW._fieldmatch(::Type{$nm}, ::Val{$(QuoteNode(f))}, ::Type{$Tex}) where {$(qs...)} =
                                  (; $([Expr(:kw, q, q) for q in qs]...))))
             end
-            push!(out, :($TW.param(::Type{$name}, ::Val{$(QuoteNode(p))}, ::Type{K__}) where {K__ <: $TW.Key} =
-                             getfield($TW._fieldmatch($name, Val($(QuoteNode(f))), $TW._keyfield(K__, $(QuoteNode(f)))), $(QuoteNode(p)))))
+            push!(out, :($TW.param(::Type{$nm}, ::Val{$(QuoteNode(p))}, ::Type{K__}) where {K__ <: $TW.Key} =
+                             getfield($TW._fieldmatch($nm, Val($(QuoteNode(f))), $TW._keyfield(K__, $(QuoteNode(f)))), $(QuoteNode(p)))))
         end
     end
-    isempty(fieldparams) || push!(out, :($TW.trait_field_params(::Type{$name}) = $(Tuple(p for (p, _, _) in fieldparams))))
+    isempty(fieldparams) || push!(out, :($TW.trait_field_params(::Type{$nm}) = $(Tuple(p for (p, _, _) in fieldparams))))
     # whether the declarations name the receiver type: then an implementation always has one (note "Terms")
     uses_self = any(d -> any(a -> _mentions(a[2], Rsym), d.args) || _mentions(d.ret, Rsym), decls) ||
                 any(ex -> ex isa Expr && ex.head === :(=) && ex.args[1] isa Symbol && ex.args[1] in pnames, block.args) ||
                 any(x -> _mentions(x[2], Rsym), fdecls)
-    uses_self && push!(out, :($TW.trait_uses_self(::Type{$name}) = true))
+    uses_self && push!(out, :($TW.trait_uses_self(::Type{$nm}) = true))
     # the parameters the operations' result types use: a `Dynamic` position must fix them
     rps = Symbol[p for p in pnames if any(d -> _mentions(d.ret, p), decls) || any(x -> _mentions(x[2], p), fdecls)]
-    isempty(rps) || push!(out, :($TW.result_params(::Type{$name}) = $(Tuple(rps))))
+    isempty(rps) || push!(out, :($TW.result_params(::Type{$nm}) = $(Tuple(rps))))
     sigs = [(d.name, length(d.args)) for d in decls]
     length(unique(sigs)) == length(sigs) || error("@trait: an operation is declared twice with the same arity in `$name`")
     names = unique([d.name for d in decls])
@@ -342,28 +399,41 @@ macro trait(header, block = nothing)
     end
     superfams = Any[]
     superparams = Any[]                          # (p, S, i): the subtrait's `p` is parameter `i` of `S`
+    superinputs = Any[]                          # the supertraits with input parameters, by their families
     for s in supers
         if s isa Expr && s.head === :curly
             S, as = s.args[1], s.args[2:end]
+            # a supertrait with input parameters is named by its family, the trait at its input values
+            Sw = _tryeval(__module__, S)
+            kS = Sw isa Type ? _ninputs(Sw) : 0
+            if kS > 0
+                all(a -> !(a isa Symbol) || a in inputs, as[1:kS]) ||
+                    error("@trait $name: the input parameters of supertrait `$s` are values or input parameters of `$name`")
+                S = Expr(:curly, S, as[1:kS]...)
+                push!(superinputs, S)
+                # the supertrait at the parameters a value of this trait fixes (`_super_inst`)
+                push!(out, :(@inline $TW._super_inst(::Type{$S}, ::Type{$name{$(pnames...)}}) where {$(pnames...)} = $s))
+            end
             push!(superfams, S)
-            push!(out, :($TW.supertrait_args(::Type{$name}, ::Type{$S}) = $(Expr(:->, Expr(:tuple, pnames...), Expr(:tuple, as...)))))
+            push!(out, :($TW.supertrait_args(::Type{$nm}, ::Type{$S}) = $(Expr(:->, Expr(:tuple, pnames...), Expr(:tuple, as...)))))
             for (i, a) in enumerate(as)
+                i <= kS && continue
                 (a isa Symbol && a in pnames && !(a in owndef) && !any(x -> x[1] === a, superparams)) || continue
                 push!(superparams, (a, S, i))
                 push!(out, Expr(:if, :($TW._super_field_param($S, $i)),
-                                :($TW.param(::Type{$name}, ::Val{$(QuoteNode(a))}, ::Type{K__}) where {K__} =
+                                :($TW.param(::Type{$nm}, ::Val{$(QuoteNode(a))}, ::Type{K__}) where {K__} =
                                       $TW.param($S, Val($TW.trait_params($S)[$i]), $TW._impl(K__)))))
             end
         else
             push!(superfams, s)
         end
     end
-    isempty(superfams) || push!(out, :($TW.supertraits(::Type{$name}) = ($(superfams...),)))
+    isempty(superfams) || push!(out, :($TW.supertraits(::Type{$nm}) = ($(superfams...),)))
     isempty(superparams) ||
-        push!(out, :($TW.trait_super_params(::Type{$name}) =
+        push!(out, :($TW.trait_super_params(::Type{$nm}) =
                          Tuple(p for (p, S, i) in $(Expr(:tuple, [Expr(:tuple, QuoteNode(p), S, i) for (p, S, i) in superparams]...))
                                if $TW._super_field_param(S, i))))
-    push!(out, :($TW.trait_ops(::Type{$name}) = $(Tuple(names))))
+    push!(out, :($TW.trait_ops(::Type{$nm}) = $(Tuple(names))))
     done = Symbol[]
     for d in decls
         key = QuoteNode(d.name)
@@ -373,35 +443,43 @@ macro trait(header, block = nothing)
             push!(out, :(function $(d.fexpr) end))
         end
         N = length(d.args)
-        argtypes = [_subst_params(t, pnames, name, :K__) for (_, t) in d.args]
-        first_decl && push!(out, :($TW.op_function(::Type{$name}, ::Val{$key}) = $(d.fexpr)))
+        argtypes = [_subst_params(t, outs, nm, :K__) for (_, t) in d.args]
+        first_decl && push!(out, :($TW.op_function(::Type{$nm}, ::Val{$key}) = $(d.fexpr)))
         # once per function: two traits may declare one function (`Indexable` and `Keyed`: `getindex`)
         first_decl && push!(out, :(if !$TW.is_operation_function($(d.fexpr))
                                        $TW.is_operation_function(::typeof($(d.fexpr))) = true
                                    end))
-        push!(out, :($TW.op_args(::Type{$name}, ::Val{$key}, ::Type{K__}, ::Val{$N}) where {K__} =
+        push!(out, :($TW.op_args(::Type{$nm}, ::Val{$key}, ::Type{K__}, ::Val{$N}) where {K__} =
                          (let $Rsym = $TW._impl(K__); Tuple{$(argtypes...)}; end)))
-        push!(out, :($TW.op_ret(::Type{$name}, ::Val{$key}, ::Type{K__}, ::Val{$N}) where {K__} =
-                         (let $Rsym = $TW._impl(K__); $(_subst_params(d.ret, pnames, name, :K__)); end)))
+        push!(out, :($TW.op_ret(::Type{$nm}, ::Val{$key}, ::Type{K__}, ::Val{$N}) where {K__} =
+                         (let $Rsym = $TW._impl(K__); $(_subst_params(d.ret, outs, nm, :K__)); end)))
         # at the erased key, a type naming a parameter the key leaves open is unknown (`OpenParam`)
-        eargs = Any[_erased_decl(t, pnames, name, :K__) for (_, t) in d.args]
+        eargs = Any[_erased_decl(t, outs, nm, :K__) for (_, t) in d.args]
         any(!isnothing, eargs) &&
-            push!(out, :($TW.op_args(::Type{$name}, ::Val{$key}, ::Type{K__}, ::Val{$N}) where {K__ <: $TW.ErasedKey} =
+            push!(out, :($TW.op_args(::Type{$nm}, ::Val{$key}, ::Type{K__}, ::Val{$N}) where {K__ <: $TW.ErasedKey} =
                              (let $Rsym = $TW._impl(K__); Tuple{$([something(e, a) for (e, a) in zip(eargs, argtypes)]...)}; end)))
-        eret = _erased_decl(d.ret, pnames, name, :K__)
+        eret = _erased_decl(d.ret, outs, nm, :K__)
         eret === nothing ||
-            push!(out, :($TW.op_ret(::Type{$name}, ::Val{$key}, ::Type{K__}, ::Val{$N}) where {K__ <: $TW.ErasedKey} =
+            push!(out, :($TW.op_ret(::Type{$nm}, ::Val{$key}, ::Type{K__}, ::Val{$N}) where {K__ <: $TW.ErasedKey} =
                              (let $Rsym = $TW._impl(K__); $eret; end)))
-        d.mutating && push!(out, :($TW.is_mutating(::Type{$name}, ::Val{$key}) = true))
+        d.mutating && push!(out, :($TW.is_mutating(::Type{$nm}, ::Val{$key}) = true))
         if d.default !== nothing
             argnames = [n for (n, _) in d.args]
             any(e -> e.name === d.name && e.default !== nothing && e !== d, decls[1:findfirst(==(d), decls)-1]) ||
-                push!(out, :($TW.has_default(::Type{$name}, ::Val{$key}) = true))
-            push!(out, :($TW.op_default(::Type{$name}, ::Val{$key}, $(d.rname), $(argnames...)) = $(d.default)))
+                push!(out, :($TW.has_default(::Type{$nm}, ::Val{$key}) = true))
+            push!(out, :($TW.op_default(::Type{$nm}, ::Val{$key}, $(d.rname), $(argnames...)) = $(d.default)))
         end
         first_decl || continue
         # the operation on trait objects: the only methods library code can call on one
         T = gensym(:T)
+        if ni > 0
+            # a trait with input parameters: the family whose view the trait object carries and whose
+            # declared arguments the call matches (`property(x, Val(:ps))`: `HasProperty{:ps}`)
+            push!(out, Expr(:macrocall, Symbol("@inline"), LineNumberNode(0),
+                            Expr(:(=), Expr(:where, :($(d.fexpr)(t::$TW.TObj{$T}, args...)), T),
+                                 Expr(:block, :($TW.opcall_input($name, Val($key), $(d.fexpr), t, args...))))))
+            continue
+        end
         push!(out, Expr(:macrocall, Symbol("@inline"), LineNumberNode(0),
                         Expr(:(=), Expr(:where, :($(d.fexpr)(t::$TW.TObj{$T}, args...)), _tobj_where(name, np, T)...),
                              Expr(:block, :($TW.opcall($name, Val($key), $(d.fexpr), t, args...))))))
@@ -414,10 +492,11 @@ macro trait(header, block = nothing)
         # the declared result at the parameters the `Dynamic` fixes (`Any` where it names `Self` or an
         # open parameter), as a declared field's type is read (lowering §13); a constant where it is compiled
         X__ = gensym(:X)
+        fx = ni == 0 ? name : :($TW._family_of($X__))     # with input parameters: the held value's family
         # (a `Dynamic{Y}` where the declared result is a trait `Y`, traits reference §6.2)
         retx = _mentions(d.ret, Rsym) ? :Any :
                any(p -> _mentions(d.ret, p), pnames) ?
-                   :($TW._result_decl($TW._erased_ft($TW.op_ret($name, Val($(QuoteNode(d.name))), $TW._erased_key_of($X__), Val($(length(d.args))))))) :
+                   :($TW._result_decl($TW._erased_ft($TW.op_ret($fx, Val($(QuoteNode(d.name))), $TW._erased_key_of($X__), Val($(length(d.args))))))) :
                :($TW._result_decl($(d.ret)))
         # a constructor operation (result R) gives a dynamic value of the same implementation
         call = :($(d.fexpr)($TW.opened(dyn), $(syms...)))
@@ -431,7 +510,7 @@ macro trait(header, block = nothing)
             # declared implementations' types (or a trait object it holds instead, lowering §13)
             # the seams first (lowering §13): a trait object at an argument declared `Dynamic{Y}`, `Compiled{Y}`
             # or `Kept{Y}` becomes that value, its attribute kept; one argument at a time, no tuple
-            AT = :($TW.op_args($name, Val($(QuoteNode(d.name))), $TW._erased_key_of($X__), Val($(length(d.args)))))
+            AT = :($TW.op_args($fx, Val($(QuoteNode(d.name))), $TW._erased_key_of($X__), Val($(length(d.args)))))
             seams = Any[:($(syms[i]) = $TW._seam1(fieldtype($AT, $i), $(syms[i]))) for i in eachindex(syms)]
             rhs = :(let $(seams...)
                         $TW.CC.split_call($TW._family_of($X__), $retx, $TW._dynop($X__, $(d.fexpr)), getfield(dyn, :t), $(syms...))::$retx
@@ -443,30 +522,44 @@ macro trait(header, block = nothing)
     end
     # a supertrait's operations on a held value of this trait (traits reference §3.6, T-72): the value
     # seen through the supertrait, which runs the supertrait's own method; its supertraits chain the same way
+    # A supertrait with input parameters is seen at the parameters the held value fixes (`HasProperty{:ps, P}`
+    # of `ParamIntegrator{…, P}`), so its operations' results stay typed; of several families of one such
+    # trait (`HasProperty{:ps}`, `HasProperty{:x}`), the one whose declared arguments the call matches.
+    chained = Dict{Any,Vector{Any}}()
     for S in superfams
         Sv = _tryeval(__module__, S)
         (Sv isa Type && is_trait(Sv)) || continue
         for op in trait_ops(Sv)
             f = op_function(Sv, Val(op))
             fr = GlobalRef(parentmodule(f), nameof(f))
+            if S in superinputs
+                push!(get!(() -> Any[], chained, fr), (S, op))
+                continue
+            end
             X__ = gensym(:X)
             push!(out, :(@inline $fr(dyn::$TW.HeldValue{$X__}, args...) where {$X__<:$name} = $fr($TW._as_super($S, dyn), args...)))
         end
     end
+    for (fr, Sops) in chained
+        X__ = gensym(:X)
+        cands = Expr(:tuple, [:($TW.InputCand{$S, $(QuoteNode(op))}()) for (S, op) in Sops]...)
+        push!(out, :(@inline $fr(dyn::$TW.HeldValue{$X__}, args...) where {$X__<:$name} =
+                         $fr($TW._as_super($TW._input_super($X__, $cands, args), dyn), args...)))
+    end
     # fields: properties of the representation, or (type R) the projection, read through a lens when written
     if !isempty(fdecls)
-        push!(out, :($TW.trait_fields(::Type{$name}) = $(Tuple((f, w) for (f, _, w) in fdecls))))
+        push!(out, :($TW.trait_fields(::Type{$nm}) = $(Tuple((f, w) for (f, _, w) in fdecls))))
         for (f, Tex, w) in fdecls
             key = QuoteNode(f)
             T = gensym(:T)
-            push!(out, :($TW.field_type(::Type{$name}, ::Val{$key}, ::Type{K__}) where {K__} =
-                             (let $Rsym = $TW._impl(K__); $(_subst_params(Tex, pnames, name, :K__)); end)))
-            eft = _erased_decl(Tex, pnames, name, :K__)
+            push!(out, :($TW.field_type(::Type{$nm}, ::Val{$key}, ::Type{K__}) where {K__} =
+                             (let $Rsym = $TW._impl(K__); $(_subst_params(Tex, outs, nm, :K__)); end)))
+            eft = _erased_decl(Tex, outs, nm, :K__)
             eft === nothing ||
-                push!(out, :($TW.field_type(::Type{$name}, ::Val{$key}, ::Type{K__}) where {K__ <: $TW.ErasedKey} =
+                push!(out, :($TW.field_type(::Type{$nm}, ::Val{$key}, ::Type{K__}) where {K__ <: $TW.ErasedKey} =
                                  (let $Rsym = $TW._impl(K__); $eft; end)))
-            push!(out, :($TW._fieldpos(::Type{$name}, ::Val{$key}) = $(findfirst(x -> x[1] === f, fdecls))))
-            Tex === Rsym && push!(out, :($TW.field_isrep(::Type{$name}, ::Val{$key}) = true))
+            push!(out, :($TW._fieldpos(::Type{$nm}, ::Val{$key}) = $(findfirst(x -> x[1] === f, fdecls))))
+            Tex === Rsym && push!(out, :($TW.field_isrep(::Type{$nm}, ::Val{$key}) = true))
             push!(out, Expr(:(=), Expr(:where, :($TW._tgetprop(t::$TW.TObj{$T}, ::Val{$key})), _tobj_where(name, np, T)...),
                             :($TW.fieldget($name, Val($key), t))))
             push!(out, Expr(:(=), Expr(:where, :($TW._tsetprop!(t::$TW.TObj{$T}, ::Val{$key}, x)), _tobj_where(name, np, T)...),
@@ -475,5 +568,5 @@ macro trait(header, block = nothing)
     end
     push!(out, :($TW._bump!()))
     push!(out, :($name))
-    return esc(Expr(:block, out...))
+    return esc(Expr(:block, Any[_family_method(ex, nm, inputs) for ex in out]...))
 end

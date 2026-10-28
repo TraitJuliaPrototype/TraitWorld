@@ -11,6 +11,15 @@
 
 "Supertype of every trait: `@trait ColTable{R}` defines `abstract type ColTable{R} <: Trait end`."
 abstract type Trait end
+"""
+    InputTrait{K}
+
+Supertype of a trait whose first `K` parameters are input parameters (traits reference §3.4): a type
+may implement it at several values of them. Its *family* is the trait applied to its input values
+(`HasProperty{:ps}`), a trait of its own: implementations, keys, witnesses and the call-site splits
+of `Dynamic` values are per family, as they are per trait for a trait without inputs.
+"""
+abstract type InputTrait{K} <: Trait end
 # defined before the generators that use it (`_carries_static`): a generator run as plain code
 # executes in the world of its definition
 "`is_trait(X)`: whether `X` was declared with `@trait`."
@@ -200,8 +209,41 @@ struct TObj{T,V<:Tuple}
     views::V
     TObj{T,V}(views::V) where {T,V<:Tuple} = new{T,V}(views)
 end
-"The trait family of a trait instance (`ArrayLike{Float64, 1, Vector{Float64}}` gives `ArrayLike`), or `X` itself."
-_family(@nospecialize(X)) = (u = Base.unwrap_unionall(X); u isa DataType && u <: Trait ? u.name.wrapper : X)
+"""
+The trait family of a trait instance (`ArrayLike{Float64, 1, Vector{Float64}}` gives `ArrayLike`), or `X`
+itself. For a trait with input parameters, the trait applied to its input values (`HasProperty{:ps, Int,
+R}` gives `HasProperty{:ps}`); where an input is left open, the trait itself, which stands for all its
+families. A computation on the type alone: it runs in generators.
+"""
+function _family(@nospecialize(X))
+    u = Base.unwrap_unionall(X)
+    (u isa DataType && u <: Trait) || return X
+    W = u.name.wrapper
+    k = _ninputs(W)
+    k == 0 && return W
+    ps = u.parameters
+    for i in 1:k
+        ps[i] isa TypeVar && return W
+    end
+    return Core.apply_type(W, Any[ps[i] for i in 1:k]...)
+end
+"The number of input parameters of trait type `W` (its supertype `InputTrait{K}`), or 0."
+function _ninputs(@nospecialize(W))
+    u = Base.unwrap_unionall(W)
+    u isa DataType || return 0
+    s = u.super
+    return s isa DataType && s.name === Base.typename(InputTrait) ? (s.parameters[1]::Int) : 0
+end
+"The trait type of a trait instance or family, with no parameter applied (`HasProperty` for `HasProperty{:ps}`)."
+_wrapper(@nospecialize(X)) = (u = Base.unwrap_unionall(X); u isa DataType ? u.name.wrapper : X)
+"Family `F` applied to the parameters `args` of every position, its input positions taking `F`'s own values."
+function _apply_family(@nospecialize(F), args::Vector{Any})
+    k = _ninputs(F)
+    k == 0 && return Core.apply_type(F, args...)
+    u = Base.unwrap_unionall(F)::DataType
+    full = Any[i <= k ? u.parameters[i] : args[i] for i in 1:length(args)]
+    return Core.apply_type(u.name.wrapper, full...)
+end
 """
     PTag{F, i, v}
 
@@ -346,7 +388,7 @@ function _decode_traits(@nospecialize(lb))
                 push!(args, v)
             end
         end
-        body = Core.apply_type(F, args...)
+        body = _apply_family(F, args)
         for tv in reverse(vars)
             body = UnionAll(tv, body)
         end
@@ -382,7 +424,7 @@ Base.Experimental.@max_methods 1 function param_bound end
 function _instance(@nospecialize(X), @nospecialize(R))
     ps = trait_params(X)
     isempty(ps) && return X{R}
-    return Core.apply_type(X, Any[param(X, Val(p), R) for p in ps]..., R)
+    return Core.apply_type(_wrapper(X), Any[param(X, Val(p), R) for p in ps]..., R)
 end
 "Whether a trait object carrying the trait set `T` carries `X`, a family or a partly applied instance."
 _carries(@nospecialize(T), @nospecialize(X)) = any(Y -> Y <: X, Base.uniontypes(_decode_traits(T)))
@@ -531,9 +573,14 @@ A held value of a subtrait seen through its supertrait `S`: the same object, the
 (traits reference §3.6, T-72). The object conforms to `S`, since its type's implementation of the
 subtrait requires one of `S`; so it is not checked again.
 """
-_as_super(::Type{S}, d::Dynamic) where {S} = Dynamic{S}(Val(:checked), getfield(d, :t))
-_as_super(::Type{S}, c::Compiled) where {S} = Compiled{S}(Val(:checked), getfield(c, :t))
-_as_super(::Type{S}, k::Kept) where {S} = Kept{S}(Val(:checked), getfield(k, :t), getfield(k, :compiled))
+# (an invoke at the constructor's own signature: a fact, so code compiled by facts stays typed after it;
+# a call with the `Any`-typed object would be a run-time site)
+@inline _as_super(::Type{S}, d::Dynamic) where {S} =
+    invoke(Dynamic{S}, Tuple{Val{:checked},Any}, Val(:checked), getfield(d, :t))::Dynamic{S}
+@inline _as_super(::Type{S}, c::Compiled) where {S} =
+    invoke(Compiled{S}, Tuple{Val{:checked},Any}, Val(:checked), getfield(c, :t))::Compiled{S}
+@inline _as_super(::Type{S}, k::Kept) where {S} =
+    invoke(Kept{S}, Tuple{Val{:checked},Any,Bool}, Val(:checked), getfield(k, :t), getfield(k, :compiled))::Kept{S}
 "Whether a held value is `Compiled`."
 @inline _held_compiled(::Compiled) = true
 @inline _held_compiled(::Dynamic) = false
@@ -764,7 +811,7 @@ in a bound takes (traits reference §5.1). A constant of the compiled body, per 
 @generated function _trait_param(t::TObj{T,V}, ::Type{F}, ::Val{i}) where {T,V,F,i}
     for Vt in (V::DataType).parameters
         X = Base.unwrap_unionall((Vt::DataType).parameters[1])
-        X isa DataType && X.name.wrapper === F || continue
+        X isa DataType && _family(X) === F || continue
         p = X.parameters[i]
         p isa TypeVar && break
         p === OpenParam && return :(Base.inferencebarrier(_param_open)($F, $i))
@@ -961,7 +1008,14 @@ field_isrep(@nospecialize(X), @nospecialize(f)) = false
 # `t.f` on a trait object: a field one of its traits declares (methods added by @trait), else an error
 @inline Base.getproperty(t::TObj, s::Symbol) = _tgetprop(t, Val(s))
 @inline Base.setproperty!(t::TObj, s::Symbol, x) = _tsetprop!(t, Val(s), x)
-@noinline _tgetprop(t::TObj, ::Val{s}) where {s} = Base.inferencebarrier(_nofield)(typeof(t), s)
+# a name no trait declares as a field: property access, `HasProperty{s}` of BaseTraits, which raises
+# where the trait object does not carry it
+@inline _tgetprop(t::TObj, ::Val{s}) where {s} = _propget(t, Val(s))
+"""
+`_propget(x, Val(name))`: `x.name` on a trait object or a kept value, where none of its traits declares
+a field `name`: the operation of `HasProperty{name}` (BaseTraits, traits reference §8.1).
+"""
+_propget(x, ::Val{s}) where {s} = Base.inferencebarrier(_nofield)(typeof(x), s)
 @noinline _tsetprop!(t::TObj, ::Val{s}, x) where {s} = Base.inferencebarrier(_nofield)(typeof(t), s)
 @noinline _nofield(@nospecialize(T), s::Symbol) =
     throw(ArgumentError("`t.$s`: no trait this trait object carries declares a field `$s`"))
@@ -972,6 +1026,7 @@ Base.@constprop :aggressive @inline Base.getproperty(d::HeldValue{X}, s::Symbol)
 Base.@constprop :aggressive @inline Base.setproperty!(d::HeldValue{X}, s::Symbol, x) where {X} = _dyn_setprop!(d, Val(s), x)
 @inline function _dyn_getprop(d::HeldValue{X}, ::Val{f}) where {X,f}
     F = _family_of(X)
+    _declares_own_field(F, Val(f)) || return _propget(d, Val(f))
     RT = _erased_ft(field_type(F, Val(f), _erased_key_of(X)))
     return CC.split_call(F, RT, _DynField{F,f}(), getfield(d, :t))::RT
 end
@@ -981,12 +1036,17 @@ end
     CC.split_call(F, Nothing, _DynFieldSet{F,f}(), getfield(d, :t), y)
     return y
 end
+"Whether trait family `F` declares field `f` itself: a constant where `F` is (its declared fields are a constant tuple)."
+@inline _declares_own_field(::Type{F}, ::Val{f}) where {F,f} = _hasname(trait_fields(F), f)
+@inline _hasname(::Tuple{}, f::Symbol) = false
+@inline _hasname(t::Tuple, f::Symbol) = first(first(t)) === f || _hasname(Base.tail(t), f)
 "The erased key of `Dynamic{X}`: the parameter values `X` fixes, `Any` for an open one."
 @generated function _erased_key_of(::Type{X}) where {X}
     u = Base.unwrap_unionall(X)
     (u isa DataType && u <: Trait) || return :(ErasedKey{Tuple{},Nothing})
     ps = (u::DataType).parameters
-    vals = Any[(ps[i] isa TypeVar ? :OpenParam : ps[i]) for i in 1:(length(ps)::Int)-1]
+    # a parameter that is a value (an input parameter's `:ps`) is quoted, not read as a name
+    vals = Any[(ps[i] isa TypeVar ? :OpenParam : ps[i] isa Type ? ps[i] : QuoteNode(ps[i])) for i in 1:(length(ps)::Int)-1]
     return :(ErasedKey{Tuple{$([:(ParamVal{$v}) for v in vals]...)},Nothing})
 end
 
@@ -1116,6 +1176,54 @@ the declared type. Everything folds for a known view type.
     x = _dispatch(X, Val(op), f, getfield(v, :w), _rep(v), t, args...)
     return _op_result(RT, x)
 end
+
+# --- traits with input parameters (traits reference §3.4) ---------------------------------------------
+
+"""
+An operation of trait `W` with input parameters on a trait object: the operation of the family whose
+view the trait object carries and whose declared arguments `args` match (`property(t, Val(:ps))` runs
+`HasProperty{:ps}`'s). Each test folds for a known view type.
+"""
+@inline opcall_input(::Type{W}, ::Val{op}, f::F, t::TObj, args::Vararg{Any,N}) where {W,op,F,N} =
+    _opcall_input(W, Val(op), f, t, args, getfield(t, :views)...)
+@inline function _opcall_input(::Type{W}, ::Val{op}, f::F, t::TObj, args::Tuple, v::AbstractView{Y}, rest...) where {W,op,F,Y}
+    if Y <: W
+        G = _family_of(Y)
+        _matches_args(op_args(G, Val(op), _reptype(typeof(v)), Val(length(args))), args) && return opcall(G, Val(op), f, t, args...)
+    end
+    return _opcall_input(W, Val(op), f, t, args, rest...)
+end
+@inline _opcall_input(::Type{W}, ::Val{op}, f::F, t::TObj, args::Tuple) where {W,op,F} =
+    Base.inferencebarrier(_no_input_family)(W, op, t, args)
+@noinline _no_input_family(@nospecialize(W), op::Symbol, @nospecialize(t), @nospecialize(args)) =
+    throw(TraitBoundError("`$op` with arguments of types $(join(map(typeof, args), ", ")): the trait object carries " *
+                          "$(_traitlist(typeof(t))), and no family of $W among them takes these arguments"))
+"Whether `args` match an operation's declared arguments `AT`: as they are, or a trait object where a kept form is declared."
+@inline _matches_args(::Type{AT}, args::Tuple) where {AT} = args isa AT || _seams(AT, args) isa AT
+
+"A candidate supertrait of a held value: a family `S` of a trait with input parameters, for operation `op`."
+struct InputCand{S,op} end
+"""
+The supertrait an operation on a held value of trait `X` reaches, among the families `cands` of one
+trait with input parameters (`InputCand{HasProperty{:ps}, :property}()`, …): the first whose declared
+arguments `args` match, at the parameters `X` fixes (`_super_inst`).
+"""
+@inline _input_super(::Type{X}, cands::Tuple, args::Tuple) where {X} = _input_super1(X, args, cands...)
+@inline function _input_super1(::Type{X}, args::Tuple, ::InputCand{S,op}, rest...) where {X,S,op}
+    Si = _super_inst(S, X)
+    _matches_args(op_args(S, Val(op), _erased_key_of(Si), Val(length(args))), args) && return Si
+    return _input_super1(X, args, rest...)
+end
+@inline _input_super1(::Type{X}, args::Tuple) where {X} = Base.inferencebarrier(_no_input_super)(X, args)
+@noinline _no_input_super(@nospecialize(X), @nospecialize(args)) =
+    throw(TraitBoundError("no supertrait of $X takes arguments of types $(join(map(typeof, args), ", "))"))
+"""
+Supertrait family `S` of the trait instance `X`, at the parameters `X` fixes: `HasProperty{:ps,
+Vector{Float64}}` for `ParamInteg{Vector{Float64}}`, by a method `@trait` defines per supertrait with
+input parameters (its header's supertrait, at the subtrait's parameters). `S` itself where `X` leaves a
+parameter open.
+"""
+@inline _super_inst(::Type{S}, ::Type{X}) where {S,X} = S
 
 """
 The result of an operation declared `RT`: asserted to `RT`; where `RT` is a trait (an operation's

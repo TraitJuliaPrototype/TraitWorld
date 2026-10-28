@@ -85,7 +85,7 @@ include("frames.jl")
 include("BaseTraits.jl")
 using .BaseTraits
 export BaseTraits, HasLength, Iterable, Indexable, MutableIndexable, Resizable, Keyed, DynamicItems, DynamicValues,
-       CompiledItems, CompiledValues, retain!, asvector, IndexableVector, Solvable, solve!, BoundedText, textbound
+       CompiledItems, CompiledValues, retain!, asvector, IndexableVector, Solvable, solve!, BoundedText, textbound, HasProperty
 
 # ---------------------------------------------------------------------------
 # Precompile the machinery itself: macro expansion, registration, checks,

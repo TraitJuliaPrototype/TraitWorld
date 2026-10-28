@@ -1257,6 +1257,34 @@ end
 const _DECL_WORLD = Ref{UInt}(typemax(UInt))
 "Marks the start of an `@implement`'s definitions."
 _declaration_begins() = (_DECL_WORLD[] = Base.get_world_counter(); nothing)
+"""
+A declaration's traits with input parameters named by their families (traits reference §3.4):
+`HasProperty{:ps, Vector{Float64}, T}` becomes `HasProperty{:ps}{:ps, Vector{Float64}, T}`, so the
+implementation is of the family `HasProperty{:ps}`, at every parameter as written. An input parameter
+is stated as a value; a `where` variable there (one implementation for every input value) is Planned.
+"""
+function _input_families(mod::Module, head)
+    if head isa Expr && head.head === :where
+        return Expr(:where, _input_families(mod, head.args[1]), head.args[2:end]...)
+    elseif head isa Expr && head.head === :tuple
+        return Expr(:tuple, Any[_input_families(mod, a) for a in head.args]...)
+    end
+    W = head isa Expr && head.head === :curly ? head.args[1] : head
+    Wv = _tryeval(mod, W)
+    (Wv isa Type && is_trait(Wv)) || return head
+    k = _ninputs(Wv)
+    k == 0 && return head
+    (head isa Expr && head.head === :curly && length(head.args) > k) ||
+        throw(ImplementError("$Wv has input parameter(s) $(join(trait_params(Wv)[1:k], ", ")): an implementation states their values, " *
+                             "`@implement $(nameof(Wv)){$(join(("…" for _ in 1:k), ", ")), …} T` (traits reference §3.4)"))
+    fex = Expr(:curly, W, head.args[2:1+k]...)
+    F = _tryeval(mod, fex)
+    (F isa Type && _family(F) == F && F !== Wv) ||
+        throw(ImplementError("`$head`: an input parameter of $Wv is stated as a value here; one implementation for every value " *
+                             "of an input parameter (a `where` variable) is planned (traits reference §3.4)"))
+    return Expr(:curly, fex, head.args[2:end]...)
+end
+
 "Runs a declaration's check; when it refuses, the declaration's methods are deleted first."
 function _refusing(f, mod::Module, @nospecialize(X), args...)
     try
@@ -1330,7 +1358,7 @@ end
         fmap = Dict{Symbol,Symbol}(p.first.value => p.second.value for p in args[end].args)
         args = args[1:end-1]
     end
-    head = args[1]
+    head = _input_families(mod, args[1])
     rest = collect(args[2:end])
     # a bundle is the tuple of its traits (traits reference §3.6, §3.7):
     # `@implement Table T …` is `@implement (ColTable, RowTable) T …`

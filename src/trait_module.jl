@@ -870,9 +870,13 @@ function _rewrite_fdef(mod::Module, ex)
             end
             h = _tryeval(mod, a.args[1])
             h isa Type && is_trait(h) || continue
+            # with input parameters, the family the bound names (`HasProperty{:ps}`)
+            kh = _ninputs(h)
+            Fh = kh == 0 ? _family(h) : _family(_tryeval(mod, Expr(:curly, a.args[1], a.args[2:min(1 + kh, end)]...)))
             for (i, p) in enumerate(a.args[2:end])
+                i <= kh && continue                         # an input parameter is fixed by the bound (`_bound_members`)
                 if p isa Symbol && any(w -> _wherevar(w) === p, wheres)
-                    any(b -> b[1] === p && b[2] === x.name, wbind) || push!(wbind, (p, x.name, _family(h), i))
+                    any(b -> b[1] === p && b[2] === x.name, wbind) || push!(wbind, (p, x.name, Fh, i))
                 elseif any(w -> _uses(p, _wherevar(w)), wheres)
                     error("@trait_module: argument `$(x.name)`: a bound names a `where` variable only as a whole parameter, `$(a.args[1]){…, T, …}`; `$p` is not one")
                 end
@@ -1503,7 +1507,11 @@ end
 "A trait bound as members of a worker's lower bound: its family, and `PTag{F, i, v}` for each parameter it fixes."
 function _bound_members(@nospecialize(X))
     u = Base.unwrap_unionall(X)
-    fam = u.name.wrapper
+    fam = _family(X)
+    k = _ninputs(u.name.wrapper)
+    any(i -> u.parameters[i] isa TypeVar, 1:k) &&
+        throw(TraitBoundError("the bound $X leaves an input parameter of $(u.name.wrapper) open: a bound fixes it with a value " *
+                              "(traits reference §3.4)"))
     out = Any[fam]
     ps = u.parameters
     for i in 1:length(ps)-1

@@ -29,7 +29,7 @@ using Dates: Dates
 
 export HasLength, Iterable, Indexable, MutableIndexable, Resizable, Keyed,
        DynamicItems, DynamicValues, CompiledItems, CompiledValues, retain!,
-       asvector, IndexableVector, Solvable, solve!, BoundedText, textbound
+       asvector, IndexableVector, Solvable, solve!, BoundedText, textbound, HasProperty, property
 
 # --- the traits ------------------------------------------------------------------------------
 
@@ -348,6 +348,29 @@ function _may_hold_slow(@nospecialize(Y), @nospecialize(E), flag::Base.RefValue{
     ok && (flag[] = TraitWorld._SESSION[])
     return ok
 end
+
+# --- property access at a name ---------------------------------------------------------------------
+
+"""
+    HasProperty{N, R}
+
+Property access at the name `N`: `property(x, Val(N))` is the value of `x`'s property `N`, of type
+`R`. `N` is an input parameter (traits reference §3.4): a type implements `HasProperty` at each of
+its names, `HasProperty{:ps, P}` and `HasProperty{:x, Float64}`, each with its own `R`. A trait object
+or a kept value whose traits carry `HasProperty{N}` reads `x.N` through it, as a computed property;
+a declared field is read as before.
+
+    @implement HasProperty{:ps, ParamView} MyIntegrator begin
+        property(x, ::Val{:ps}) = ParamView(x.p)
+    end
+"""
+@trait HasProperty{N, R} begin
+    @input N
+    property(x::HasProperty{N, R}, ::Val{N})::R
+end
+# `x.N` on a trait object or a kept value, where none of its traits declares a field `N`
+TraitWorld._propget(t::TObj, ::Val{s}) where {s} = property(t, Val(s))
+TraitWorld._propget(d::TraitWorld.HeldValue, ::Val{s}) where {s} = property(d, Val(s))
 
 # --- a trait collection as a vector for plain code ------------------------------------------------
 
