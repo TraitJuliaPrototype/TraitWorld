@@ -153,10 +153,14 @@ end
             idx(i, s) = findfirst(==(s), i.v)
         end
         lookup(i::Dynamic{Ix}, s::Symbol)::Union{Nothing, Int} = idx(i, s)
+        asix(i::Ix)::Dynamic{Ix} = Dynamic{Ix}(i)                     # a kept form declared as the result
         end
     end)
     M = Base.invokelatest(getglobal, Main, :EntryResult)
     g(s) = Base.invokelatest(getglobal, M, s)
     @test Base.invokelatest(g(:lookup), Base.invokelatest(g(:Names), [:a, :b]), :b) == 2
     @test Base.invokelatest(Base.return_types, g(:lookup), (Dynamic{g(:Ix)}, Symbol)) == Any[Union{Nothing, Int}]
+    # a declared `Dynamic{X}` result reaches a plain caller too (open issue 100)
+    @test Base.invokelatest(g(:asix), Base.invokelatest(g(:Names), [:a])) isa Dynamic{g(:Ix)}
+    @test all(==(Dynamic{g(:Ix)}), Base.invokelatest(Base.return_types, g(:asix), (Any,)))
 end

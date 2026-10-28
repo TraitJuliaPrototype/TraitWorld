@@ -111,6 +111,12 @@ _assert_returns(@nospecialize(ex), @nospecialize(R)) =
     !(ex isa Expr) || ex.head in (:function, :->, :quote) ? ex :
     ex.head === :return ? Expr(:return, Expr(:(::), isempty(ex.args) ? nothing : _assert_returns(ex.args[1], R), R)) :
     Expr(ex.head, Any[_assert_returns(a, R) for a in ex.args]...)
+"Whether a declared result `ret` is a plain type (it names no trait) or a concrete kept form (`Dynamic{X}`)."
+function _plainresult(mod::Module, @nospecialize(ret))
+    R = _tryeval(mod, ret)
+    R isa Type || return false
+    return !_names_trait(mod, ret) || (R <: Dynamic && isconcretetype(R))
+end
 "Whether expression `x` names a trait anywhere."
 _names_trait(mod::Module, @nospecialize(x)) = _istraitname(mod, x) || (x isa Expr && any(a -> _names_trait(mod, a), x.args))
 "A macro's expansion without its outer `esc`: the definition as written in the module."
@@ -1139,8 +1145,9 @@ function _rewrite_fdef(mod::Module, ex)
         else
             push!(stmts, :($res = $TraitWorld.checked_call($fname, $(newnames...))))
         end
-        # a declared result that is a plain type (no `where` variable, no trait) is never a result like the input
-        plainret = ret !== nothing && !any(w -> _uses(ret, _wherevar(w)), wheres) && !_names_trait(mod, ret) && _tryeval(mod, ret) isa Type
+        # a declared result that is a plain type (no `where` variable, no trait), or a kept form that is a concrete type
+        # (`Dynamic{X}`), is never a result like the input
+        plainret = ret !== nothing && !any(w -> _uses(ret, _wherevar(w)), wheres) && _plainresult(mod, ret)
         push!(stmts, plainret ? :(return $res) :
                      :(return $res isa $TraitWorld.LikeResult ? $TraitWorld._like_return($res, $us, $vs) : $res))
         kept = Any[w for w in wheres if any(x -> x.kind in (:plain, :vararg) && x.ann !== nothing && _uses(x.ann, _wherevar(w)), args)]
@@ -1239,7 +1246,7 @@ function _rewrite_fdef(mod::Module, ex)
             push!(rest, :(isdefined(@__MODULE__, :__tw_untyped__) && push!(__tw_untyped__, ($fname, $nargs, $tag(), $(Tuple(tpos))))))
         end
         pushfirst!(stmts, Expr(:meta, :facts_boundary))
-        # the declared result on the entry too, where it is a plain type (no `where` variable, no trait): a caller's
+        # the declared result on the entry too, where it is a plain type or a `Dynamic{X}`: a caller's
         # plain inference (the member check's, a plain caller's) then sees it, not the entry's `Any`. Asserted at each
         # `return`, not converted: the worker returns the declared type already, and a conversion of a result typed
         # `Any` (a worker chosen when the code runs) would be a dispatch per call
