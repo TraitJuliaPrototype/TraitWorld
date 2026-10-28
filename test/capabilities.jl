@@ -139,3 +139,24 @@ end
     @test Base.invokelatest(g(:run3), (1, 2, 3), a) == 12
     @test_throws MethodError Base.invokelatest(g(:run1), [1], :notanalg)      # the bound, not a plain annotation
 end
+
+@testset "a bounded function's declared result, seen by plain inference at its entry (found by SciML's move 4)" begin
+    toplevel(quote
+        @trait_module module EntryResult
+        using TraitWorld
+        export Ix, idx, lookup
+        @trait Ix begin
+            idx(i::Ix, s::Symbol)::Union{Nothing, Int}
+        end
+        struct Names; v::Vector{Symbol}; end
+        @implement Ix Names begin
+            idx(i, s) = findfirst(==(s), i.v)
+        end
+        lookup(i::Dynamic{Ix}, s::Symbol)::Union{Nothing, Int} = idx(i, s)
+        end
+    end)
+    M = Base.invokelatest(getglobal, Main, :EntryResult)
+    g(s) = Base.invokelatest(getglobal, M, s)
+    @test Base.invokelatest(g(:lookup), Base.invokelatest(g(:Names), [:a, :b]), :b) == 2
+    @test Base.invokelatest(Base.return_types, g(:lookup), (Dynamic{g(:Ix)}, Symbol)) == Any[Union{Nothing, Int}]
+end

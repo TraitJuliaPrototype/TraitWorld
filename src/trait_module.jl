@@ -106,6 +106,8 @@ function _strip_nospecialize!(nospec::Set{Any}, a)
     push!(nospec, nm isa Expr && nm.head === :(::) ? nm.args[1] : nm)
     return inner
 end
+"Whether expression `x` names a trait anywhere."
+_names_trait(mod::Module, @nospecialize(x)) = _istraitname(mod, x) || (x isa Expr && any(a -> _names_trait(mod, a), x.args))
 "A macro's expansion without its outer `esc`: the definition as written in the module."
 _unescape(x) = x isa Expr && x.head === :escape ? _unescape(x.args[1]) : x
 
@@ -567,7 +569,11 @@ function _classify(mod::Module, a, unbounded::Vector{Symbol} = Symbol[]; attr_bo
         # `x::T where T` with no bound is untyped: it must not take the entry's place
         ann isa Symbol && ann in unbounded && return _Arg(name, ann, :untyped, Any[], nothing, nothing, nothing)
         if ann isa Expr && ann.head === :tuple
-            vs = Any[_tryeval(mod, x) for x in ann.args]
+            # an element may name the method's `where` variables (`(ValueProvider{U, P}, IndexProvider)`): evaluated
+            # with them open, as a single bound is (traits reference §5.1, §3.7)
+            evalopen(x) = (v = _tryeval(mod, x); v !== nothing ? v :
+                           (used = Any[w for w in wheres if _uses(x, _wherevar(w))]; isempty(used) ? nothing : _tryeval(mod, Expr(:where, x, used...))))
+            vs = Any[evalopen(x) for x in ann.args]
             cps = Any[_callable_params(v) for v in vs]
             if all(c -> c !== nothing, cps)
                 # several Callable bounds: the function is called at each signature
@@ -852,19 +858,24 @@ function _rewrite_fdef(mod::Module, ex)
     # start of the body, or checked against the value something else fixes for them
     wbind = Any[]
     for x in args
-        x.kind === :trait && x.ann isa Expr && x.ann.head === :curly || continue
-        a = x.ann
-        # under an attribute, `Dynamic{Column{T}}`: the trait's parameters are those of the bound inside
-        if length(a.args) == 2 && a.args[2] isa Expr && a.args[2].head === :curly && _tryeval(mod, a.args[1]) in (Dynamic, Compiled)
-            a = a.args[2]
-        end
-        h = _tryeval(mod, a.args[1])
-        h isa Type && is_trait(h) || continue
-        for (i, p) in enumerate(a.args[2:end])
-            if p isa Symbol && any(w -> _wherevar(w) === p, wheres)
-                push!(wbind, (p, x.name, _family(h), i))
-            elseif any(w -> _uses(p, _wherevar(w)), wheres)
-                error("@trait_module: argument `$(x.name)`: a bound names a `where` variable only as a whole parameter, `$(x.ann.args[1]){…, T, …}`; `$p` is not one")
+        x.kind === :trait && x.ann isa Expr && x.ann.head in (:curly, :tuple) || continue
+        # a tuple of bounds: each element binds its own `where` variables (within one argument, the first to name one
+        # binds it; across arguments every binding stays, so unequal values are refused)
+        for a0 in (x.ann.head === :tuple ? x.ann.args : Any[x.ann])
+            a = a0
+            a isa Expr && a.head === :curly || continue
+            # under an attribute, `Dynamic{Column{T}}`: the trait's parameters are those of the bound inside
+            if length(a.args) == 2 && a.args[2] isa Expr && a.args[2].head === :curly && _tryeval(mod, a.args[1]) in (Dynamic, Compiled)
+                a = a.args[2]
+            end
+            h = _tryeval(mod, a.args[1])
+            h isa Type && is_trait(h) || continue
+            for (i, p) in enumerate(a.args[2:end])
+                if p isa Symbol && any(w -> _wherevar(w) === p, wheres)
+                    any(b -> b[1] === p && b[2] === x.name, wbind) || push!(wbind, (p, x.name, _family(h), i))
+                elseif any(w -> _uses(p, _wherevar(w)), wheres)
+                    error("@trait_module: argument `$(x.name)`: a bound names a `where` variable only as a whole parameter, `$(a.args[1]){…, T, …}`; `$p` is not one")
+                end
             end
         end
     end
@@ -1216,6 +1227,11 @@ function _rewrite_fdef(mod::Module, ex)
             push!(rest, :(isdefined(@__MODULE__, :__tw_untyped__) && push!(__tw_untyped__, ($fname, $nargs, $tag(), $(Tuple(tpos))))))
         end
         pushfirst!(stmts, Expr(:meta, :facts_boundary))
+        # the declared result on the entry too, where it is a plain type (no `where` variable, no trait): a caller's
+        # plain inference (the member check's, a plain caller's) then sees it, not the entry's `Any`
+        if ret !== nothing && !any(w -> _uses(ret, _wherevar(w)), wheres) && !_names_trait(mod, ret) && _tryeval(mod, ret) isa Type
+            esig = esig.head === :where ? Expr(:where, Expr(:(::), esig.args[1], ret), esig.args[2:end]...) : Expr(:(::), esig, ret)
+        end
         push!(rest, Expr(:macrocall, GlobalRef(Base, Symbol("@inline")), LineNumberNode(0, :none),
                          Expr(:function, esig, Expr(:block, stmts...))))
         if entries !== nothing
