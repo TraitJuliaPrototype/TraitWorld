@@ -112,7 +112,7 @@ function _override_index()
     return @atomic _OVR.d
 end
 "The default-served operations of a family member's fixed builder: records `(Y, op, R, X, T)`."
-function _builder_records(@nospecialize(X), @nospecialize(U), b::Builder)
+function _builder_records(@nospecialize(X), @nospecialize(U), @nospecialize(b::Builder))
     out = Any[]
     for spec in typeof(b).parameters[1].parameters
         Xi, W, K = spec.parameters[1], spec.parameters[2], spec.parameters[3]
@@ -127,7 +127,7 @@ function _builder_records(@nospecialize(X), @nospecialize(U), b::Builder)
     return out
 end
 "Add a family member's records to the index (when its builder is fixed in the session)."
-function _index_builder!(@nospecialize(X), @nospecialize(U), b::Builder)
+function _index_builder!(@nospecialize(X), @nospecialize(U), @nospecialize(b::Builder))
     _ovr_push!(Any[(_opfn(Y, op), (Y, op, R, X2, U2)) for (Y, op, R, X2, U2) in _builder_records(X, U, b)])
     return nothing
 end
