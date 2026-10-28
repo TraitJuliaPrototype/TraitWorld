@@ -59,6 +59,7 @@ function _site_hint(h::Hole)
     k === :latest && return "a call in the latest world (`invokelatest`): it cannot be a fact"
     k === :inference && return "a result decided by inference (`return_type`): declare the type"
     k === :closure && return "a closure handed to the runtime"
+    k === :trait_arg && return "a value whose type is known only when the code runs enters trait code here (an opened `Dynamic`, a value of unknown type): one dispatch per call chooses the worker"
     return "a call the compiler dispatches at run time"
 end
 

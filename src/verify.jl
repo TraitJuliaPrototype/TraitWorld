@@ -153,6 +153,7 @@ end
 # --- reading optimized code ----------------------------------------------------
 
 function _constval(src, sptypes, @nospecialize(x))
+    x isa Expr && return nothing
     t = _CC.argextype(x, src, sptypes)
     t isa _CC.Const && return Some{Any}(t.val)
     T = _CC.widenconst(t)
@@ -160,7 +161,9 @@ function _constval(src, sptypes, @nospecialize(x))
     return nothing
 end
 
-_argT(src, sptypes, @nospecialize(x)) = _CC.widenconst(_CC.argextype(x, src, sptypes))
+# An argument may be an expression where the IR allows one (the symbol and library of `cglobal`,
+# `Core.tuple(:name, lib)`): no value, so no type.
+_argT(src, sptypes, @nospecialize(x)) = x isa Expr ? Any : _CC.widenconst(_CC.argextype(x, src, sptypes))
 
 "Resolve a callee: `(:const, f)`, `(:field, objtype, name, obj)` or `(:unknown, type)`."
 function _callee(src, sptypes, @nospecialize(x))
@@ -475,6 +478,7 @@ function _runtime_closure(src, sptypes, @nospecialize(st))
     fv = _constval(src, sptypes, st.args[1+off])
     fv === nothing && return nothing
     f = something(fv)
+    f === Core.Task || f === Base.atexit || f === Base.finalizer || f === Core.finalizer || return nothing
     ats = Any[_argT(src, sptypes, a) for a in st.args[2+off:end]]
     if f === Core.Task && length(ats) >= 1
         return (:task, Any[ats[1]])
@@ -491,7 +495,8 @@ end
 _machinery_method(m::Method) = (m.module === Base.Compiler && m.name === :register_dynamic_candidate!) ||   # a session's candidates (part (D)); a trimmed build has none
     m.module === TraitWorld && m.name in
     (:_check_once, :_latest, :_conformance_slow, :_needed_slow, :_builder_for, :worker_problems, :_rule3_error,
-     :_closed_miss, :_witness, :witness, :proj_lookup, :_no_worker_error, :_refuse_overrides, :_merge_dyn,
+     :_closed_miss, :_pmiss, :_umiss,   # the untyped table's miss: its entry made once per type and position
+     :_witness, :witness, :proj_lookup, :_no_worker_error, :_refuse_overrides, :_merge_dyn,
      :_cross_decide,   # the crossing's decision, once per crossing and container type
      :_register_candidate_slow!)   # a type registered as a candidate, once per session (part (D)); a trimmed build has none
 

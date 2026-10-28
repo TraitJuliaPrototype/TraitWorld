@@ -106,6 +106,11 @@ function _strip_nospecialize!(nospec::Set{Any}, a)
     push!(nospec, nm isa Expr && nm.head === :(::) ? nm.args[1] : nm)
     return inner
 end
+"Each `return x` in `ex` as `return x::R` (not inside a nested function)."
+_assert_returns(@nospecialize(ex), @nospecialize(R)) =
+    !(ex isa Expr) || ex.head in (:function, :->, :quote) ? ex :
+    ex.head === :return ? Expr(:return, Expr(:(::), isempty(ex.args) ? nothing : _assert_returns(ex.args[1], R), R)) :
+    Expr(ex.head, Any[_assert_returns(a, R) for a in ex.args]...)
 "Whether expression `x` names a trait anywhere."
 _names_trait(mod::Module, @nospecialize(x)) = _istraitname(mod, x) || (x isa Expr && any(a -> _names_trait(mod, a), x.args))
 "A macro's expansion without its outer `esc`: the definition as written in the module."
@@ -1134,7 +1139,10 @@ function _rewrite_fdef(mod::Module, ex)
         else
             push!(stmts, :($res = $TraitWorld.checked_call($fname, $(newnames...))))
         end
-        push!(stmts, :(return $res isa $TraitWorld.LikeResult ? $TraitWorld._like_return($res, $us, $vs) : $res))
+        # a declared result that is a plain type (no `where` variable, no trait) is never a result like the input
+        plainret = ret !== nothing && !any(w -> _uses(ret, _wherevar(w)), wheres) && !_names_trait(mod, ret) && _tryeval(mod, ret) isa Type
+        push!(stmts, plainret ? :(return $res) :
+                     :(return $res isa $TraitWorld.LikeResult ? $TraitWorld._like_return($res, $us, $vs) : $res))
         kept = Any[w for w in wheres if any(x -> x.kind in (:plain, :vararg) && x.ann !== nothing && _uses(x.ann, _wherevar(w)), args)]
         # with keywords, the entry is its own keyword sorter: Julia's would be specialized on the named tuple of
         # the supplied keywords, where `known_type` always sees their types; taken unspecialized, as the
@@ -1232,9 +1240,11 @@ function _rewrite_fdef(mod::Module, ex)
         end
         pushfirst!(stmts, Expr(:meta, :facts_boundary))
         # the declared result on the entry too, where it is a plain type (no `where` variable, no trait): a caller's
-        # plain inference (the member check's, a plain caller's) then sees it, not the entry's `Any`
-        if ret !== nothing && !any(w -> _uses(ret, _wherevar(w)), wheres) && !_names_trait(mod, ret) && _tryeval(mod, ret) isa Type
-            esig = esig.head === :where ? Expr(:where, Expr(:(::), esig.args[1], ret), esig.args[2:end]...) : Expr(:(::), esig, ret)
+        # plain inference (the member check's, a plain caller's) then sees it, not the entry's `Any`. Asserted at each
+        # `return`, not converted: the worker returns the declared type already, and a conversion of a result typed
+        # `Any` (a worker chosen when the code runs) would be a dispatch per call
+        if plainret
+            stmts = Any[_assert_returns(st, ret) for st in stmts]
         end
         push!(rest, Expr(:macrocall, GlobalRef(Base, Symbol("@inline")), LineNumberNode(0, :none),
                          Expr(:function, esig, Expr(:block, stmts...))))

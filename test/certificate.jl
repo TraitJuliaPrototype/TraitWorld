@@ -7,7 +7,7 @@ isdefined(Main, :toplevel) || (toplevel(ex) = Core.eval(Main, ex isa Expr && ex.
 toplevel(quote
     @trait_module module Cert
     using TraitWorld
-    export CTab, cn, cc, csum, cmixed, CShape, carea, ctotal
+    export CTab, cn, cc, csum, cmixed, CShape, carea, ctotal, csize
     @trait CTab begin
         cn(t::CTab)::Int
         cc(t::CTab, i::Int)::Vector{Float64}
@@ -17,6 +17,7 @@ toplevel(quote
         cc(t, i) = t[i]
     end
     csum(t::CTab) = (s = 0.0; for i in 1:cn(t); s += sum(cc(t, i)); end; s)            # fully typed
+    csize(t::CTab)::Int = cn(t)                                                         # a declared plain result
     cmixed(t::CTab, w::Vector{Any}) = (s = 0.0; for i in 1:cn(t); s += w[i] * sum(cc(t, i)); end; s)   # w[i] is Any
     @trait CShape{R} begin
         carea(r::R)::Float64
@@ -48,4 +49,14 @@ end)
     # fully typed mode's error level refuses code that is not fully typed (or uses abstract values)
     e = try CertStrict.strictmixed(t, Any[1.0, 2.0]); nothing catch err; err end
     @test e isa NotFullyTypedError || e isa AbstractTypeError
+    # an argument that is an expression where the IR allows one (`cglobal`'s symbol and library, in BigInt's finalizer)
+    bigsum(n::Int) = (s = big(0); for i in 1:n; s += i; end; s)
+    @test fully_typed(bigsum, (Int,)) isa TraitWorld.FullyTypedReport
+    # a declared plain result reaches a plain caller by an assertion at the entry, not a conversion: a value whose type
+    # is known only when the code runs costs one dispatch, and no `convert` of the worker's result
+    sizes(ts::Vector{Dynamic{Cert.CTab}}) = (n = 0; for x in ts; n += Cert.csize(Base.inferencebarrier(x)); end; n)
+    @test all(==(Int), Base.return_types(Cert.csize, (Any,)))
+    @test sizes(Dynamic{Cert.CTab}[Dynamic{Cert.CTab}(t)]) == 2
+    r4 = fully_typed(sizes, (Vector{Dynamic{Cert.CTab}},))
+    @test !any(h -> h.callee === convert, r4.sites)
 end
