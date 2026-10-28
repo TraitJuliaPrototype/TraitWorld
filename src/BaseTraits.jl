@@ -24,9 +24,12 @@ The owner of these traits is TraitWorld. As their owner it declares Base's types
 @trait_module module BaseTraits
 using ..TraitWorld
 using ..TraitWorld: _dyn_object, @dynamic_of, @kept_of, TObj, Kept, compiled_for, with_dynamic
+using LinearAlgebra: LinearAlgebra, Factorization, ldiv!
+using Dates: Dates
 
 export HasLength, Iterable, Indexable, MutableIndexable, Resizable, Keyed,
-       DynamicItems, DynamicValues, CompiledItems, CompiledValues, retain!
+       DynamicItems, DynamicValues, CompiledItems, CompiledValues, retain!,
+       asvector, IndexableVector, Solvable, solve!, BoundedText, textbound
 
 # --- the traits ------------------------------------------------------------------------------
 
@@ -344,6 +347,127 @@ function _may_hold_slow(@nospecialize(Y), @nospecialize(E), flag::Base.RefValue{
     end
     ok && (flag[] = TraitWorld._SESSION[])
     return ok
+end
+
+# --- a trait collection as a vector for plain code ------------------------------------------------
+
+"""
+    IndexableVector{T, C}
+
+An `Indexable{T}` collection seen by plain code as an `AbstractVector{T}` (Statistics, an upstream
+kernel), without a copy: `asvector(x)`. Its parameter `C` is bounded by `Indexable{T}` (traits
+reference §7.4): for a `Compiled` collection, the user's object, so code over the vector is compiled
+per collection type; for a `Dynamic` one, `Dynamic{Indexable{T}}`, so it is compiled once per `T`.
+Reading `v[i]` reads the collection's `i`-th item; the vector is read-only.
+"""
+struct IndexableVector{T, C <: Indexable{T}} <: AbstractVector{T}
+    c::C
+end
+Base.size(v::IndexableVector) = (length(v.c),)
+Base.IndexStyle(::Type{<:IndexableVector}) = IndexLinear()
+Base.@propagate_inbounds Base.getindex(v::IndexableVector, i::Int) = v.c[i]
+
+"""
+    asvector(x::Indexable{T})::AbstractVector{T}
+
+The collection `x` as an `AbstractVector{T}` for plain code, without a copy: an `IndexableVector`
+that reads `x`'s items in place. Compiled per collection type where `x` is `Compiled`, once per `T`
+where it is `Dynamic`.
+"""
+asvector(x::Indexable{T}) where {T} = IndexableVector(x)
+
+# --- linear systems -------------------------------------------------------------------------------
+
+"""
+    Solvable{T}
+
+A factorization that solves linear systems: `solve!(F, x, b)` writes into `x` the solution of
+`A x = b` for the matrix `A` that `F` factorizes. `T = eltype(Self)`, the factorization's element
+type. LinearAlgebra's `Factorization{T}` conforms through `ldiv!`.
+"""
+@trait Solvable{T} begin
+    T = eltype(Self)
+    solve!(F::Solvable{T}, x::Vector{T}, b::Vector{T})::Nothing
+end
+@implement Solvable S where {S <: Factorization} begin
+    solve!(F, x, b) = (ldiv!(x, F, b); nothing)
+end
+
+# --- printed text with a bound ---------------------------------------------------------------------
+
+"""
+    BoundedText
+
+A value whose printed text has a known bound: `textbound(x)` is an upper bound on the bytes
+`print(io, x)` writes. A writer sizes its buffers from it. For a type of fixed width (`Int64`,
+`Float64`, `Bool`, `Date`) the bound is a constant of the type, so it folds where the type is
+known; for one of variable width (strings, `Symbol`, `BigInt`) it is the value's own.
+"""
+@trait BoundedText begin
+    textbound(x::BoundedText)::Int
+end
+# decimal digits of an integer of `n` bytes, plus a sign: ⌊8n log10(2)⌋ + 2
+_intwidth(n::Int) = (8 * n * 30103) ÷ 100000 + 2
+@implement BoundedText I where {I <: Base.BitInteger} begin
+    textbound(x) = _intwidth(sizeof(x))
+end
+@implement BoundedText Bool begin
+    textbound(x) = 5                                             # "false"
+end
+@implement BoundedText BigInt begin
+    textbound(x) = ndigits(x) + 1
+end
+# shortest round-trip digits (Ryu), a sign, a point, an exponent: "-2.2250738585072014e-308"
+@implement BoundedText Float64 begin
+    textbound(x) = 24
+end
+@implement BoundedText Float32 begin
+    textbound(x) = 16
+end
+@implement BoundedText Float16 begin
+    textbound(x) = 16
+end
+# every digit of the precision, a sign, a point, an exponent of a `Clong`
+@implement BoundedText BigFloat begin
+    textbound(x) = (precision(x) * 30103) ÷ 100000 + 30
+end
+@implement BoundedText Q where {Q <: Rational} begin
+    textbound(x) = textbound(numerator(x)) + textbound(denominator(x)) + 2       # "n//d"
+end
+@implement BoundedText Z where {Z <: Complex} begin
+    textbound(x) = textbound(real(x)) + textbound(imag(x)) + 10    # "a + bim", "a + NaN*im", "Complex(true,false)"
+end
+@implement BoundedText P where {P <: Irrational} begin
+    textbound(x) = ncodeunits(string(x))
+end
+@implement BoundedText Symbol begin
+    textbound(x) = sizeof(x)
+end
+@implement BoundedText Char begin
+    textbound(x) = ncodeunits(x)
+end
+"UTF-8 strings print their code units; any other string prints each character as UTF-8, at most 4 bytes."
+_stringbound(x::Union{String, SubString{String}}) = ncodeunits(x)
+_stringbound(x::AbstractString) = 4 * length(x)
+@implement BoundedText S where {S <: AbstractString} begin
+    textbound(x) = _stringbound(x)
+end
+@implement BoundedText Dates.Date begin
+    textbound(x) = 24                                            # a year of 16 digits and a sign, "-mm-dd"
+end
+@implement BoundedText Dates.DateTime begin
+    textbound(x) = 32                                            # a year of 9 digits and a sign, "-mm-ddTHH:MM:SS.sss"
+end
+@implement BoundedText Dates.Time begin
+    textbound(x) = 18                                            # "HH:MM:SS.sssssssss"
+end
+@implement BoundedText P where {P <: Dates.Period} begin
+    textbound(x) = 33                                            # an Int64 and " milliseconds"
+end
+"\"empty period\", or each period with \", \""
+_compoundbound(ps::Vector{Dates.Period}) = (n = 12; for p in ps; n += 35; end; n)
+@implement BoundedText Dates.CompoundPeriod begin
+    textbound(x) = _compoundbound(x.periods)
 end
 
 # --- algorithms ---------------------------------------------------------------------------------

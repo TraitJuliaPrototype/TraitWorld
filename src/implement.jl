@@ -1128,9 +1128,10 @@ function _op_method(mod::Module, @nospecialize(X), d, Rex; precheck::Bool = true
     push!(args, :($rname::$Rex))
     for (i, a) in enumerate(call.args[3:end])
         if a isa Symbol
-            # the declared type, if it does not mention R
-            T = try _declared_args(X, op, Any, N).parameters[i] catch; Any end
-            push!(args, T === Any ? a : :($a::$T))
+            # the declared type, if it names neither the receiver type nor a parameter (computed at a stand-in
+            # receiver: `x::Vector{T}` with `T = eltype(Self)` is left to the method, not read as `Vector{Any}`)
+            T = try _declared_args(X, op, Archetype{X,Tuple{}}, N).parameters[i] catch; Any end
+            push!(args, T === Any || _names_archetype(T) ? a : :($a::$T))
         else
             push!(args, a)
         end
