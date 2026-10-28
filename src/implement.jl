@@ -1682,6 +1682,8 @@ function _implement_projection(mod::Module, head, rest; field::Int = 0, fmap = n
             fex = fmap === nothing ? :nothing : QuoteNode(fmap)
             return esc(Expr(:block,
                 Expr(:(=), Expr(:where, :($TW.implementation(::Type{$(traits[1])}, ::Type{$Tb})), wh...), :($TW.ImplRec(:family, ()))),
+                # ownership, as every other declaration (traits §4.9; T-62)
+                :($TW._check_implementation(@__MODULE__, $(traits[1]), $(Expr(:where, Tb, wh...)), ())),
                 Expr(:(=), Expr(:where, :($TW.projection(::Type{$(traits[1])}, ::Type{$Tb})), wh...),
                      :($TW.ProjRec(identity, $Iex, false, nothing, 0, nothing, $fex))),
                 _family_conformance_methods(X, Tb, wh)...,

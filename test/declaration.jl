@@ -302,3 +302,29 @@ end
     toplevel(:(Core.eval(MemO, :(@implement MV Box{Float32} begin mval(b) = 7.0 end))))   # not used yet: it stands
     @test Base.invokelatest(g(:usev), Base.invokelatest(g(:Box), 1.0f0)) == 7.0
 end
+
+# T-62: a family declared by fields without a block checks ownership, as every other declaration does
+toplevel(quote
+    @trait_module module T62Trait
+    using TraitWorld
+    export Lenny, lenny
+    @trait Lenny begin
+        lenny(x::Lenny)::Int
+    end
+    end
+    module T62Type
+    struct Box62{T}; v::T; end
+    end
+end)
+@testset "T-62: a family by fields from a third package is refused" begin
+    e = try toplevel(quote
+            module T62Third
+            using TraitWorld, ..T62Trait, ..T62Type
+            T62Trait.lenny(b::T62Type.Box62) = 1
+            @implement Lenny T62Type.Box62{T} where {T}
+            end
+        end); nothing catch err; err end
+    while e isa LoadError; e = e.error; end
+    @test e isa ImplementError && occursin("owns neither the trait nor the representation", sprint(showerror, e))
+end
+
