@@ -381,17 +381,17 @@ _noescape(::Union{TObj,AbstractView,CObj,CMulti,LikeResult}) = throw(TraitUseErr
 
 @machinery @noinline function _check_once(flag::Base.RefValue{Bool}, @nospecialize(sig))
     CLOSED_WORLD[] && (flag[] = true; return nothing)      # checked by verify_main at build time
-    _recorded_check(sig) && (flag[] = true; return nothing)      # checked while a package image was built (ahead.jl)
+    _recorded_check(sig) && (flag[] = true; _LR_ON[] && _lr_add!(:first_call_check, :recorded_in_image, UInt64(0), UInt64(0), nothing); return nothing)   # checked while a package image was built (ahead.jl)
     _FACTS_DEBUG[] && Core.println("TraitWorld: first-call check of ", sig, ccall(:jl_generating_output, Cint, ()) == 1 ? " (while generating an image)" : "")
     # a value conforming at parameters no bound accepts: no worker for the signature
     ms = Base._methods_by_ftype(_worker_sig(sig), -1, Base.get_world_counter())::Vector
     any(m -> !_is_entry(m.method), ms) || _no_worker_error(_worker_sig(sig))
     _refuse_overrides()
     if !_def_checked(sig)                                  # checked once at its definition, at archetypes
-        ps = _latest(worker_problems, sig)::Vector{String}
+        ps = (@_lr :first_call_check :worker_problems sig _latest(worker_problems, sig))::Vector{String}
         isempty(ps) || throw(TraitUseError(unique(ps)))
     end
-    _latest(_check_fully_typed, sig)
+    @_lr :first_call_check :fully_typed sig _latest(_check_fully_typed, sig)
     @lock _LOCK push!(_CHECKED_IN_SESSION, sig)
     # while an image is built: keep the pass with it, for the sessions that load it
     ccall(:jl_generating_output, Cint, ()) == 1 && _record_check!(sig, _record_modules(sig))

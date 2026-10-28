@@ -64,6 +64,7 @@ first) for the range of its dispatch; a generic implementation, found by the slo
 world only.
 """
 @machinery @noinline function _umiss(tbl::UTable, @nospecialize(p::EntryPos), T::DataType, w::UInt)
+    t0 = _LR_ON[] ? _lr_now() : (UInt64(0), UInt64(0))
     L = _in_world(w, needed, p)
     Xs = Any[(L isa TraitList ? typeof(L) : L).parameters[1].parameters...]
     # one trait: the builder its declaration fixed (no reflection); several: built here
@@ -102,6 +103,7 @@ world only.
         @atomic :release tbl.entries = new
         @atomic :release tbl.session = s
     end
+    _LR_ON[] && _lr_done!(:untyped_table, :miss, t0, (typeof(p), T))
     return b
 end
 
@@ -231,6 +233,7 @@ pointer is `C_NULL` when the table does not serve the type (no builder).
 """
 @machinery @noinline function _pmiss(t::PTable, @nospecialize(p::EntryPos), @nospecialize(g), xa::XAny, w::UInt, N::Int)
     T = typeof(getfield(xa, :x))::DataType
+    t0 = _LR_ON[] ? _lr_now() : (UInt64(0), UInt64(0))
     tbl = _utable(p)
     b = _ulookup(tbl, xa, w)
     b === nothing && (b = _umiss(tbl, p, T, w))
@@ -256,6 +259,7 @@ pointer is `C_NULL` when the table does not serve the type (no builder).
         @atomic :release t.entries = new
         @atomic :release t.session = s
     end
+    _LR_ON[] && _lr_done!(:untyped_table, :pointer_made, t0, (typeof(p), T))
     return e
 end
 "The pointer entry for the held value at entry pattern `g`, from its table, or made."

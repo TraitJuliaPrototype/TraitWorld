@@ -1385,6 +1385,9 @@ const _DEFCHECK_AT_END = Ref(true)
 
 "Definition checking's problems: an error while a package is built, a warning at the prompt (the call raises them again)."
 function _report_definition_problems(mod::Module, check)
+    @_lr :definition_check :total nameof(mod) _report_definition_problems_(mod, check)
+end
+function _report_definition_problems_(mod::Module, check)
     if ccall(:jl_generating_output, Cint, ()) == 1
         check()
     else

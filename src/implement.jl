@@ -892,7 +892,7 @@ function _family_registry end
     return (b::Builder)(u)
 end
 @machinery @noinline function _conf_family_slow(reg::Base.RefValue{IdDict{Any,Any}}, @nospecialize(X), @nospecialize(u))
-    b = _member_fix!(reg, X, typeof(u))
+    b = @_lr :member_at_first_use :total (X, typeof(u)) _member_fix!(reg, X, typeof(u))
     return b isa Builder ? b(u) : _conformance_slow(X, u)
 end
 
@@ -907,7 +907,7 @@ since (`_MOVED`). The first builder published stands.
 """
 @machinery function _member_fix!(reg::Base.RefValue{IdDict{Any,Any}}, @nospecialize(X), @nospecialize(U), w::UInt = UInt(0))
     _check_member(X, U)
-    b = _latest(_family_builder, X, U)
+    b = @_lr _lr_member_group() :builder (X, U) _latest(_family_builder, X, U)
     b isa Builder || return nothing
     @lock _LOCK begin
         w == 0 || Base.get_world_counter() == w || return _MOVED
@@ -917,7 +917,7 @@ since (`_MOVED`). The first builder published stands.
         d[U] = b
         reg[] = d                                       # readers see the old table or the new one
     end
-    _OVR_BUILT[] && _index_builder!(X, U, b)
+    _OVR_BUILT[] && @_lr _lr_member_group() :index (X, U) _index_builder!(X, U, b)
     return b
 end
 
@@ -940,7 +940,7 @@ implementation's predicate, and fixes a member only in the latest world.
     trylock(_LOCK) || return _undecided()
     try
         r = Base.ScopedValues.with(_IN_FOLD => true) do
-            _member_fix!(reg, X, U, w)
+            @_lr :member_in_fold :total (X, U) _member_fix!(reg, X, U, w)
         end
         r === _MOVED && return _undecided()
         r === nothing && _fold_final!(key)
@@ -960,12 +960,18 @@ inference, so it may wait for the lock; the member is fixed in this session, or 
 """
 function _member_fold_at_load(reg::Base.RefValue{IdDict{Any,Any}}, @nospecialize(X), @nospecialize(U))
     b = get(reg[], U, nothing)
-    b isa Builder && return b
+    if b isa Builder
+        _LR_ON[] && _lr_add!(:member_at_load, :already_fixed, UInt64(0), UInt64(0), nothing)
+        return b
+    end
+    _LR_ON[] && (_LR_ATLOAD[] = true)
     try
-        return _member_fix!(reg, X, U)
+        return @_lr :member_at_load :total (X, U) _member_fix!(reg, X, U)
     catch e
         (e isa ImplementError || e isa TraitBoundError) || rethrow()
         return nothing
+    finally
+        _LR_ATLOAD[] = false
     end
 end
 "Whether the patched Julia has `Compiler.fold_call` (W-40)."
@@ -1040,7 +1046,7 @@ concrete (`S{Any}`, §11.1) is among the problems.
 @machinery function _check_member(@nospecialize(X), @nospecialize(U))
     key = Pair{Any,Any}(X, U)
     (@lock _LOCK key in _MEMBERS_CHECKED) && return nothing
-    ps = _latest(_member_problems, X, U)
+    ps = @_lr _lr_member_group() :check (X, U) _latest(_member_problems, X, U)
     isempty(ps) || throw(ImplementError("$U is a member of a family implementation of $X, but does not conform:\n  " * join(ps, "\n  ")))
     @lock _LOCK push!(_MEMBERS_CHECKED, key)
     return nothing

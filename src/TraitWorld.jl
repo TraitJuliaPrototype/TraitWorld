@@ -12,6 +12,8 @@ module TraitWorld
 using PrecompileTools: PrecompileTools
 using Serialization: Serialization
 
+include("report.jl")
+
 export @joint_owners
 export Trait, Callable, TObj, Dynamic, Compiled, Kept, compiled_for, with_dynamic,
        @trait, @implement, @trait_module, @workload,
@@ -20,6 +22,8 @@ export Trait, Callable, TObj, Dynamic, Compiled, Kept, compiled_for, with_dynami
        fully_typed, isfullytyped, FullyTypedReport, NotFullyTypedError
 
 function __init__()
+    # the machinery's costs recorded from here (W-85): TraitWorld's own startup, then the loads after it
+    get(ENV, "JULIA_TW_LOADREPORT", "0") == "1" && ccall(:jl_generating_output, Cint, ()) == 0 && loadreport_switch!(true)
     empty!(_NOT_EXTENSIONS)
     empty!(_CHECKED_IN_SESSION)                       # this session's checks, not those of the image's build
     _SESSION[] = (time_ns() ⊻ UInt(getpid()) << 32) | 1   # tables of untyped calls saved in images are ignored (untyped.jl)
@@ -35,7 +39,7 @@ end
 
 "The package callback."
 function _on_package_load_callback(id::Base.PkgId)
-    Base.invokelatest(_on_package_load, id)
+    @_lr :package_load :total id.name Base.invokelatest(_on_package_load, id)
     return nothing
 end
 
@@ -49,12 +53,12 @@ without running `@implement` here), and the overrides the image hook left
 inactive are reported.
 """
 @machinery function _on_package_load(id::Base.PkgId)   # compiled by facts: later loads do not invalidate it (E-169)
-    _bump!()
+    @_lr :package_load :generation id.name _bump!()
     m = get(Base.loaded_modules, id, nothing)
     m isa Module || return nothing
     _strict_known_delegates!()
     _report_refused_at_load()                                                # what the image hook left inactive
-    _strict_at_load!()                                                       # pirates loaded before the image (facts §10.3)
+    @_lr :package_load :strict_at_load id.name _strict_at_load!()            # pirates loaded before the image (facts §10.3)
     return nothing
 end
 
@@ -83,6 +87,7 @@ include("strict.jl")
 include("frames.jl")
 # the trait world's standard library: traits for Base's concepts (traits reference §16)
 include("BaseTraits.jl")
+include("diagnostics.jl")
 using .BaseTraits
 export BaseTraits, HasLength, Iterable, Indexable, MutableIndexable, Resizable, Keyed, DynamicItems, DynamicValues,
        CompiledItems, CompiledValues, retain!

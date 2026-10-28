@@ -44,14 +44,14 @@ end
 # load of CSV and DataFrames, session 26). If the policy's path fails, the native check runs,
 # called dynamically so that these functions' own code keeps no edge into it.
 function _on_image_methods_hook(ms::Vector{Any}, pkg::String)
-    try
+    @_lr :image_hook :total pkg try
         return _latest(_on_image_methods, ms, pkg)
     catch
         return Base.invokelatest(_on_image_methods, ms, pkg)
     end
 end
 function _on_method_definition_hook(m::Method, after::Bool)
-    try
+    @_lr :definition_hook :total nothing try
         return _latest(_on_method_definition, m, after)
     catch
         return Base.invokelatest(_on_method_definition, m, after)
@@ -279,15 +279,15 @@ end
             _is_declared_defaults(m) && (_OVR_BUILT[] = false)   # not active yet: the index is rebuilt at its next use
         end
         # overrides are checked against the implementations already active; an image's own are its package's business
-        idx = _override_index()
-        for m in ms
+        idx = @_lr :image_hook :override_index pkg _override_index()
+        @_lr :image_hook :override_check pkg for m in ms
             m isa Method || continue
             if !isempty(idx) && _override_violation(m) !== nothing
                 push!(refused, m)
                 push!(_REFUSED_OVERRIDES, m)
             end
         end
-        for e in _strict_image_refusals(ms)
+        for e in (@_lr :image_hook :strict pkg _strict_image_refusals(ms))
             push!(refused, e.method)
             push!(_REFUSED_PIRATES, e)
         end
