@@ -186,3 +186,27 @@ end)
     @test P.cuse(P.SP{Int}(1)) == 1
     @test_throws ImplementError P.cuse(P.SP{Any}(1))
 end
+
+# L-42 (W-55): a key's field type is the declared type, so types storing a `@const` field at different
+# subtypes of it share one key, and the field is read at its declared type
+toplevel(quote
+    @trait_module module KDecl
+    using TraitWorld
+    export Labeled, labsize
+    @trait Labeled begin
+        @const data::AbstractVector{Float64}
+    end
+    labsize(x::Labeled) = length(x.data)
+    end
+    struct KDA; data::Vector{Float64}; end
+    struct KDB; data::StepRangeLen{Float64,Base.TwicePrecision{Float64},Base.TwicePrecision{Float64},Int}; end
+    @implement KDecl.Labeled KDA
+    @implement KDecl.Labeled KDB
+end)
+@testset "L-42: a key's field type is the declared type" begin
+    K = Main.KDecl
+    keyof(T) = first(TraitWorld._key_and_slots(K.Labeled, TraitWorld.proj_lookup(K.Labeled, T), T,
+                                               TraitWorld.proj_witness(K.Labeled, T, TraitWorld.proj_lookup(K.Labeled, T))))
+    @test keyof(Main.KDA) === keyof(Main.KDB) === TraitWorld.Key{Nothing,@NamedTuple{data::AbstractVector{Float64}}}
+    @test K.labsize(Main.KDA([1.0, 2.0])) == 2 && K.labsize(Main.KDB(0.0:0.5:1.0)) == 3
+end

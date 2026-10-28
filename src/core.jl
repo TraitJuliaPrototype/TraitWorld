@@ -153,6 +153,9 @@ end
 # concrete argument types, a fact, and the object is read only by builtins and intrinsics.
 @inline function _loadpart(::Type{T}, v::View, s::Slot) where {T}
     getfield(s, :off) < 0 && return getfield(v, :o)::T
+    # a field at an abstract declared type: keys of types storing it differently are one key (lowering §5), so
+    # its storage is not known here; it is read from the object by its index
+    isconcretetype(T) || return getfield(getfield(v, :o), getfield(s, :idx))::T
     return _loadfield(T, v, s)
 end
 "No receiver type (every operation served by a default): there is no receiver."
