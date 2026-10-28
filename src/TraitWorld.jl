@@ -21,6 +21,7 @@ export Trait, Callable, TObj, Dynamic, Compiled, Kept, compiled_for, with_dynami
 
 function __init__()
     empty!(_NOT_EXTENSIONS)
+    empty!(_CHECKED_IN_SESSION)                       # this session's checks, not those of the image's build
     _SESSION[] = (time_ns() ⊻ UInt(getpid()) << 32) | 1   # tables of untyped calls saved in images are ignored (untyped.jl)
     _hooks_init!()
     _strict_init!()
