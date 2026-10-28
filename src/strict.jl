@@ -155,8 +155,10 @@ end
 const _EXT_WARNED = Ref(0)
 function _extension_warn(m::Method, v)
     (_EXT_WARNED[] += 1) > 20 && return nothing   # as `maxlog`, but before the message is built (W-75)
-    @warn "The package extension $(Base.moduleroot(m.module)) defines $(m.sig), which wins at $(v[1]), " *
-          "a fact of trait code ($(_short(v[2]))) with none of the extension's triggers in it: " *
+    ci = v[2]
+    code = ci isa Core.CodeInstance && (mi = Core.Compiler.get_ci_mi(ci); mi.def isa Method) ? "$(mi.def.module).$(mi.def.name)" : "trait code"
+    @warn "The package extension $(Base.moduleroot(m.module)) defines $(_short(m.sig, 120)), which wins at $(_short(v[1], 120)), " *
+          "a fact of trait code (in $code) with none of the extension's triggers in it: " *
           "followed as its parent's change; that trait code compiles again"
     return nothing
 end
