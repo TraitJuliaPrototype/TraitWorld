@@ -255,7 +255,8 @@ into a field declared so, or constructing a struct whose fields at the trait obj
 are declared so. The conversion checks the trait.
 """
 function _keeps_dynamic(@nospecialize(f), ats::Vector{Any}, ex::Expr, src, sptypes)
-    isdyn(@nospecialize(T)) = T isa Type && T !== Union{} && T <: HeldValue
+    # a kept form, or an optional one (`Union{Nothing, Dynamic{X}}`): a trait object may be kept there (traits reference §5.3)
+    isdyn(@nospecialize(T)) = T isa Type && T !== Union{} && T !== Nothing && T <: Union{Nothing,HeldValue}
     f isa Type && isdyn(f) && return true
     f === with_dynamic && return true                     # a `Dynamic` trait object holds the user's object
     if f === Base.convert && length(ats) == 3

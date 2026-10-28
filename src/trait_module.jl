@@ -556,6 +556,13 @@ function _classify(mod::Module, a, unbounded::Vector{Symbol} = Symbol[]; attr_bo
                 end
                 v = _tryeval(mod, Expr(:where, ann, used...))
                 v isa Type && is_trait(v) && return _Arg(name, ann, :trait, bound_traits(v), nothing, nothing, nothing)
+                # an attribute on such a bound, `c::Dynamic{Column{T}} where {T}` (traits reference §5.1): the
+                # parameter is fixed by the `where` variable, read from the value
+                if attr_bounds && (h === Dynamic || h === Compiled) && length(ann.args) == 2   # in an operation's method, a type (§3.1)
+                    iv = _tryeval(mod, Expr(:where, ann.args[2], used...))
+                    iv isa Type && is_trait(iv) &&
+                        return _Arg(name, ann, :trait, bound_traits(iv), nothing, nothing, h === Compiled ? :compiled : :dynamic)
+                end
             end
         end
         cp = _callable_params(v)
@@ -784,9 +791,14 @@ function _rewrite_fdef(mod::Module, ex)
     wbind = Any[]
     for x in args
         x.kind === :trait && x.ann isa Expr && x.ann.head === :curly || continue
-        h = _tryeval(mod, x.ann.args[1])
+        a = x.ann
+        # under an attribute, `Dynamic{Column{T}}`: the trait's parameters are those of the bound inside
+        if length(a.args) == 2 && a.args[2] isa Expr && a.args[2].head === :curly && _tryeval(mod, a.args[1]) in (Dynamic, Compiled)
+            a = a.args[2]
+        end
+        h = _tryeval(mod, a.args[1])
         h isa Type && is_trait(h) || continue
-        for (i, p) in enumerate(x.ann.args[2:end])
+        for (i, p) in enumerate(a.args[2:end])
             if p isa Symbol && any(w -> _wherevar(w) === p, wheres)
                 push!(wbind, (p, x.name, _family(h), i))
             elseif any(w -> _uses(p, _wherevar(w)), wheres)

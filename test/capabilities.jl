@@ -19,6 +19,15 @@ toplevel(quote
     ckind(c::CCol) = :plain
     ckind(c::(CCol, CPooled)) = :pooled
     ccount(f::Callable{Tuple{T}, Bool}, xs::Iterable{T}) where {T} = (n = 0; for x in xs; f(x) && (n += 1); end; n)
+    # a `Dynamic` bound whose parameter a `where` variable fixes (traits reference §5.1)
+    @trait CCells{T} begin
+        T = eltype(Self)
+        ccellat(c::CCells{T}, i::Int)::T
+    end
+    @implement CCells A where {A <: AbstractVector} begin
+        ccellat(c, i) = c[i]
+    end
+    cfirst(c::Dynamic{CCells{T}}) where {T} = (ccellat(c, 1), T)
     sigf(f::Callable{Tuple{Float64}, Float64}, x::Float64) = f(x)
     sigs(f::Callable{Tuple{String}, Int}, s::String) = f(s)
     end
@@ -41,4 +50,5 @@ end)
     @test_throws TraitBoundError Base.invokelatest(M.sigs, g, "a")             # none with a result of that type
     @test Base.invokelatest(M.ccount, iseven, [1, 2, 3, 4]) == 2
     @test Base.invokelatest(M.ccount, x -> x > 1.5, [1.0, 2.0, 3.0]) == 2
+    @test Base.invokelatest(M.cfirst, [1, 2]) == (1, Int) && Base.invokelatest(M.cfirst, ["a"]) == ("a", String)
 end

@@ -969,7 +969,7 @@ end
     (u isa DataType && u <: Trait) || return :(ErasedKey{Tuple{},Nothing})
     ps = (u::DataType).parameters
     vals = Any[(ps[i] isa TypeVar ? :OpenParam : ps[i]) for i in 1:(length(ps)::Int)-1]
-    return :(ErasedKey{Tuple{$(vals...)},Nothing})
+    return :(ErasedKey{Tuple{$([:(ParamVal{$v}) for v in vals]...)},Nothing})
 end
 
 Base.Experimental.@max_methods 1 function _fieldpos end

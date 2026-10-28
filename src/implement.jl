@@ -267,7 +267,9 @@ function conformance_problems(@nospecialize(X), @nospecialize(R), ops)
                 continue
             end
             T = Base.infer_return_type(f, sig; _check_kw_at(sig)...)
-            if T === Union{}
+            # a method that always throws is a fallback, unless the declared result is `Union{}` itself (a
+            # vector of `Union{}` has no cell to return): then it is the only implementation there is
+            if T === Union{} && D !== Union{}
                 push!(problems, "`$op` at $sig always throws (inferred `Union{}`): a fallback, not an implementation")
             elseif !_result_conforms(T, D)
                 push!(problems, "`$op` at $sig returns `$T`, declared `$D`")
