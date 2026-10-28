@@ -65,7 +65,7 @@ operation's check at a real type inferred Base's broadcasting from scratch: 186 
 """
 function _check_kw_at(@nospecialize(sig), world::UInt = Base.get_world_counter())
     _names_archetype(sig) && return _check_kw(world)
-    return (; world, interp = CC.NativeInterpreter(world; facts = false))
+    return (; world, interp = CC.NativeInterpreter(world; owner = nothing))    # plain inference, in either setting (the mode is the owner)
 end
 "Whether a type mentions an `Archetype` anywhere in its parameters."
 function _names_archetype(@nospecialize(T))
