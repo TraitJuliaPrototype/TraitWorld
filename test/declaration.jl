@@ -328,3 +328,24 @@ end)
     @test e isa ImplementError && occursin("owns neither the trait nor the representation", sprint(showerror, e))
 end
 
+
+# T-77: at an abstract declared argument, only the member's stakeholders' methods count: a third package's
+# method there does not change which method serves a family's member
+toplevel(quote
+    @trait_module module T77
+    using TraitWorld
+    export Scal77, sc77, use77
+    @trait Scal77 begin
+        sc77(x::Scal77, y::Number)::Float64 = 1.0
+    end
+    @implement Scal77 A where {A <: AbstractVector}
+    use77(x::Scal77) = sc77(x, 2)
+    end
+    module T77Other
+    using ..T77
+    T77.sc77(v::Vector{Float64}, y::Number) = 99.0     # neither the operation's owner nor the member's
+    end
+end)
+@testset "T-77: the member check counts the stakeholders' methods only" begin
+    @test Base.invokelatest(Main.T77.use77, [1.0, 2.0]) == 1.0      # served by the default, as without T77Other
+end

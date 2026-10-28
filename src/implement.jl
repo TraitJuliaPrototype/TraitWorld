@@ -341,8 +341,12 @@ function _has_op_method(@nospecialize(X), op::Symbol, @nospecialize(R))
         if _allconcrete(A.parameters)
             hasmethod(f, Tuple{R,A.parameters...}; world = _decision_world()) || return false
         else
+            # at an abstract declared argument, only the member's stakeholders' methods count (traits §4.7):
+            # the owners of the operation, of the member's type and of its parameters' types
             ms = Base._methods_by_ftype(sig, -1, _decision_world())
             (ms isa Vector && !isempty(ms)) || return false
+            sh = Any[owner(parentmodule(f)), sig_owners(Tuple{R})...]
+            any(m -> (d = owner((m::Core.MethodMatch).method.module); any(o -> owns(d, o), sh)), ms) || return false
         end
     end
     return true
