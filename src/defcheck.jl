@@ -198,7 +198,8 @@ function _record_def_checked!(m::Method)
 end
 "Whether `m` was checked clean at its definition, in this session or while its module's image was built."
 _was_def_checked(m::Method) = m in _DEF_CHECKED ||
-    (isdefined(m.module, :__tw_def_checked__) && m in getglobal(m.module, :__tw_def_checked__)::Vector{Method})
+    (Base.invokelatest(isdefined, m.module, :__tw_def_checked__) &&
+     m in Base.invokelatest(getglobal, m.module, :__tw_def_checked__)::Vector{Method})
 
 "Whether the worker for `sig` was checked at its method's definition."
 function _def_checked(@nospecialize(sig))

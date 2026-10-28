@@ -1225,18 +1225,105 @@ function _finish_module(mod::Module)
     # where it is defined; a mistake is reported at its line before any type conforms. At a
     # package's build it is an error; for trait code defined at the prompt a warning (the call
     # raises it again), so that interactive work can pass through incomplete code
-    if _DEFCHECK_AT_END[]
-        if ccall(:jl_generating_output, Cint, ()) == 1
-            check_definitions(mod)
-        else
-            ps = try check_definitions(mod) catch e; e isa TraitUseError ? e.problems : rethrow() end
-            isempty(ps) || @warn "trait module $(nameof(mod)): library code breaks a rule of the trait world:\n  " * join(ps, "\n  ")
-        end
-    end
+    _DEFCHECK_AT_END[] && _report_definition_problems(mod, () -> check_definitions(mod))
     return nothing
 end
 "Whether a trait module's end checks its definitions (`JULIA_TW_DEFCHECK=0` turns it off, for measurement)."
 const _DEFCHECK_AT_END = Ref(true)
+
+"Definition checking's problems: an error while a package is built, a warning at the prompt (the call raises them again)."
+function _report_definition_problems(mod::Module, check)
+    if ccall(:jl_generating_output, Cint, ()) == 1
+        check()
+    else
+        ps = try check() catch e; e isa TraitUseError ? e.problems : rethrow() end
+        isempty(ps) || @warn "trait module $(nameof(mod)): library code breaks a rule of the trait world:\n  " * join(ps, "\n  ")
+    end
+    return nothing
+end
+
+# --- statements evaluated into a complete trait module ------------------------------------
+
+"""
+Statements evaluated into a complete trait module, by `eval` at the prompt or by Revise, are statements of
+the trait module (traits reference §2): Julia's lowering (`Core._lower`) hands each one to `_eval_stmt`,
+which evaluates it through `@stmt`, as the module's own statements are, and runs the module's end for
+the function a bounded definition defines. TraitWorld's own evaluations inside it are not wrapped again.
+"""
+const _IN_STMT = Base.ScopedValues.ScopedValue(false)
+"The lowering in place before TraitWorld's (Base's `fl_lower`, or another front end's)."
+const _PREV_LOWER = Ref{Any}(nothing)
+const _LOWER_FAILED = Ref(false)
+
+"Install `_tw_lower` as Julia's lowering, in front of the one in place."
+function _install_lowerer!()
+    cur = Core._lower
+    cur === _tw_lower && return nothing
+    _PREV_LOWER[] = cur
+    Core._setlowerer!(_tw_lower)
+    return nothing
+end
+
+@machinery function _tw_lower(@nospecialize(code), mod::Module, filename = "none", lineno = 0,
+                              world::Unsigned = typemax(Csize_t), warn::Bool = false)
+    ex = code
+    try
+        ex = _complete_module_stmt(code, mod, filename, lineno)
+    catch e
+        # a failure of the machinery must not break evaluation: report it once, lower the statement as it is
+        _LOWER_FAILED[] || (_LOWER_FAILED[] = true; @warn "TraitWorld's lowering hook failed; statements are evaluated as written" exception = (e, catch_backtrace()))
+    end
+    prev = _PREV_LOWER[]
+    prev === nothing && (prev = Base.fl_lower)
+    return prev(ex, mod, filename, lineno, world, warn)
+end
+
+"`code` as a statement of `mod` when `mod` is a complete trait module, else `code` itself."
+function _complete_module_stmt(@nospecialize(code), mod::Module, filename, lineno)
+    code isa Expr || return code
+    _IN_STMT[] && return code
+    isdefined(mod, :__tw_finished__) || return code
+    fin = getglobal(mod, :__tw_finished__)
+    fin isa Base.RefValue{Bool} && fin[] || return code
+    code.head === :macrocall && code.args[1] == GlobalRef(TraitWorld, Symbol("@stmt")) && return code
+    file = filename isa String ? filename : unsafe_string(Ptr{UInt8}(filename))
+    return Expr(:call, GlobalRef(TraitWorld, :_eval_stmt), mod, QuoteNode(code), QuoteNode(Symbol(file)), Int(lineno))
+end
+
+"Evaluate `ex` in the complete trait module `mod` as one of its statements; then the module's end for a bounded function it defines."
+function _eval_stmt(mod::Module, @nospecialize(ex), file::Symbol, line::Int)
+    return Base.ScopedValues.with(_IN_STMT => true) do
+        lnn = LineNumberNode(line, file)
+        r = Core.eval(mod, Expr(:toplevel, lnn, Expr(:macrocall, GlobalRef(TraitWorld, Symbol("@stmt")), lnn, ex)))
+        fd = _stmt_fdef(ex)
+        fd === nothing || Base.invokelatest(_finish_function, mod, Core.eval(mod, _fdef_name(fd)))
+        r
+    end
+end
+
+"The function definition a statement makes, under the prefixes and macros `_process` passes through; else `nothing`."
+function _stmt_fdef(@nospecialize(ex))
+    fd = _prefixed_fdef(ex)
+    fd === nothing || return fd
+    if ex isa Expr && ex.head === :macrocall && (ex.args[1] in _PASS_MACROS || ex.args[1] == GlobalRef(Core, Symbol("@doc")))
+        return _is_fdef(ex.args[end]) ? ex.args[end] : nothing
+    end
+    return nothing
+end
+
+"""
+A trait module's end for one function defined again after it (traits reference §2): its positions'
+needs, attributes and keep flags are fixed again where the worker was defined (`_note_position`);
+here its overrides, bounds and ambiguities are checked, and definition checking runs.
+"""
+function _finish_function(mod::Module, @nospecialize(f))
+    any(_isworker, methods(f)) || return nothing          # an ordinary function: nothing to finish
+    _refuse_overrides()
+    check_bounds(f)
+    check_entry_ambiguities(f)
+    _DEFCHECK_AT_END[] && _report_definition_problems(mod, () -> (ps = definition_problems(f); isempty(ps) || throw(TraitUseError(ps)); ps))
+    return nothing
+end
 
 _isworker(m::Method) = any(p -> _tobj_lb(p) !== nothing, Base.unwrap_unionall(m.sig).parameters[2:end])
 

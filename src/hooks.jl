@@ -31,6 +31,7 @@ function _hooks_init!()
     end
     ok || return nothing
     get(ENV, "JULIA_TW_HOOKS", "1") == "0" && return nothing
+    _install_lowerer!()
     ccall(:jl_set_method_definition_hook, Cvoid, (Any,), _on_method_definition_hook)
     ccall(:jl_set_image_methods_hook, Cvoid, (Any,), _on_image_methods_hook)
     _HAS_DEF_HOOK[] = true

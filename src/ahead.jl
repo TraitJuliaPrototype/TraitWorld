@@ -46,8 +46,9 @@ end
 function _recorded_check(@nospecialize(sig))
     ws = nothing
     for m in _record_modules(sig)
-        isdefined(m, :__tw_checked__) || continue
-        for e in getglobal(m, :__tw_checked__)
+        # defined by `eval` while the image was built, perhaps after this world: read in the latest
+        Base.invokelatest(isdefined, m, :__tw_checked__) || continue
+        for e in Base.invokelatest(getglobal, m, :__tw_checked__)
             e isa Tuple{Any,Vector{Method}} && e[1] == sig || continue
             ws === nothing && (ws = _worker_methods(sig))
             e[2] == ws && return true
