@@ -1515,7 +1515,7 @@ function _implement_where(mod::Module, head, block)
             given = Tuple(unique(_defname.(defs)))
             defaults = _missing_and_defaults(X, given)
             for d in defs
-                m = _op_method(mod, X, d, Rsym)
+                m = _op_method(mod, X, d, Rsym; wheres = family)      # the family's bound decides ownership (rule 3)
                 push!(out, Expr(m.head, Expr(:where, m.args[1], family...), m.args[2]))
             end
             push!(out, :(const $rec = $TW.ImplRec(:methods, $defaults)))

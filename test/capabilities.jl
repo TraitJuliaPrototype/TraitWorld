@@ -84,3 +84,29 @@ end
     @test Base.invokelatest(g(:mapone), x -> round(Int, x), 2.6) === 3
     @test_throws MethodError Base.invokelatest(g(:mapone), (x::Int) -> x, 1.0)    # no method at the declared argument types
 end
+
+@testset "a family implemented with methods by the owner of its members, for another module's trait (traits §4.7, §10.1)" begin
+    toplevel(quote
+        @trait_module module FamOwnerCore
+        using TraitWorld
+        export Pts, npts, px
+        @trait Pts begin
+            npts(p::Pts)::Int
+            px(p::Pts, i::Int)::Float64
+        end
+        total(p::Pts) = sum(px(p, i) for i in 1:npts(p))
+        end
+        module FamOwnerUser                                  # owns `Pt`, so the family of vectors of `Pt`
+        using TraitWorld
+        using ..FamOwnerCore
+        struct Pt; x::Float64; end
+        @implement FamOwnerCore.Pts V where {V <: AbstractVector{Pt}} begin
+            npts(p) = length(p)
+            px(p, i) = p[i].x
+        end
+        end
+    end)
+    C = Base.invokelatest(getglobal, Main, :FamOwnerCore); U = Base.invokelatest(getglobal, Main, :FamOwnerUser)
+    pt = Base.invokelatest(getglobal, U, :Pt)
+    @test Base.invokelatest(getglobal(C, :total), [pt(1.0), pt(2.5)]) == 3.5
+end
