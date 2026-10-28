@@ -80,6 +80,11 @@ _ir_widen(@nospecialize(t)) = t isa Core.Const ? Core.Typeof(t.val) : t isa Type
 function _ir_loc(src::Core.CodeInfo, i::Int)
     try
         lins = Base.IRShow.buildLineInfoNode(src.debuginfo, src.parent, i)
+        j = i                                  # a statement the optimizer inserted (a split's table) has none: the one before it
+        while isempty(lins) && j > max(1, i - 10)
+            j -= 1
+            lins = Base.IRShow.buildLineInfoNode(src.debuginfo, src.parent, j)
+        end
         isempty(lins) && return ""
         fr = String[]
         for l in lins
@@ -165,6 +170,17 @@ end
 
 # --- factscode ------------------------------------------------------------------------------
 
+"Why a body's code does not run per call (the untyped fallback, an error's construction), or `nothing`."
+function _rare_body(mi::Core.MethodInstance)
+    m = mi.def
+    m isa Method || return nothing
+    m.module === TraitWorld && m.name in (:fallback, :kwfallback) && return "the untyped fallback: a value without the traits"
+    startswith(string(m.name), "throw") && return "an error path"
+    T = mi.specTypes.parameters[1]
+    T isa DataType && T <: Type && T.parameters[1] isa DataType && T.parameters[1] <: Exception && return "an error path"
+    return nothing
+end
+
 "A body of code that `factscode` read: its method instance, its optimized code, its result type, its owner."
 struct CodeBody
     mi::Core.MethodInstance
@@ -218,6 +234,8 @@ function factscode(@nospecialize(sig::Type); depth::Int = 2, plain::Bool = false
             mi isa Core.MethodInstance || (mi = Base.method_instances(s)[1])
             push!(bodies, CodeBody(mi, src, rt, interp isa CC.NativeInterpreter ? CC.cache_owner(interp) : nothing))
             ss, inv = _ir_sites(src, _mi_where(mi))
+            rare = _rare_body(mi)
+            rare === nothing || (ss = RuntimeSite[RuntimeSite(x.where_, x.stmt, x.kind, x.call, x.loc, rare) for x in ss])
             append!(sites, ss)
             d > 0 || continue
             for c in inv
