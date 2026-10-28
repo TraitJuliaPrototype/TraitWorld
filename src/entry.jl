@@ -151,7 +151,7 @@ const _SLOW_WORLD = Ref{UInt}(0)                  # the world `_SLOW` was decide
         CLOSED_WORLD[] && Base.inferencebarrier(_closed_miss)(X, u)
     end
     _FACTS_DEBUG[] && Core.println("TraitWorld: implementation slow path: ", X, " for ", U)
-    b = _in_world(w, _builder_for, Any[X], U)
+    b = @_lr :implementation_slow_path :builder (X, U) _in_world(w, _builder_for, Any[X], U)
     b isa Builder && _in_world(w, _generic_concrete_check, X, U)
     @lock _LOCK begin
         d = _SLOW_WORLD[] == w ? copy(_SLOW[]) : IdDict{Any,Any}()
