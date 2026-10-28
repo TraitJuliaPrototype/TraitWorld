@@ -90,6 +90,24 @@ macro stmt(ex)
 end
 
 const _PASS_MACROS = (Symbol("@inline"), Symbol("@noinline"))
+"""
+An argument without its `@nospecialize` (the macro, or Julia's expansion of it, `(meta nospecialize x)`),
+its name recorded in `nospec`.
+"""
+function _strip_nospecialize!(nospec::Set{Any}, a)
+    inner = if a isa Expr && a.head === :macrocall && a.args[1] in (Symbol("@nospecialize"), GlobalRef(Base, Symbol("@nospecialize"))) && length(a.args) == 3
+        a.args[3]
+    elseif a isa Expr && a.head === :meta && length(a.args) == 2 && a.args[1] === :nospecialize
+        a.args[2]
+    else
+        return a
+    end
+    nm = inner isa Expr && inner.head === :(::) ? inner.args[1] : inner isa Expr && inner.head === :kw ? inner.args[1] : inner
+    push!(nospec, nm isa Expr && nm.head === :(::) ? nm.args[1] : nm)
+    return inner
+end
+"A macro's expansion without its outer `esc`: the definition as written in the module."
+_unescape(x) = x isa Expr && x.head === :escape ? _unescape(x.args[1]) : x
 
 function _process(mod::Module, ex)
     ex isa Expr || return ex
@@ -135,6 +153,16 @@ function _process(mod::Module, ex)
             # attach the macro (inline, or the docstring) to the worker
             worker, rest = r
             return Expr(:toplevel, Expr(:macrocall, ex.args[1:end-1]..., worker), rest...)
+        end
+        # another macro around a function definition (`Base.@nospecializeinfer`), also under a docstring:
+        # expanded once here, so a bounded function inside it is lowered as one, not left a plain method
+        # with a trait as an argument's type
+        if name == GlobalRef(Core, Symbol("@doc")) && inner isa Expr && inner.head === :macrocall && _is_fdef(inner.args[end])
+            x = _unescape(macroexpand(mod, inner; recursive = false))
+            _is_fdef(x) && return _process(mod, Expr(:macrocall, ex.args[1:end-1]..., x))
+        elseif _is_fdef(inner)
+            x = _unescape(macroexpand(mod, ex; recursive = false))
+            _is_fdef(x) && return _process(mod, x)
         end
         return ex
     elseif _is_fdef(ex)
@@ -785,9 +813,15 @@ function _rewrite_fdef(mod::Module, ex)
         kwparams = rawargs[1].args
         rawargs = rawargs[2:end]
     end
+    # `@nospecialize(x)` on an ordinary argument (also as Julia's expanded `(meta nospecialize x)`): classified
+    # as written, and kept on the entry's and the worker's argument
+    nospec = Set{Any}()
+    rawargs = Any[_strip_nospecialize!(nospec, a) for a in rawargs]
     unbounded = Symbol[w for w in wheres if w isa Symbol && !any(a -> _bound_names(mod, a, w), rawargs)]
     attr_bounds = !_is_operation_function(mod, fname)
     args = [_classify(mod, a, unbounded; attr_bounds, wheres) for a in rawargs]
+    any(x -> x.name in nospec && !(x.kind in (:plain, :untyped)), args) &&
+        error("@trait_module: `$fname`: `@nospecialize` is for ordinary arguments; a bounded one is compiled per key or erased by its attribute")
     kws = [_classify_kw(mod, p, unbounded) for p in kwparams]
     istraitdef = any(x -> x.kind in (:trait, :callable, :callables, :vararg_trait), args) ||
                  any(x -> x.kind in (:trait, :callable), kws)
@@ -910,11 +944,12 @@ function _rewrite_fdef(mod::Module, ex)
             cs = [:($TraitWorld.CObj{$A,$S}) for (A, S, _) in x.traits]
             push!(wargs, :($(x.name)::$TraitWorld.CMulti{<:Tuple{$(cs...)}}))
         elseif x.kind === :untyped
-            push!(wargs, x.name)
+            push!(wargs, x.name in nospec ? :(@nospecialize($(x.name))) : x.name)
         elseif x.kind === :vararg
             push!(wargs, x.name)                      # as written, `xs::Int...` or `xs...`
         else
-            push!(wargs, x.ann === nothing ? x.name : :($(x.name)::$(x.ann)))
+            a = x.ann === nothing ? x.name : :($(x.name)::$(x.ann))
+            push!(wargs, x.name in nospec ? :(@nospecialize($a)) : a)
         end
     end
     wkws = Any[]
@@ -973,10 +1008,11 @@ function _rewrite_fdef(mod::Module, ex)
                 push!(eargs, x.ann)                   # as written
                 push!(callnames, Expr(:..., nm))
             elseif x.kind === :untyped
-                push!(eargs, nm)
+                push!(eargs, nm in nospec ? :(@nospecialize($nm)) : nm)
                 push!(callnames, nm)
             else
-                push!(eargs, x.ann === nothing ? nm : :($nm::$(x.ann)))
+                a = x.ann === nothing ? nm : :($nm::$(x.ann))
+                push!(eargs, nm in nospec ? :(@nospecialize($a)) : a)
                 push!(callnames, nm)
             end
         end

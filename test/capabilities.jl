@@ -110,3 +110,32 @@ end
     pt = Base.invokelatest(getglobal, U, :Pt)
     @test Base.invokelatest(getglobal(C, :total), [pt(1.0), pt(2.5)]) == 3.5
 end
+
+@testset "a bounded function inside another macro, and `@nospecialize` on its ordinary arguments (found by SciML's move 3)" begin
+    toplevel(quote
+        @trait_module module MacroWrapped
+        using TraitWorld
+        export Alg, run1, run2, run3
+        @trait Alg begin
+            order(a::Alg)::Int
+        end
+        struct A1 end
+        @implement Alg A1 begin
+            order(a) = 4
+        end
+        "a docstring above another macro"
+        Base.@nospecializeinfer function run1(@nospecialize(prob), a::Alg)
+            return order(a) + length(prob)
+        end
+        Base.@nospecializeinfer run2(a::Alg, @nospecialize(x::AbstractVector)) = order(a) + sum(x)
+        run3(@nospecialize(p), a::Alg) = order(a) * length(p)
+        end
+    end)
+    M = Base.invokelatest(getglobal, Main, :MacroWrapped)
+    g(s) = Base.invokelatest(getglobal, M, s)
+    a = Base.invokelatest(g(:A1))
+    @test Base.invokelatest(g(:run1), [1, 2], a) == 6
+    @test Base.invokelatest(g(:run2), a, [1.0, 2.0]) == 7.0
+    @test Base.invokelatest(g(:run3), (1, 2, 3), a) == 12
+    @test_throws MethodError Base.invokelatest(g(:run1), [1], :notanalg)      # the bound, not a plain annotation
+end
