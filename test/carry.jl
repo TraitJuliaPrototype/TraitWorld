@@ -195,3 +195,46 @@ end
     @test !TraitWorld._held_compiled(getfield(p, :h)) && Base.invokelatest(g(:penhue), p) == 5.0
     @test_throws MethodError Base.invokelatest(setproperty!, p, :h, 1)  # no translation for an Int
 end
+
+@testset "a struct parameter named only by a bound: read from the kept value (traits reference §7.4)" begin
+    toplevel(quote
+        @trait_module module BoundParam
+        using TraitWorld
+        @trait Col{T} begin
+            T = eltype(Self)
+            nr(c::Col)::Int
+            at(c::Col{T}, i::Int)::T
+        end
+        @implement Col A where {A <: AbstractVector} begin
+            nr(c) = length(c)::Int
+            at(c, i) = c[i]::eltype(c)
+        end
+        struct CV{T, C <: Col{T}} <: AbstractVector{T}      # T: the column's own parameter
+            c::C
+        end
+        Base.size(v::CV) = (nr(v.c),)
+        Base.getindex(v::CV, i::Int) = at(v.c, i)
+        viewsum(c::Col) = sum(CV(c))
+        dviewsum(c::Dynamic{Col{T}}) where {T} = sum(CV(c))
+        end
+    end)
+    M = Base.invokelatest(getglobal, Main, :BoundParam)
+    g(s) = Base.invokelatest(getglobal, M, s)
+    c1 = Base.invokelatest(g(:CV), compiled_for([1, 2, 3]))
+    @test typeof(c1) == g(:CV){Int, Vector{Int}} && sum(c1) == 6
+    c2 = Base.invokelatest(g(:CV), with_dynamic([1, 2, 3]))
+    @test typeof(c2) == g(:CV){Int, Dynamic{g(:Col){Int}}} && sum(c2) == 6
+    @test Base.invokelatest(g(:viewsum), compiled_for([1.5, 2.5])) == 4.0
+    @test Base.invokelatest(g(:dviewsum), Dynamic{g(:Col)}([4, 5])) == 9
+    @test_throws Exception toplevel(quote
+        @trait_module module BoundParamBad
+        using TraitWorld
+        @trait Col2 begin
+            nr2(c::Col2)::Int
+        end
+        struct W{T, C <: Col2}                              # T: named by no field and no bound
+            c::C
+        end
+        end
+    end)
+end

@@ -268,6 +268,22 @@ function _bounded_struct(mod::Module, ex::Expr)
         end
     end
     names = Symbol[_paramname(p) for p in params]
+    free = Any[p for p in params if !haskey(bounds, _paramname(p))]
+    # a free parameter named by no field outside a bound, but as a parameter of a bound (`C <: Column{T}`):
+    # read from the kept value, as a `where` variable in a bound is (traits reference §7.4)
+    fromfield(q) = any(((_, ft),) -> !(ft isa Symbol && haskey(bounds, ft)) && _uses(ft, q), fields)
+    readparams = Dict{Symbol,Vector{Tuple{Symbol,Int}}}()      # bounded parameter => (free parameter, its position in the bound)
+    for p in free
+        q = _paramname(p)
+        fromfield(q) && continue
+        for (F, B) in bounds
+            B isa Expr && B.head === :curly || continue
+            i = findfirst(a -> a === q, B.args[2:end])
+            i === nothing && continue
+            push!(get!(readparams, F, Tuple{Symbol,Int}[]), (q, i))
+            break
+        end
+    end
     args = Any[]; stmts = Any[Expr(:meta, :facts_boundary), Expr(:meta, :inline)]
     vals = Any[]; ptype = Dict{Symbol,Any}()
     for (fname, ft) in fields
@@ -275,7 +291,17 @@ function _bounded_struct(mod::Module, ex::Expr)
             haskey(ptype, ft) && error("@trait_module: struct $name: the bounded parameter `$ft` types two fields; it may type one")
             k = gensym(fname)
             push!(args, Expr(:macrocall, Symbol("@nospecialize"), LineNumberNode(0), fname))   # as an entry's: compiled at `Any` for a caller that does not know the type
-            push!(stmts, :($k = $TraitWorld._kept_at($(bounds[ft]), $fname, Val($TraitWorld._known_type($fname)))))
+            if haskey(readparams, ft)
+                # kept at the trait's family first; its parameters read from the value; then kept at the bound
+                B = bounds[ft]; fam = B.args[1]; k0 = gensym(fname)
+                push!(stmts, :($k0 = $TraitWorld._kept_at($fam, $fname, Val($TraitWorld._known_type($fname)))))
+                for (q, i) in readparams[ft]
+                    push!(stmts, :($q = $TraitWorld._kept_param($k0, $fam, Val($i))))
+                end
+                push!(stmts, :($k = $TraitWorld._kept_narrowed($B, $k0)))
+            else
+                push!(stmts, :($k = $TraitWorld._kept_at($(bounds[ft]), $fname, Val($TraitWorld._known_type($fname)))))
+            end
             push!(vals, k)
             ptype[ft] = :(typeof($k))
         else
@@ -288,11 +314,13 @@ function _bounded_struct(mod::Module, ex::Expr)
     for F in keys(bounds)
         haskey(ptype, F) || error("@trait_module: struct $name: the bounded parameter `$F` types no field")
     end
-    free = Any[p for p in params if !haskey(bounds, _paramname(p))]
+    read = Set{Symbol}(q for v in values(readparams) for (q, _) in v)
     for p in free
-        any(((_, ft),) -> !(ft isa Symbol && haskey(bounds, ft)) && _uses(ft, _paramname(p)), fields) ||
-            error("@trait_module: struct $name: parameter `$(_paramname(p))` is named by no field outside a bound, so its constructor cannot determine it")
+        q = _paramname(p)
+        fromfield(q) || q in read ||
+            error("@trait_module: struct $name: parameter `$q` is named by no field and by no bound's parameter, so its constructor cannot determine it")
     end
+    free = Any[p for p in free if !(_paramname(p) in read)]
     push!(stmts, :(return $name{$([haskey(ptype, n) ? ptype[n] : n for n in names]...)}($(vals...))))
     sig = Expr(:call, name, args...)
     isempty(free) || (sig = Expr(:where, sig, free...))
@@ -548,8 +576,8 @@ function _classify(mod::Module, a, unbounded::Vector{Symbol} = Symbol[]; attr_bo
             if !isempty(used)
                 h = _tryeval(mod, ann.args[1])
                 if (h === Callable || h === Compiled || h === Dynamic) && _callable_args_use(mod, ann, used)
-                    # argument types that follow the other arguments (traits reference §5.8): kept as
-                    # expressions over the `where` variables; the entry enters the function after them
+                    # argument types that follow the other arguments, or an open result type (traits reference §5.8):
+                    # kept as expressions over the `where` variables; the entry enters the function after them
                     ce = _callable_exprs(mod, ann)
                     ce === nothing && error("@trait_module: argument `$name`: `$ann` is not a `Callable` bound")
                     return _Arg(name, ann, :callable, Any[], ce[1], ce[2], ce[3])
@@ -590,12 +618,12 @@ function _bound_names(mod::Module, a, w)
     h = _tryeval(mod, ann.args[1])
     return h isa Type && is_trait(h) && _uses(ann, _wherevar(w))
 end
-"Whether the `Callable` in bound `ann` (or under an attribute) names one of the `where` variables `used` in its argument types `A`."
+"Whether the `Callable` in bound `ann` (or under an attribute) names one of the `where` variables `used` in its argument types `A` or its result type `S` (an open result, traits reference §5.8)."
 function _callable_args_use(mod::Module, ann, used)
     ann isa Expr && ann.head === :curly || return false
     if _tryeval(mod, ann.args[1]) === Callable
         length(ann.args) >= 2 || return false
-        return any(w -> _uses(ann.args[2], _wherevar(w)), used)
+        return any(w -> _uses(ann.args[2], _wherevar(w)) || (length(ann.args) >= 3 && _uses(ann.args[3], _wherevar(w))), used)
     end
     return any(a -> _callable_args_use(mod, a, used), ann.args[2:end])
 end
@@ -983,7 +1011,7 @@ function _rewrite_fdef(mod::Module, ex)
                                                         Val($TraitWorld._known_type($(x.name)))))
                 cw = Symbol[_wherevar(w) for w in wheres if _uses(x.A, _wherevar(w)) || _uses(x.S, _wherevar(w))]
                 # argument types that follow the other arguments: entered after them (traits reference §5.8)
-                isempty(cw) ? push!(stmts, ent) : push!(deferred, (cw, x.name, ent))
+                isempty(cw) ? push!(stmts, ent) : push!(deferred, (cw, x, ent))
                 push!(newnames, v)
             elseif x.kind === :callables
                 v = gensym(Symbol(x.name, :_fn))
@@ -1002,15 +1030,31 @@ function _rewrite_fdef(mod::Module, ex)
             plainfixed = Set(Symbol[_wherevar(w) for w in wheres if any(x -> x.kind in (:plain, :vararg) && x.ann !== nothing &&
                                                                            _uses(x.ann, _wherevar(w)), args)])
             bound = Set{Symbol}()
-            for (cw, nm, ent) in deferred
+            for (cw, x, ent) in deferred
+                nm = x.name
+                open = Symbol[]
                 for p in cw
                     (p in plainfixed || p in bound) && continue
                     k = findfirst(b -> b[1] === p, wbind)
-                    k === nothing && error("@trait_module: argument `$nm` of `$fname`: its `Callable` names `$p`, which no other " *
-                                           "argument fixes (traits reference §5.8)")
+                    if k === nothing
+                        # an open result type (traits reference §5.8): a variable only the result names is inferred
+                        # at the entry, once the argument types are fixed
+                        (_uses(x.A, p) || !_uses(x.S, p)) &&
+                            error("@trait_module: argument `$nm` of `$fname`: its `Callable` names `$p`, which no other " *
+                                  "argument fixes (traits reference §5.8)")
+                        push!(open, p)
+                        continue
+                    end
                     (_, tnm, F, ip) = wbind[k]
                     push!(stmts, :($p = $TraitWorld._trait_param($(viewof[tnm]), $F, Val($ip))))
                     push!(bound, p)
+                end
+                if !isempty(open)
+                    length(open) == 1 && x.S === open[1] ||
+                        error("@trait_module: argument `$nm` of `$fname`: an open result type is the result itself, " *
+                              "`Callable{A, S} where S` (traits reference §5.8)")
+                    push!(stmts, :($(open[1]) = $TraitWorld._callable_result($nm, $(x.A))))
+                    push!(bound, open[1])
                 end
                 push!(stmts, ent)
             end

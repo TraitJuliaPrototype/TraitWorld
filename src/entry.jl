@@ -921,6 +921,18 @@ end
 # its attribute. Constructors make or keep, never cast. A function held at one signature is the same
 # function at another: seen there with its attribute, a `Dynamic` one through a new pointer.
 
+"""
+The result type of function argument `f` called with arguments of type `A`: an open result type
+(`Callable{A, S} where S`, traits reference §5.8), plain inference's answer, as `return_type` gives it
+at run time. A constant where `f`'s type is known; `Any` for a function without a method at `A`, whose
+call raises `MethodError`.
+"""
+function _callable_result(@nospecialize(f), ::Type{A}) where {A}
+    g = f isa CompiledFor || f isa WithDynamic ? getfield(f, :x) : f isa CObj || f isa HeldValue ? _callable_fn(f) : f
+    S = Core.Compiler.return_type(Tuple{Core.Typeof(g), A.parameters...})
+    return S === Union{} ? Any : S
+end
+
 "The function a held `Callable` value or a function argument stands for."
 @inline _callable_fn(c::CObj) = (f = getfield(c, :f); f isa Erased ? getfield(f, :obj) : f)
 @inline _callable_fn(h::HeldValue{C}) where {C<:Callable} = (t = getfield(h, :t); t isa CObj ? _callable_fn(t) : t)

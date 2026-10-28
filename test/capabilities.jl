@@ -52,3 +52,35 @@ end)
     @test Base.invokelatest(M.ccount, x -> x > 1.5, [1.0, 2.0, 3.0]) == 2
     @test Base.invokelatest(M.cfirst, [1, 2]) == (1, Int) && Base.invokelatest(M.cfirst, ["a"]) == ("a", String)
 end
+
+@testset "an open result type (traits reference §5.8)" begin
+    toplevel(quote
+        @trait_module module OpenRes
+        using TraitWorld
+        @trait Col{T} begin
+            T = eltype(Self)
+            nr(c::Col)::Int
+            at(c::Col{T}, i::Int)::T
+        end
+        @implement Col A where {A <: AbstractVector} begin
+            nr(c) = length(c)::Int
+            at(c, i) = c[i]::eltype(c)
+        end
+        function byrow(f::Callable{Tuple{T}, S}, c::Col{T}) where {T, S}
+            out = Vector{S}(undef, nr(c))
+            for i in 1:nr(c); out[i] = f(at(c, i)); end
+            return out
+        end
+        mapone(f::Callable{Tuple{Float64}, S}, x::Float64) where {S} = f(x)
+        end
+    end)
+    M = Base.invokelatest(getglobal, Main, :OpenRes)
+    g(s) = Base.invokelatest(getglobal, M, s)
+    @test Base.invokelatest(g(:byrow), x -> 2x, [1, 2, 3]) == [2, 4, 6]
+    r = Base.invokelatest(g(:byrow), string, [1.5, 2.5])
+    @test r isa Vector{String} && r == ["1.5", "2.5"]
+    @test Base.invokelatest(g(:byrow), compiled_for(x -> x > 1), [1, 2, 3]) == [false, true, true]
+    @test Base.invokelatest(g(:mapone), sqrt, 4.0) === 2.0
+    @test Base.invokelatest(g(:mapone), x -> round(Int, x), 2.6) === 3
+    @test_throws MethodError Base.invokelatest(g(:mapone), (x::Int) -> x, 1.0)    # no method at the declared argument types
+end

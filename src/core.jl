@@ -772,6 +772,24 @@ in a bound takes (traits reference §5.1). A constant of the compiled body, per 
     end
     return :(Base.inferencebarrier(_param_open)($F, $i))
 end
+"""
+Parameter `i` of trait family `F` for a value kept by a bounded field (the user's object, a trait object,
+or a `Dynamic` or `Compiled` value): the value of a struct's parameter named only in the field's bound
+(traits reference §7.4).
+"""
+_kept_param(k::TObj, ::Type{F}, ::Val{i}) where {F,i} = _trait_param(k, F, Val(i))
+_kept_param(k::Union{Dynamic,Compiled}, ::Type{F}, ::Val{i}) where {F,i} = _kept_param(getfield(k, :t), F, Val(i))
+function _kept_param(k, ::Type{F}, ::Val{i}) where {F,i}
+    v = _assemble_at(F, k)
+    v === NOTRAIT && _dyn_nonconforming(F, k)
+    return _trait_param(v, F, Val(i))
+end
+"""
+A value kept at a trait's family, kept at an instance of it whose parameters were read from the value
+(`_kept_param`): a `Dynamic` value narrowed, holding the same object; the user's object kept as before.
+"""
+_kept_narrowed(::Type{X}, k::Dynamic) where {X} = Dynamic{X}(Val(:of), k)
+_kept_narrowed(::Type{X}, k) where {X} = _kept_at(X, k, Val(true))
 @noinline _param_open(@nospecialize(F), i::Int) =
     throw(TraitBoundError("parameter $i of $F is not known for this value: fix it in the bound, or pass the value Compiled"))
 @noinline _param_mismatch(nm::Symbol, @nospecialize(F), i::Int, v::Symbol, @nospecialize(want), @nospecialize(got)) =
