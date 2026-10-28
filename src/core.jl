@@ -215,13 +215,21 @@ itself. For a trait with input parameters, the trait applied to its input values
 R}` gives `HasProperty{:ps}`); where an input is left open, the trait itself, which stands for all its
 families. A computation on the type alone: it runs in generators.
 """
-function _family(@nospecialize(X))
+@inline function _family(@nospecialize(X))
+    # small and inlined, so that it folds where `X` is known (also in code compiled by facts, where a
+    # call at a kind would be a run-time site)
     u = Base.unwrap_unionall(X)
     (u isa DataType && u <: Trait) || return X
     W = u.name.wrapper
-    k = _ninputs(W)
-    k == 0 && return W
+    s = u.super
+    (s isa DataType && s.name === _INPUT_TRAIT) || return W
     ps = u.parameters
+    k = s.parameters[1]::Int
+    k == 1 && return ps[1] isa TypeVar ? W : Core.apply_type(W, ps[1])
+    return _family_k(W, ps, k)
+end
+const _INPUT_TRAIT = Base.typename(InputTrait)
+function _family_k(@nospecialize(W), ps::Core.SimpleVector, k::Int)
     for i in 1:k
         ps[i] isa TypeVar && return W
     end

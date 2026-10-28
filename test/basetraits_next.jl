@@ -187,6 +187,14 @@ end
 struct BTNOther
     t::Float64
 end
+# a family: every `BTNFam{P}` has the property `pp` of type `P` (the SciML port's `ParamIntegrator{U, T, P}`)
+struct BTNFam{P}
+    p::P
+end
+@implement HasProperty{:pp, P} BTNFam{P} where {P} begin
+    property(x, ::Val{:pp}) = x.p
+end
+btn_pp(d::Dynamic{HasProperty{:pp, Int}}) = d.pp
 @implement BTNP.IntegView BTNOther begin
     curt(i) = i.t
 end
@@ -226,6 +234,11 @@ end)
     @test Base.return_types(btn_ps, (Dynamic{P.ParamInteg{P.PView}},)) == Any[P.PView]
     @test btn_x(Dynamic{HasProperty{:x, Float64}}(i)) == 5.0
     @test Base.return_types(btn_x, (Dynamic{HasProperty{:x, Float64}},)) == Any[Float64]
+    # a family implementation: each member at its own `R`
+    @test conforms(BTNFam{Int}, HasProperty{:pp, Int}) && conforms(BTNFam{String}, HasProperty{:pp, String})
+    @test !conforms(BTNFam{Int}, HasProperty{:pp, String})
+    @test btn_pp(Dynamic{HasProperty{:pp, Int}}(BTNFam(7))) == 7
+    @test Base.return_types(btn_pp, (Dynamic{HasProperty{:pp, Int}},)) == Any[Int]
     # two supertraits of one family each: the call's name selects the family
     dpx = Dynamic{P.PX}(i)
     @test dpx.x == 5.0 && dpx.ps[:σ] == 11.0 && P.pxsum(i) == 5.0 + 28.0 + 3

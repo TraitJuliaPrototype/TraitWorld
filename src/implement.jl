@@ -1434,8 +1434,10 @@ function _param_methods(@nospecialize(X), pexs, Rex, wheres::Vector{Any})
     ps = trait_params(X)
     length(pexs) == length(ps) || error("@implement: $X takes $(length(ps)) parameter(s), got $(length(pexs))")
     out = Any[]
-    for (p, pex) in zip(ps, pexs)
+    k = _ninputs(X)
+    for (i, (p, pex)) in enumerate(zip(ps, pexs))
         pex === :_ && continue              # defined by the trait's equation or field
+        i <= k && continue                  # an input parameter: the family's value (`_input_families`)
         sig = :($TW.param(::Type{$X}, ::Val{$(QuoteNode(p))}, ::Type{$Rex}))
         defs = Any[Expr(:(=), isempty(wheres) ? sig : Expr(:where, sig, wheres...), pex)]
         # the same parameter at a key with declared fields, whose receiver type is Rex
