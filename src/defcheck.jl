@@ -150,6 +150,7 @@ function definition_problems(@nospecialize(f))
         end
         if isempty(ps)
             push!(_DEF_CHECKED, m)
+            ccall(:jl_generating_output, Cint, ()) == 1 && _record_def_checked!(m)
         else
             for p in unique(ps)
                 push!(out, "$(m.name) ($(basename(string(m.file))):$(m.line)): $p")
@@ -178,10 +179,30 @@ function check_definitions(mod::Module)
     return out
 end
 
+"""
+While the trait module's image is built: keep that `m` was checked clean at its definition, in `m`'s module
+(`__tw_def_checked__`), so a session that loads the image skips its workers' checks too. A redefined
+method is another `Method`, so it is checked again.
+"""
+function _record_def_checked!(m::Method)
+    mod = m.module
+    if !Base.invokelatest(isdefined, mod, :__tw_def_checked__)
+        try
+            Core.eval(mod, :(const __tw_def_checked__ = Method[]))
+        catch
+            return nothing                             # a closed module: another image's
+        end
+    end
+    push!(Base.invokelatest(getglobal, mod, :__tw_def_checked__), m)
+    return nothing
+end
+"Whether `m` was checked clean at its definition, in this session or while its module's image was built."
+_was_def_checked(m::Method) = m in _DEF_CHECKED ||
+    (isdefined(m.module, :__tw_def_checked__) && m in getglobal(m.module, :__tw_def_checked__)::Vector{Method})
+
 "Whether the worker for `sig` was checked at its method's definition."
 function _def_checked(@nospecialize(sig))
     DEFCHECK_SKIP[] || return false
-    isempty(_DEF_CHECKED) && return false
     sig isa DataType || return false
     for p in sig.parameters
         _hascallable(p) && return false
@@ -191,7 +212,7 @@ function _def_checked(@nospecialize(sig))
     catch
         return false
     end
-    return m in _DEF_CHECKED
+    return _was_def_checked(m)
 end
 
 # --- keeping: which functions may keep a trait object (note "Keeping a value is a crossing") ---------
