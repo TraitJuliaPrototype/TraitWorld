@@ -6,7 +6,7 @@
 # They read the machinery's state and Julia's reflection; they change nothing a call would not change.
 # ---------------------------------------------------------------------------
 
-public callpath, factscode, loadreport, loadreport_switch!
+public callpath, factscode, loadreport, loadreport_switch!, descend_facts, facts_provider
 
 # --- printing helpers -------------------------------------------------------------------
 
@@ -32,10 +32,12 @@ struct RuntimeSite
     stmt::Int
     kind::Symbol
     call::String
+    fname::String     # the called function as `call` names it (a dispatch), or ""
     loc::String
     note::String      # a path that does not run per call (an error, a first call, a first sight), or ""
 end
-RuntimeSite(w, i, k, c, l) = RuntimeSite(w, i, k, c, l, _site_note(c))
+RuntimeSite(w, i, k, c, l) = RuntimeSite(w, i, k, c, "", l, _site_note(c))
+RuntimeSite(w, i, k, c, f, l) = RuntimeSite(w, i, k, c, f, l, _site_note(c))
 
 "The machinery's paths that do not run per call, by the function a site calls."
 const _RARE_PATHS = [
@@ -104,7 +106,7 @@ function _split_callee(@nospecialize(F))
     if F isa DataType && F.name.name === :_DynOp && length(F.parameters) == 2
         X, opT = F.parameters
         op = isdefined(opT, :instance) ? opT.instance : opT
-        return string(_dshort(op, 40), " on a Dynamic{", _dshort(X, 50), "}"), CC.dynamic_candidates(_family(X))
+        return string(_dshort(op, 40), " on a Dynamic{", _dshort(X, 50), "}"), CC.dynamic_candidates(_family_of(X))
     end
     return (isdefined(F, :instance) ? _dshort(F.instance, 50) : _dshort(F, 50)), nothing
 end
@@ -140,7 +142,7 @@ function _ir_sites(src::Core.CodeInfo, where_::String)
             fname = isc ? _dshort(f, 60) : "(" * _dshort(_ir_widen(ft), 60) * ")"
             barrier && (fname = "inferencebarrier(" * fname * ")")
             call = string(fname, "(", join((string("::", _dshort(t, 70)) for t in argts), ", "), ")")
-            push!(sites, RuntimeSite(where_, i, kind, call, _ir_loc(src, i)))
+            push!(sites, RuntimeSite(where_, i, kind, call, fname, _ir_loc(src, i)))
         elseif stmt.head === :foreigncall
             name = stmt.args[1]
             nm = _fc_name(name)
@@ -235,7 +237,7 @@ function factscode(@nospecialize(sig::Type); depth::Int = 2, plain::Bool = false
             push!(bodies, CodeBody(mi, src, rt, interp isa CC.NativeInterpreter ? CC.cache_owner(interp) : nothing))
             ss, inv = _ir_sites(src, _mi_where(mi))
             rare = _rare_body(mi)
-            rare === nothing || (ss = RuntimeSite[RuntimeSite(x.where_, x.stmt, x.kind, x.call, x.loc, rare) for x in ss])
+            rare === nothing || (ss = RuntimeSite[RuntimeSite(x.where_, x.stmt, x.kind, x.call, x.fname, x.loc, rare) for x in ss])
             append!(sites, ss)
             d > 0 || continue
             for c in inv
@@ -644,3 +646,23 @@ function loadreport(io::IO = stdout; top::Int = 5)
     any_ || println(io, "  no step of the machinery ran")
     return nothing
 end
+
+# --- Cthulhu (an extension: TraitWorldCthulhuExt, loaded with `using Cthulhu`) ------------------
+
+"""
+    descend_facts(f, types; facts = true, kw...)
+    descend_facts(callpath(f, args...); kw...)
+
+Cthulhu's interactive descent (`Cthulhu.descend`) over the code compiled by facts for `f(::types...)`, as
+`factscode` reads it: each callee in its owner's mode (the facts owner's code by facts). The run-time sites
+`factscode` finds and Cthulhu does not list are in the callsite menu as runtime calls. Keywords go to
+`Cthulhu.descend`. Needs `using Cthulhu` (the extension `TraitWorldCthulhuExt`).
+"""
+function descend_facts end
+"""
+    facts_provider(; facts = true)
+
+The Cthulhu provider of `descend_facts`, for Cthulhu's own entry points
+(`Cthulhu.descend(f, types; provider = TraitWorld.facts_provider())`). Needs `using Cthulhu`.
+"""
+function facts_provider end
