@@ -72,8 +72,30 @@ function _bound_hint(io::IO, e::MethodError, @nospecialize(argtypes), @nospecial
         a = args[pos]
         any(X -> try conforms(typeof(a), X) catch; false end, Xs) && continue
         print(io, "\nArgument ", pos, " of `", f, "` is bounded by ", join(string.(Xs), " or "),
-              "; a ", typeof(a), " conforms to none of them (declare an implementation with `@implement`, or convert it).")
+              "; a value of type ", typeof(a), " conforms to none of them (declare an implementation with `@implement`, or convert it).")
+        for X in Xs
+            impls = _declared_implementations(X)
+            isempty(impls) && continue
+            print(io, "\n  ", X, " is implemented by ", join(first(impls, 8), ", "), length(impls) > 8 ? ", …" : "", ".")
+        end
     end
     return nothing
+end
+"The types (or families) with a declared implementation of trait `X`, by name (for the hint)."
+function _declared_implementations(@nospecialize(X))
+    tn = Base.unwrap_unionall(X).name
+    out = String[]
+    for m in methods(implementation)
+        ps = Base.unwrap_unionall(m.sig).parameters
+        length(ps) == 3 || continue
+        Y = Base.unwrap_unionall(ps[2])
+        (Y isa DataType && Y <: Type && !isempty(Y.parameters)) || continue
+        Yx = Base.unwrap_unionall(Y.parameters[1])
+        (Yx isa DataType && Yx.name === tn) || continue
+        T = ps[3]
+        T = T isa DataType && T <: Type && !isempty(T.parameters) ? T.parameters[1] : T
+        push!(out, string(T isa TypeVar ? T.ub : T))
+    end
+    return unique!(sort!(out))
 end
 _install_error_hints!() = (Base.Experimental.register_error_hint(_bound_hint, MethodError); nothing)

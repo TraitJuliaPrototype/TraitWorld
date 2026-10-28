@@ -37,7 +37,13 @@ end)
     try
         @test Base.invokelatest(getglobal(Main, :vdyn_main), String[]) == 0
         r = Base.invokelatest(verify_main, getglobal(Main, :vdyn_main), (Vector{String},))
-        @test !any(h -> !h.errorpath, r.holes)
+        if Base.Compiler.facts_default()
+            # under `all` it also reports the run-time sites the facts mode makes in Julia's own code
+            # (facts §12.3): every hole off an error path is in Julia's code, none in the program's
+            @test all(h -> h.errorpath || TraitWorld.owner(h.caller.def.module) === :Julia, r.holes)
+        else
+            @test !any(h -> !h.errorpath, r.holes)
+        end
         # three sites on dynamic values, two types each: an operation; the opening of the value, which
         # holds the user's object (a trait object is made from it); the entry called with the opened value
         @test count(p -> p.first === :dynamic, r.targets) == 6

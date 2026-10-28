@@ -72,3 +72,26 @@ end
     @test occursin("checked_call", allframes(() -> Main.PrintLib.boom([1.0, 2.0])))
 end
 
+
+# T-80: the hint of a MethodError for a value that conforms to no bound lists the trait's declared implementations
+toplevel(quote
+    @trait_module module T80
+    using TraitWorld
+    export Sized80, s80, use80, Box80
+    @trait Sized80 begin
+        s80(x::Sized80)::Int
+    end
+    struct Box80; n::Int; end
+    @implement Sized80 Box80 begin
+        s80(b) = b.n
+    end
+    use80(x::Sized80) = s80(x) + 1
+    end
+end)
+@testset "T-80: the hint lists the declared implementations" begin
+    M = Main.T80
+    @test Base.invokelatest(M.use80, Base.invokelatest(M.Box80, 1)) == 2
+    e = try Base.invokelatest(M.use80, "x"); nothing catch err; err end
+    msg = sprint(showerror, e)
+    @test e isa MethodError && occursin("a value of type String conforms to none", msg) && occursin("is implemented by", msg) && occursin("Box80", msg)
+end

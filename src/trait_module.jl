@@ -326,7 +326,7 @@ end
 A trait's name as a container's element type in a function means a value of the trait with its
 attribute (`Kept{X}`), as in a field (note "Traits as abstract types"): `Column[]`, `Column[a, b]`, `Vector{Column}(undef, n)`
 and `Dict{String, Column}()` in a body; `cs::Vector{Column}` in an argument. A trait's name in
-an argument itself stays a bound, and `Vector{<:ColTable}` keeps its meaning.
+an argument itself stays a bound, and `Vector{<:ColTable}` is refused (`_refuse_subtype_param`).
 """
 function _dynamic_containers(mod::Module, ex::Expr)
     sig, body = ex.args[1], ex.args[2]
@@ -354,6 +354,22 @@ function _dyn_sig(mod::Module, s)
     end
     return s
 end
+"""
+`v::Vector{<:ColTable}` in an argument is refused (traits §5.1): no conforming type subtypes a trait, so
+no user's vector matches it. The message names the collection bound, through which a user's container
+crosses as it is (traits §8.3).
+"""
+function _refuse_subtype_param(mod::Module, name, T::Expr)
+    for p in T.args[2:end]
+        p isa Expr && p.head === :(<:) && length(p.args) == 1 && _istraittype(mod, p.args[1]) || continue
+        h = _tryeval(mod, T.args[1])
+        X = p.args[1]
+        bound = h isa Type && h <: AbstractDict ? "Keyed{K, $X}" : h isa Type && h <: AbstractArray ? "Indexable{$X}" : "Iterable{$X}"
+        error("@trait_module: `$name::$T`: no user's container matches it, since a conforming type does not subtype a trait. " *
+              "Take the collection by its bound, `$name::$bound`: a user's container crosses as it is (traits reference §5.1, §8.3)")
+    end
+    return nothing
+end
 function _dyn_arg(mod::Module, a)
     a isa Expr || return a
     if a.head === :parameters || a.head === :kw || a.head === :...
@@ -361,6 +377,7 @@ function _dyn_arg(mod::Module, a)
     elseif a.head === :(::) && length(a.args) == 2 && a.args[2] isa Expr && a.args[2].head === :curly && _isattribute(mod, a.args[2].args[1])
         return a                                     # `x::Dynamic{X}`, `x::Compiled{X}`: a bound with an attribute
     elseif a.head === :(::) && length(a.args) == 2 && a.args[2] isa Expr && a.args[2].head === :curly && !_istraitname(mod, a.args[2].args[1])
+        _refuse_subtype_param(mod, a.args[1], a.args[2])
         return Expr(:(::), a.args[1], _dyn_type(mod, a.args[2], true))
     elseif a.head === :(::) && length(a.args) == 2 && a.args[2] isa Expr && (a.args[2].head === :curly || a.args[2].head === :tuple)
         return Expr(:(::), a.args[1], _dyn_bound(mod, a.args[2]))

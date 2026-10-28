@@ -199,3 +199,22 @@ end)
     e = try R.fread(Main.BadFac(1.5)); nothing catch err; err end
     @test e isa ImplementError && occursin("declared", sprint(showerror, e))
 end
+
+# T-78: a trait inside a Base container's type in an argument annotation is refused, naming the collection bound
+@testset "T-78: Vector{<:X} in an argument is refused" begin
+    e = try
+        toplevel(quote
+            @trait_module module T78
+            using TraitWorld
+            @trait Areal begin
+                arealy(x::Areal)::Float64
+            end
+            total(v::Vector{<:Areal}) = sum(arealy, v)
+            end
+        end); nothing
+    catch err
+        err
+    end
+    while e isa LoadError; e = e.error; end
+    @test e isa ErrorException && occursin("v::Indexable{Areal}", e.msg)
+end
