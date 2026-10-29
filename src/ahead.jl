@@ -84,21 +84,37 @@ function _check_ahead!(mod::Module, @nospecialize(T), @nospecialize(sig))
     return nothing
 end
 
-"The trait modules loaded now: modules (and their submodules) made by `@trait_module`."
-function _trait_modules()
-    out = Module[]
-    seen = Base.IdSet{Module}()
-    todo = Module[m for m in values(Base.loaded_modules)]
-    while !isempty(todo)
-        m = pop!(todo)
-        m in seen && continue
-        push!(seen, m)
-        isdefined(m, :__trait_module__) && isdefined(m, :__tw_positions__) && push!(out, m)
-        for n in names(m; all = true, imported = false)
-            isdefined(m, n) || continue
-            v = getglobal(m, n)
-            v isa Module && v !== m && parentmodule(v) === m && push!(todo, v)
+"""
+The entry positions known now, as `(module, f, pos, nargs)`: those whose needs a trait module's end fixed,
+read from TraitWorld's own record (a method of `needed` per position, defined in the trait module), and
+those of the module `mod` and the trait modules around it, which may not have reached their end. Read
+from the records only, not from modules' bindings: reading every binding of every loaded module would
+read deprecated ones too (Cairo's, under `--depwarn=yes`; open issue 123).
+"""
+function _entry_positions(mod::Module)
+    out = Tuple{Module,Any,Int,Int}[]
+    seen = Set{Any}()
+    for m in methods(needed)
+        P = Base.unwrap_unionall(m.sig).parameters[2]
+        (P isa DataType && P <: EntryPos && isconcretetype(P)) || continue
+        F, pos, nargs = P.parameters
+        (F isa DataType && isdefined(F, :instance) && pos isa Int && nargs isa Int) || continue
+        (F, pos, nargs) in seen && continue
+        push!(seen, (F, pos, nargs))
+        push!(out, (m.module, F.instance, pos, nargs))
+    end
+    m = mod
+    while true
+        if isdefined(m, :__trait_module__) && isdefined(m, :__tw_positions__)
+            for (f, pos, nargs) in m.__tw_positions__
+                (typeof(f), pos, nargs) in seen && continue
+                push!(seen, (typeof(f), pos, nargs))
+                push!(out, (m, f, pos, nargs))
+            end
         end
+        p = parentmodule(m)
+        p === m && break
+        m = p
     end
     return out
 end
@@ -107,8 +123,8 @@ end
     (T isa DataType && isconcretetype(T)) || return nothing
     FX = _family(X)
     n = 0
-    for mod in _trait_modules()
-        for (f, pos, nargs) in mod.__tw_positions__
+    for (mod, f, pos, nargs) in _entry_positions(mod)
+        begin
             nargs < 0 && continue
             L = needed(EntryPos{typeof(f),pos,nargs}())
             Xs = Any[typeof(L).parameters[1].parameters...]
@@ -139,6 +155,7 @@ end
                 end
             end
             # the entry's method for `Compiled` values whose callers do not know the type: once per builder (key)
+            isdefined(mod, :__tw_untyped__) || continue
             for (g, gn, tag, tpos) in mod.__tw_untyped__
                 (g === f && gn == nargs && tpos == (pos,)) || continue
                 for cm in methods(tag)
