@@ -283,6 +283,29 @@ function _family_method(ex, fam, inputs::Vector{Symbol})
     newlhs = lhs isa Expr && lhs.head === :where ? Expr(:where, lhs.args..., inputs...) : Expr(:where, lhs, inputs...)
     return Expr(ex.head, newlhs, ex.args[2:end]...)
 end
+"""
+The supertraits with input parameters of a trait whose supertraits are `superfams` (its families, as
+written; `superinputs` those with input parameters), transitively, as family expressions.
+"""
+function _input_super_closure(mod::Module, superfams, superinputs)
+    out = Any[S for S in superfams if S in superinputs]
+    seen = Any[]
+    todo = Any[_tryeval(mod, S) for S in superfams]
+    while !isempty(todo)
+        Sv = popfirst!(todo)
+        (Sv isa Type && is_trait(Sv)) || continue
+        _wrapper(Sv) in seen && continue
+        push!(seen, _wrapper(Sv))
+        b = bundle(Sv)
+        b isa Tuple && append!(todo, collect(Any, b))
+        for P in supertraits(Sv)
+            _ninputs(P) > 0 && !any(x -> x isa Type && x == P, out) && push!(out, P)
+            push!(todo, P)
+        end
+    end
+    return out
+end
+
 _names_type_of(ex, fam) = (ex isa Expr && ex.head === :curly && length(ex.args) == 2 && ex.args[1] === :Type && ex.args[2] == fam) ||
                           (ex isa Expr && any(a -> _names_type_of(a, fam), ex.args))
 
@@ -306,7 +329,11 @@ macro trait(header, block = nothing)
         any(ex -> ex isa Expr && ex.head === :(=) && ex.args[1] in inputs, block.args) &&
             error("@trait $name: an input parameter is not defined by an equation: each implementation states it")
     end
-    out = Any[:(Core.@__doc__ abstract type $name{$(pnames...), $Rsym} <: $(ni == 0 ? :($TW.Trait) : :($TW.InputTrait{$ni})) end)]
+    # a trait with supertraits is a `Subtrait` of all of them, transitively, so that each supertrait's
+    # declaration covers its kept forms (`Subtrait`; a bundle stays a plain trait)
+    stype = block === nothing || isempty(supers) ? (ni == 0 ? :($TW.Trait) : :($TW.InputTrait{$ni})) :
+            :($TW._trait_supertype($TW._super_closure(($([s isa Expr && s.head === :curly ? s.args[1] : s for s in supers]...),)), $ni))
+    out = Any[:(Core.@__doc__ abstract type $name{$(pnames...), $Rsym} <: $stype end)]
     clevels = _concreteness_levels(cdecls, outs, name)
     isempty(clevels) || push!(out, :($TW.trait_concreteness(::Type{$nm}) = $(QuoteNode(clevels))))
     tdefault === nothing || push!(out, :($TW.default_attribute(::Type{$nm}) = $(QuoteNode(tdefault))))
@@ -520,31 +547,51 @@ macro trait(header, block = nothing)
         # the candidates known when it is compiled
         push!(out, :(Base.@constprop :aggressive @inline $(d.fexpr)(dyn::$TW.HeldValue{$X__}, $(syms...)) where {$X__<:$name} = $rhs))
     end
-    # a supertrait's operations on a held value of this trait (traits reference §3.6, T-72): the value
-    # seen through the supertrait, which runs the supertrait's own method; its supertraits chain the same way
-    # A supertrait with input parameters is seen at the parameters the held value fixes (`HasProperty{:ps, P}`
-    # of `ParamIntegrator{…, P}`), so its operations' results stay typed; of several families of one such
-    # trait (`HasProperty{:ps}`, `HasProperty{:x}`), the one whose declared arguments the call matches.
+    # the operations on a held value of any subtrait of this trait, declared now or later (traits reference
+    # §3.6, lowering §3): one method per operation function, the value seen through this trait, which runs
+    # this trait's own method; so a later subtrait adds no method to this trait's operations, which plain
+    # untyped callers' code could match (open issue 124). A trait with input parameters is seen at the family
+    # whose declared arguments the call matches, among the subtrait's (`_input_cands`), at the parameters the
+    # held value fixes (`_super_inst`), so its operations' results stay typed.
+    for fx in unique([d.fexpr for d in decls])
+        X__, U__ = gensym(:X), gensym(:U)
+        sup = ni == 0 ? name : :($TW._input_super($X__, $TW._input_cands($X__, $fx), args))
+        push!(out, :(@inline $fx(dyn::$TW.HeldValue{$X__}, args...) where {$U__ >: $name, $X__ <: $TW.AnySubtrait{$U__}} =
+                         $fx($TW._as_super($sup, dyn), args...)))
+    end
+    # this trait's supertraits with input parameters, transitively: for each of their operation functions, the
+    # families a call on a held value of this trait may reach (read by the supertrait's covering method above)
     chained = Dict{Any,Vector{Any}}()
-    for S in superfams
+    for S in _input_super_closure(__module__, superfams, superinputs)
         Sv = _tryeval(__module__, S)
         (Sv isa Type && is_trait(Sv)) || continue
         for op in trait_ops(Sv)
             f = op_function(Sv, Val(op))
-            fr = GlobalRef(parentmodule(f), nameof(f))
-            if S in superinputs
-                push!(get!(() -> Any[], chained, fr), (S, op))
-                continue
-            end
-            X__ = gensym(:X)
-            push!(out, :(@inline $fr(dyn::$TW.HeldValue{$X__}, args...) where {$X__<:$name} = $fr($TW._as_super($S, dyn), args...)))
+            push!(get!(() -> Any[], chained, GlobalRef(parentmodule(f), nameof(f))), (S, op))
         end
     end
     for (fr, Sops) in chained
         X__ = gensym(:X)
         cands = Expr(:tuple, [:($TW.InputCand{$S, $(QuoteNode(op))}()) for (S, op) in Sops]...)
-        push!(out, :(@inline $fr(dyn::$TW.HeldValue{$X__}, args...) where {$X__<:$name} =
-                         $fr($TW._as_super($TW._input_super($X__, $cands, args), dyn), args...)))
+        push!(out, :(@inline $TW._input_cands(::Type{$X__}, ::typeof($fr)) where {$X__<:$name} = $cands))
+    end
+    # an operation function that two of this trait's supertraits declare (`Base.length` by two traits): both
+    # covering methods match this trait's held values, so this trait chooses, by a method of its own; the
+    # first supertrait in its closure that declares the function (traits reference §8, open issues §6)
+    shared = Dict{Any,Vector{Any}}()
+    sv = Any[v for v in (_tryeval(__module__, S) for S in superfams) if v isa Type && is_trait(v)]
+    for W in (isempty(sv) ? () : _super_closure(Tuple(sv)))
+        (_ninputs(W) == 0 && applicable(trait_ops, W)) || continue      # not a bundle, no input parameters
+        for op in trait_ops(W)
+            f = op_function(W, Val(op))
+            v = get!(() -> Any[], shared, GlobalRef(parentmodule(f), nameof(f)))
+            any(x -> x === W, v) || push!(v, W)
+        end
+    end
+    for (fr, Ws) in shared
+        length(Ws) >= 2 || continue
+        X__ = gensym(:X)
+        push!(out, :(@inline $fr(dyn::$TW.HeldValue{$X__}, args...) where {$X__<:$name} = $fr($TW._as_super($(Ws[1]), dyn), args...)))
     end
     # fields: properties of the representation, or (type R) the projection, read through a lens when written
     if !isempty(fdecls)

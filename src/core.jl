@@ -20,6 +20,24 @@ may implement it at several values of them. Its *family* is the trait applied to
 of `Dynamic` values are per family, as they are per trait for a trait without inputs.
 """
 abstract type InputTrait{K} <: Trait end
+"""
+    Subtrait{U}, InputSubtrait{U, K}
+
+Supertype of a trait declared with supertraits (`@trait CSVColumn{T} <: Column{T} begin … end`): `U` is the
+union of its supertraits, transitively, each by its trait type (`Union{Column}`). A supertrait's declaration
+defines one method per operation that covers the kept forms of all its subtraits, `op(::HeldValue{X}, args…)
+where {U >: Sup, X <: AnySubtrait{U}}`, so that a later subtrait adds no method to the supertrait's
+operations (lowering §3; open issue 124). `InputSubtrait{U, K}` for a subtrait with `K` input parameters.
+"""
+abstract type Subtrait{U} <: Trait end
+abstract type InputSubtrait{U,K} <: InputTrait{K} end
+const AnySubtrait{U} = Union{Subtrait{U},InputSubtrait{U}}
+"The supertype of a trait declared with the supertraits `supers` (their trait types) and `k` input parameters."
+function _trait_supertype(supers::Tuple, k::Int)
+    isempty(supers) && return k == 0 ? Trait : InputTrait{k}
+    U = Union{supers...}
+    return k == 0 ? Subtrait{U} : InputSubtrait{U,k}
+end
 # defined before the generators that use it (`_carries_static`): a generator run as plain code
 # executes in the world of its definition
 "`is_trait(X)`: whether `X` was declared with `@trait`."
@@ -222,13 +240,15 @@ families. A computation on the type alone: it runs in generators.
     (u isa DataType && u <: Trait) || return X
     W = u.name.wrapper
     s = u.super
-    (s isa DataType && s.name === _INPUT_TRAIT) || return W
+    s isa DataType || return W
+    k = s.name === _INPUT_TRAIT ? s.parameters[1]::Int : s.name === _INPUT_SUBTRAIT ? s.parameters[2]::Int : 0
+    k == 0 && return W
     ps = u.parameters
-    k = s.parameters[1]::Int
     k == 1 && return ps[1] isa TypeVar ? W : Core.apply_type(W, ps[1])
     return _family_k(W, ps, k)
 end
 const _INPUT_TRAIT = Base.typename(InputTrait)
+const _INPUT_SUBTRAIT = Base.typename(InputSubtrait)
 function _family_k(@nospecialize(W), ps::Core.SimpleVector, k::Int)
     for i in 1:k
         ps[i] isa TypeVar && return W
@@ -240,7 +260,8 @@ function _ninputs(@nospecialize(W))
     u = Base.unwrap_unionall(W)
     u isa DataType || return 0
     s = u.super
-    return s isa DataType && s.name === Base.typename(InputTrait) ? (s.parameters[1]::Int) : 0
+    s isa DataType || return 0
+    return s.name === _INPUT_TRAIT ? (s.parameters[1]::Int) : s.name === _INPUT_SUBTRAIT ? (s.parameters[2]::Int) : 0
 end
 "The trait type of a trait instance or family, with no parameter applied (`HasProperty` for `HasProperty{:ps}`)."
 _wrapper(@nospecialize(X)) = (u = Base.unwrap_unionall(X); u isa DataType ? u.name.wrapper : X)
@@ -1154,6 +1175,22 @@ _super_field_param(@nospecialize(S), i::Int) = (q = trait_params(S)[i]; q in tra
 Base.Experimental.@max_methods 1 function bundle end
 "`bundle(X)`: for a bundle trait, the traits it names; `t::Table` means `t::(ColTable, RowTable)`."
 bundle(@nospecialize(X)) = nothing
+"The trait types of the supertraits `supers` (families or traits), transitively, bundles' members included: a subtrait's `U`."
+function _super_closure(supers::Tuple)
+    out = Any[]
+    todo = Any[supers...]
+    while !isempty(todo)
+        S = popfirst!(todo)
+        is_trait(S) || continue
+        W = _wrapper(S)
+        any(x -> x === W, out) && continue
+        push!(out, W)
+        b = bundle(S)
+        b isa Tuple && append!(todo, collect(Any, b))
+        append!(todo, collect(Any, supertraits(S)))
+    end
+    return Tuple(out)
+end
 
 # --- operation calls -------------------------------------------------------
 
@@ -1211,6 +1248,11 @@ end
 
 "A candidate supertrait of a held value: a family `S` of a trait with input parameters, for operation `op`."
 struct InputCand{S,op} end
+"""
+`_input_cands(X, f)`: the families of the supertraits with input parameters of trait `X` (transitively) whose
+operation function is `f`, as `InputCand`s; defined by `X`'s declaration.
+"""
+function _input_cands end
 """
 The supertrait an operation on a held value of trait `X` reaches, among the families `cands` of one
 trait with input parameters (`InputCand{HasProperty{:ps}, :property}()`, …): the first whose declared

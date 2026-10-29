@@ -175,6 +175,13 @@ function _owners!(acc::Base.IdSet{Any}, @nospecialize(T))
             for p in T.parameters[2:end]
                 _owners!(acc, p)
             end
+        elseif (T.name === Base.typename(Subtrait) || T.name === Base.typename(InputSubtrait)) && T.parameters[1] isa TypeVar
+            # a supertrait's method for its subtraits' held values, `X <: Subtrait{U} where U >: Sup`, belongs to
+            # `Sup`'s owner: a subtrait's `U` is the union of its supertraits, never wider (`_trait_supertype`)
+            _owners!(acc, T.parameters[1].lb)
+            for p in T.parameters[2:end]
+                _owners!(acc, p)
+            end
         else
             for p in T.parameters
                 # a value as a type parameter (Makie's `Plot{scatter}`, a function) belongs to its type's owner
@@ -293,6 +300,9 @@ function _required_roots(@nospecialize(t), depth::Int = 0)
     t isa DataType || return out
     r = _type_root(t.name.module)
     r === nothing || push!(out, r)
+    # a subtrait of `Sup` (`Subtrait{U} where U >: Sup`) mentions `Sup`
+    (t.name === Base.typename(Subtrait) || t.name === Base.typename(InputSubtrait)) && t.parameters[1] isa TypeVar &&
+        union!(out, _required_roots(t.parameters[1].lb, depth + 1))
     for p in t.parameters
         union!(out, _required_roots(p, depth + 1))
     end

@@ -412,6 +412,80 @@ end
     @test A.nwk([[1.0]]; k = 3) == ("bounded", 1, 3)
 end
 
+@testset "a later subtrait adds no method to its supertrait's operations (open issue 124)" begin
+    toplevel(quote
+        @trait_module module SupOps
+        using TraitWorld
+        export SupT, supop, supop2
+        @trait SupT{R} begin
+            supop(r::R)::Int
+            supop2(r::R, k::Int)::Int
+        end
+        end
+    end)
+    S = Main.SupOps
+    n1, n2 = length(methods(S.supop)), length(methods(S.supop2))
+    toplevel(quote
+        @trait_module module SubOps
+        using TraitWorld, ..SupOps
+        export SubT, Sub2T, subop, sub2op, Thing
+        @trait SubT{R} <: SupT begin
+            subop(r::R)::Int
+        end
+        @trait Sub2T{R} <: SubT begin
+            sub2op(r::R)::Int
+        end
+        end
+    end)
+    B = Main.SubOps
+    # plain code that called `supop(::Any)` keeps its edges: the method tables are as before
+    @test length(methods(S.supop)) == n1
+    @test length(methods(S.supop2)) == n2
+    @test !any(m -> occursin("SubT", string(m.sig)), methods(S.supop))
+    @test !any(m -> occursin("Sub2T", string(m.sig)), methods(B.subop))   # Sub2T added none to SubT's either
+    toplevel(quote
+        @trait_module module SubImpl
+        using TraitWorld, ..SupOps, ..SubOps
+        export Thing
+        struct Thing; n::Int; end
+        @implement SupT{Thing} begin
+            supop(r) = r.n
+            supop2(r, k) = r.n + k
+        end
+        @implement SubT{Thing} begin subop(r) = 2 * r.n end
+        @implement Sub2T{Thing} begin sub2op(r) = 3 * r.n end
+        end
+    end)
+    T = Main.SubImpl.Thing
+    # the subtraits' kept values reach the supertrait's operations, a subtrait's subtrait included
+    for k in (Kept{B.SubT}(T(3)), Dynamic{B.SubT}(T(3)), Compiled{B.Sub2T}(T(3)), Dynamic{B.Sub2T}(T(3)))
+        @test S.supop(k) == 3
+        @test S.supop2(k, 1) == 4
+        @test B.subop(k) == 6
+    end
+    @test B.sub2op(Dynamic{B.Sub2T}(T(3))) == 9
+    # a function two supertraits declare: the subtrait chooses the first (both covers would match)
+    toplevel(quote
+        @trait_module module SharedOps
+        using TraitWorld
+        function size1 end
+        @trait A1{R} begin size1(r::R)::Int end
+        @trait B1{R} begin size1(r::R)::Int end
+        @trait C1{R} <: (A1, B1) begin other1(r::R)::Int end
+        @trait C2{R} <: C1 begin other2(r::R)::Int end
+        struct T1; n::Int; end
+        @implement A1{T1} begin size1(r) = r.n end
+        @implement B1{T1}
+        @implement C1{T1} begin other1(r) = 1 end
+        @implement C2{T1} begin other2(r) = 2 end
+        end
+    end)
+    H = Main.SharedOps
+    @test H.size1(Kept{H.C1}(H.T1(4))) == 4
+    @test H.size1(Dynamic{H.C2}(H.T1(4))) == 4
+    @test H.other1(Dynamic{H.C2}(H.T1(4))) == 1
+end
+
 # differential test: adopting a trait method keeps every call that worked before
 module Before
 describe(v::Vector{Float64}) = "a vector"
