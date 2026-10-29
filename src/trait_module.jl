@@ -61,6 +61,7 @@ _prologue() = Any[:(Base.Experimental.@compiler_options facts=true),     # Julia
                   :(const __trait_module__ = true),
                   :(const __tw_entries__ = Dict{Any,Vector{Any}}()),
                   :(const __tw_plain__ = Dict{Any,Vector{Any}}()),
+                  :(const __tw_kwentries__ = Dict{Any,Vector{Any}}()),   # the shapes whose bounded methods take keywords
                   :(const __tw_extended__ = Set{Any}()),          # other modules' functions given workers here
                   :(const __tw_methods_seen__ = Base.IdSet{Method}()),
                   :(const __tw_positions__ = Any[]),          # (function, position, nargs) of the entries' trait positions
@@ -1039,6 +1040,14 @@ function _rewrite_fdef(mod::Module, ex)
     likearg === nothing || push!(rest, :($TraitWorld._like!($fname)))
     # --- the entry, once per shape
     existing = entries === nothing ? Any[] : get(entries, key, Any[])
+    # the bounded methods of one shape all take keywords or none does: the shape's entry sorts calls with keywords
+    # either to its workers or to the fallback (lowering L-48)
+    kwentries = _registry(mod, key, :__tw_kwentries__)
+    if pattern in existing && kwentries !== nothing && (pattern in get(kwentries, key, Any[])) != !isempty(kws)
+        throw(TraitBoundError("`$fname`: its bounded methods of this shape " *
+                              (isempty(kws) ? "take keywords and this one takes none" : "take no keywords and this one takes some") *
+                              "; TraitWorld needs the bounded methods of one shape to agree in taking keywords (lowering L-48)"))
+    end
     if !(pattern in existing)
         if plain !== nothing && pattern in get(plain, key, Any[])
             error("@trait_module: `$fname` already has an untyped method of the shape its trait-bounded method needs " *
@@ -1194,7 +1203,7 @@ function _rewrite_fdef(mod::Module, ex)
         # with keywords, the entry is its own keyword sorter: Julia's would be specialized on the named tuple of
         # the supplied keywords, where `known_type` always sees their types; taken unspecialized, as the
         # positional arguments are, a typed caller inlines it and an untyped one does not (traits reference §5.7)
-        esig = haskw ? Expr(:call, :(Core.kwcall), :(@nospecialize($kwname::NamedTuple)), :(::typeof($fname)), eargs...) :
+        esig = haskw ? Expr(:call, :(Core.kwcall), :(@nospecialize($kwname::NamedTuple)), :(::Core.Typeof($fname)), eargs...) :
                        Expr(:call, fname, eargs...)
         isempty(kept) || (esig = Expr(:where, esig, kept...))
         if haskw
@@ -1203,6 +1212,14 @@ function _rewrite_fdef(mod::Module, ex)
             push!(rest, Expr(:macrocall, GlobalRef(Base, Symbol("@inline")), LineNumberNode(0, :none),
                              Expr(:function, psig, Expr(:block, Expr(:meta, :facts_boundary),
                                                         :(return Core.kwcall(NamedTuple(), $fname, $(callnames...)))))))
+        else
+            # an entry whose bounded methods take no keywords has a keyword sorter too: as in Julia, a call with
+            # keywords is sorted among the methods that take keywords, so it goes to the fallback (open issue 130)
+            ksig = Expr(:call, :(Core.kwcall), :(@nospecialize($kwname::NamedTuple)), :(::Core.Typeof($fname)), eargs...)
+            isempty(kept) || (ksig = Expr(:where, ksig, kept...))
+            push!(rest, Expr(:macrocall, GlobalRef(Base, Symbol("@inline")), LineNumberNode(0, :none),
+                             Expr(:function, ksig, Expr(:block, Expr(:meta, :facts_boundary),
+                                                        :(return $TraitWorld.kwfallback($kwname, $fname, $(callnames...)))))))
         end
         # an ordinary method, inlined into a typed caller (keys-plan §6): there it runs at plain speed.
         # It is the boundary (rule 2): compiled in its caller's mode, while the worker it calls is
@@ -1301,6 +1318,7 @@ function _rewrite_fdef(mod::Module, ex)
         if entries !== nothing
             push!(get!(entries, key, Any[]), pattern)
         end
+        haskw && kwentries !== nothing && push!(get!(kwentries, key, Any[]), pattern)
     end
     push!(rest, :($TraitWorld._check_methods(@__MODULE__, $(QuoteNode(fname)))))
     # the traits each trait position needs: fixed when the module is complete, updated by later definitions

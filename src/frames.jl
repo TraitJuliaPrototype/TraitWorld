@@ -66,6 +66,9 @@ function _bound_hint(io::IO, e::MethodError, @nospecialize(argtypes), @nospecial
     args = e.args
     args isa Tuple || return nothing
     n = length(args)
+    # a call with keywords (Julia passes it as `f`'s call and the keywords): the bounds only where the
+    # bounded methods take keywords, as Julia sorts it among the methods that do (open issue 130)
+    kwargs isa AbstractVector && !isempty(kwargs) && !_has_kw_worker(f, n) && return nothing
     for pos in 1:n
         Xs = try traits_at(f, pos, n) catch; Any[] end
         isempty(Xs) && continue
@@ -80,6 +83,14 @@ function _bound_hint(io::IO, e::MethodError, @nospecialize(argtypes), @nospecial
         end
     end
     return nothing
+end
+"Whether `f` has a bounded method of `n` arguments that takes keywords: a worker's keyword sorter."
+function _has_kw_worker(@nospecialize(f), n::Int)
+    for m in methods(Core.kwcall, Tuple{NamedTuple,Core.Typeof(f),Vararg{Any,n}})
+        ps = Base.unwrap_unionall(m.sig).parameters
+        length(ps) == n + 3 && ps[3] === Core.Typeof(f) && _isworker(m) && return true
+    end
+    return false
 end
 "The types (or families) with a declared implementation of trait `X`, by name (for the hint)."
 function _declared_implementations(@nospecialize(X))

@@ -700,7 +700,8 @@ function _no_implementing_type(@nospecialize(Y), @nospecialize(w))
     return all(q -> q in fps, trait_params(Y))
 end
 
-_is_tagged(m::Method) = (ps = Base.unwrap_unionall(m.sig).parameters; length(ps) >= 2 && ps[2] === Untyped)
+"A tagged method: `Untyped` at argument `i` of its signature (2 for `f(::Untyped, …)`, 4 for its keyword sorter)."
+_is_tagged(m::Method, i::Int = 2) = (ps = Base.unwrap_unionall(m.sig).parameters; length(ps) >= i && ps[i] === Untyped)
 
 """
 The tagged untyped fallback of `f` for these arguments: `true` when the call `f(Untyped(), args…)`
@@ -710,16 +711,24 @@ tagged methods alone (`f(::Untyped, x)` beside `f(x, v::AbstractVector)`, open i
 specific tagged method that applies, called by `invoke` at its own signature. A vararg entry accepts
 the tag too, so `hasmethod` is not enough.
 """
-function _tagged_fallback(f::F, args) where {F}
-    T = Tuple{F,Untyped,map(typeof, args)...}
+_tagged_fallback(f::F, args) where {F} = _tagged_at(Tuple{F,Untyped,map(typeof, args)...}, 2)
+"""
+The same for a call with keywords `nt`, among the tagged methods that take keywords (their keyword
+sorters, `Core.kwcall(nt, f, ::Untyped, …)`), as Julia sorts a call with keywords among the methods
+that take keywords (open issue 130). The signature returned is the sorter's, without `Core.kwcall`.
+"""
+_tagged_kwfallback(nt::NamedTuple, f::F, args) where {F} =
+    _tagged_at(Tuple{typeof(Core.kwcall),typeof(nt),F,Untyped,map(typeof, args)...}, 4)
+
+function _tagged_at(@nospecialize(T), i::Int)
     w = Base.get_world_counter()
     m = _match(T, w)
-    m !== nothing && return _is_tagged(m.method) ? true : nothing
+    m !== nothing && return _is_tagged(m.method, i) ? true : nothing
     lo, hi, amb = Ref{UInt}(typemin(UInt)), Ref{UInt}(typemax(UInt)), Ref{Int32}(0)
     ms = ccall(:jl_matching_methods, Any, (Any, Any, Cint, Cint, UInt, Ptr{UInt}, Ptr{UInt}, Ptr{Int32}),
                T, nothing, -1, 1, w, lo, hi, amb)
     ms isa Vector{Any} || return nothing
-    tagged = Method[mm.method for mm in ms if _is_tagged(mm.method)]
+    tagged = Method[mm.method for mm in ms if _is_tagged(mm.method, i)]
     isempty(tagged) && return nothing
     best = tagged[1]
     for t in tagged
@@ -745,30 +754,38 @@ function fallback(f::F, args...) where {F}
     return Base.inferencebarrier(_fallback_plain)(nothing, f, args)
 end
 
-"The untyped fallback of a function with keyword arguments."
+"""
+The untyped fallback of a call with keywords: as in Julia, among the methods that take keywords
+(the tagged one, else an ordinary one). Without keywords (an entry with keywords called without
+any), a call to `f`: among all methods, as `fallback`.
+"""
 function kwfallback(nt::NamedTuple, f::F, args...) where {F}
+    nt isa NamedTuple{()} && return fallback(f, args...)
     CLOSED_WORLD[] && return Core.kwcall(nt, f, Untyped(), args...)
-    t = Base.inferencebarrier(_tagged_fallback)(f, args)
+    t = Base.inferencebarrier(_tagged_kwfallback)(nt, f, args)
     t === true && return Core.kwcall(nt, f, Untyped(), args...)
     t === nothing || return Base.inferencebarrier(_invoke_tagged)(nt, f, t, args)
     return Base.inferencebarrier(_fallback_plain)(nt, f, args)
 end
 
-"The tagged fallback at its own signature `sig`, where the call by dispatch is ambiguous with an ordinary method."
+"The tagged fallback at its own signature `sig` (a keyword sorter's with `nt`), where the call by dispatch is ambiguous with an ordinary method."
 @machinery @noinline function _invoke_tagged(@nospecialize(nt), @nospecialize(f), @nospecialize(sig), args::Tuple)
     nt === nothing && return invoke(f, sig, Untyped(), args...)
-    u = Base.unwrap_unionall(sig)
-    ksig = Base.rewrap_unionall(Tuple{typeof(nt),Core.Typeof(f),u.parameters...}, sig)
-    return invoke(Core.kwcall, ksig, nt, f, Untyped(), args...)
+    return invoke(Core.kwcall, sig, nt, f, Untyped(), args...)
 end
 
 @machinery @noinline function _fallback_plain(@nospecialize(nt), @nospecialize(f), args::Tuple)
-    m = _plain_method(f, Tuple{Core.Typeof(f),map(typeof, args)...})
-    m === nothing && throw(MethodError(f, args))
+    if nt === nothing
+        m = _plain_method(f, Tuple{Core.Typeof(f),map(typeof, args)...})
+        m === nothing && throw(MethodError(f, args))
+        body = Base.unwrap_unionall(m.sig)
+        return invoke(f, Base.rewrap_unionall(Tuple{body.parameters[2:end]...}, m.sig), args...)
+    end
+    # with keywords: the methods that take keywords, by their sorters
+    m = _plain_kwmethod(Tuple{typeof(Core.kwcall),typeof(nt),Core.Typeof(f),map(typeof, args)...})
+    m === nothing && throw(MethodError(Core.kwcall, (nt, f, args...)))
     body = Base.unwrap_unionall(m.sig)
-    sig = Base.rewrap_unionall(Tuple{body.parameters[2:end]...}, m.sig)
-    nt === nothing && return invoke(f, sig, args...)
-    return invoke(f, sig, args...; nt...)
+    return invoke(Core.kwcall, Base.rewrap_unionall(Tuple{body.parameters[2:end]...}, m.sig), nt, f, args...)
 end
 
 """
@@ -779,7 +796,16 @@ _is_entry(m::Method) = m.facts == 1 && m.name !== :conformance && isdefined(m.mo
 
 function _plain_method(@nospecialize(f), @nospecialize(sig))
     # all applicable methods: a method lookup would drop those the entry covers
-    cands = Method[m for m in methods(f) if sig <: m.sig && !_isworker(m) && !_is_entry(m)]
+    return _most_specific(Method[m for m in methods(f) if sig <: m.sig && !_isworker(m) && !_is_entry(m)])
+end
+"The keyword sorter of the ordinary method plain Julia would call with keywords at `sig` (`Core.kwcall`'s), or `nothing`."
+function _plain_kwmethod(@nospecialize(sig))
+    ms = Base._methods_by_ftype(sig, -1, Base.get_world_counter())
+    ms isa Vector || return nothing
+    return _most_specific(Method[mm.method for mm in ms if sig <: mm.method.sig && !_isworker(mm.method) &&
+                                                           !_is_entry(mm.method) && !_is_tagged(mm.method, 4)])
+end
+function _most_specific(cands::Vector{Method})
     isempty(cands) && return nothing
     best = cands[1]
     for m in cands[2:end]

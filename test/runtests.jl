@@ -434,6 +434,73 @@ end
     @test A.nwk([[1.0]]; k = 3) == ("bounded", 1, 3)
 end
 
+@testset "a call with keywords: only the methods that take keywords (open issue 130)" begin
+    # as plain Julia: a call with keywords is sorted among the methods that take keywords. NetworkDynamics'
+    # `NWState(int::(IntegratorView, HasSystem))` beside `NWState(nw; ufill = 0, guess = true)`
+    @test thrown(quote
+        @trait_module module KwCalls
+        using TraitWorld, ..Columns
+        kn(t::ColTable) = ("bounded", ncols(t))                        # no keywords; a fallback with keywords
+        kn(thing; k = 1) = ("untyped", thing, k)
+        kn0(t::ColTable) = ncols(t)                                     # no keywords; no fallback
+        kp(t::ColTable) = ("bounded", ncols(t))                        # no keywords; a fallback without keywords
+        kp(thing) = ("untyped", thing)
+        kk(t::ColTable; k = 1) = ("bounded", ncols(t), k)              # keywords; a fallback with keywords
+        kk(thing; k = 1) = ("untyped", thing, k)
+        kq(t::ColTable; k = 1) = ("bounded", ncols(t), k)              # keywords; a fallback without keywords
+        kq(thing) = ("untyped", thing)
+        kv(t::ColTable, i::Int) = ("bounded", ncols(t), i)             # an ordinary argument beside the bound
+        kv(thing, i::Int; k = 1) = ("untyped", thing, i, k)
+        ka(t::ColTable) = ("bounded", ncols(t))                        # open issue 128 with keywords
+        ka(thing; k = 1) = ("untyped", thing, k)
+        ka(thing, uflat::AbstractVector; k = 1) = ("two", thing, uflat, k)
+        kw(thing) = ("plain", thing)                                    # a plain function: no entry
+        end
+    end) === nothing
+    K = Main.KwCalls
+    @test K.kn([[1.0]]) == ("bounded", 1)
+    @test K.kn(5) == ("untyped", 5, 1)
+    @test K.kn(5; k = 2) == ("untyped", 5, 2)
+    @test K.kn([[1.0]]; k = 2) == ("untyped", [[1.0]], 2)              # a conforming value too: the bounded method takes none
+    @test K.kn(Dynamic{ColTable}([[1.0]]); k = 2)[3] == 2
+    kwmsg(f) = (e = try f(); nothing catch err; err end; e isa MethodError ? sprint(showerror, e) : e)
+    # without a fallback that takes keywords: Julia's MethodError for the call with keywords; the hint names
+    # the bound only where the bounded method takes keywords
+    for (f, s, hint) in ((() -> K.kn0([[1.0]]; k = 2), "kn0(::Vector{Vector{Float64}}; k::Int64)", false),
+                         (() -> K.kp(5; k = 2), "kp(::Int64; k::Int64)", false), (() -> K.kq(5; k = 2), "kq(::Int64; k::Int64)", true),
+                         (() -> K.kw(5; k = 2), "kw(::Int64; k::Int64)", false))
+        m = kwmsg(f)
+        @test m isa String && occursin("no method matching $s", m) && occursin("conforms to none", m) == hint
+    end
+    @test K.kn0([[1.0]]) == 1 && K.kp(5) == ("untyped", 5) && K.kp([[1.0]]) == ("bounded", 1)
+    @test K.kk([[1.0]]; k = 2) == ("bounded", 1, 2) && K.kk(5; k = 2) == ("untyped", 5, 2) && K.kk(5) == ("untyped", 5, 1)
+    @test K.kq([[1.0]]) == ("bounded", 1, 1) && K.kq(5) == ("untyped", 5)   # a call without keywords: every method
+    @test K.kv([[1.0]], 3) == ("bounded", 1, 3) && K.kv([[1.0]], 3; k = 4) == ("untyped", [[1.0]], 3, 4)
+    @test K.ka([[1.0]]) == ("bounded", 1) && K.ka([1.0]; k = 2) == ("untyped", [1.0], 2)
+    @test K.ka(5, [1.0]; k = 3) == ("two", 5, [1.0], 3)
+    # from a typed caller
+    kcall(x) = K.kn(x; k = 7)
+    @test kcall([[1.0]]) == ("untyped", [[1.0]], 7) && kcall(:s) == ("untyped", :s, 7)
+    # a closed world calls the fallback by dispatch (lowering L-47)
+    TraitWorld.CLOSED_WORLD[] = true
+    try
+        @test K.kn(5; k = 2) == ("untyped", 5, 2) && K.kq(5) == ("untyped", 5)
+    finally
+        TraitWorld.open_world!()
+    end
+    # bounded methods of one shape that differ in taking keywords (lowering L-48), in both orders
+    for (a, b) in ((:(mx(t::ColTable) = 1), :(mx(t::RowTable; k = 1) = 2)), (:(mx(t::ColTable; k = 1) = 1), :(mx(t::RowTable) = 2)))
+        e = thrown(quote
+            @trait_module module KwMixed
+            using TraitWorld, ..Columns, ..Rows
+            $a
+            $b
+            end
+        end)
+        @test e isa TraitBoundError && occursin("keywords", e.msg)
+    end
+end
+
 @testset "a later subtrait adds no method to its supertrait's operations (open issue 124)" begin
     toplevel(quote
         @trait_module module SupOps
