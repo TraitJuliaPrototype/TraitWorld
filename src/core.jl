@@ -1342,9 +1342,25 @@ struct Erased{A,S}
     obj::Any
 end
 struct _CallWrap{S} end
+"""
+The result `x` of the function `f` at a `Callable` bound declaring the result `S`: `x` where it is an `S`,
+else a `TypeError` naming both types (traits reference §5.8), with a hint where `S` is `Nothing`
+(`_callable_result_hint`). Asserted, never converted.
+"""
+@inline _checked_result(x, ::Type{S}, f) where {S} = x isa S ? x : Base.inferencebarrier(_callable_result_error)(f, S, x)
+@noinline function _callable_result_error(@nospecialize(f), @nospecialize(S), @nospecialize(x))
+    fname = !(f isa Function) ? "a $(typeof(f))" : startswith(string(nameof(f)), "#") ? "an anonymous function" : "`$(nameof(f))`"
+    throw(TypeError(:Callable, "the result of $fname", S, x))
+end
+"The hint for a function at a `Callable` bound declaring `Nothing` that returned a value (traits reference §5.8)."
+function _callable_result_hint(io::IO, e::TypeError)
+    (e.func === :Callable && e.expected === Nothing) || return
+    print(io, "\nThe bound declares the result `Nothing`: end the function with `nothing` (an in-place ",
+          "function whose last line is `du .= …` returns `du`).")
+end
 # one method for every arity: `Vararg{Any,N}` specializes on the arity, so the `cfunction` compiles the exact
 # call behind the pointer (E-197: as fast as fixed arities, no dynamic call at 12 arguments)
-(::_CallWrap{S})(o, args::Vararg{Any,N}) where {S,N} = o(args...)::S
+(::_CallWrap{S})(o, args::Vararg{Any,N}) where {S,N} = _checked_result(o(args...), S, o)
 # The callee side declares concrete types (`Ref{T}` for non-bits values), so
 # the call inside is static; the caller passes non-bits values as boxes
 # (`Any`): the same pointer, without allocating a `RefValue`.
@@ -1394,7 +1410,7 @@ end
 CObj{A,S}(f::F) where {A,S,F} = CObj{A,S,F}(f)
 @inline function (c::CObj{A,S})(args...) where {A,S}
     args isa A || throw(MethodError(c.f, args))
-    return c.f(args...)::S
+    return _checked_result(c.f(args...), S, c.f)
 end
 
 # a function inside library code prints as its bound and how it is called (a type printer,

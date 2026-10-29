@@ -211,6 +211,23 @@ end
     e = TraitWorld.enter_callable(Callable{Tuple{Float64},Float64}, nothing, x -> x, Val(true))
     @test e.f isa TraitWorld.Erased
     @test TraitWorld.enter_callable(Callable{Tuple{Float64},Float64}, nothing, sin, Val(true)).f === sin
+    # an in-place function whose declared result is `Nothing` and that returns its array (open issue 120): refused,
+    # the error naming both types, with a hint to end the function with `nothing`; Dynamic and Compiled alike
+    toplevel(quote
+        @trait_module module InPlace
+        using TraitWorld
+        apply!(f::Callable{Tuple{Vector{Float64}}, Nothing}, u::Vector{Float64}) = (f(u); u)
+        applyc!(f::Compiled{Callable{Tuple{Vector{Float64}}, Nothing}}, u::Vector{Float64}) = (f(u); u)
+        end
+    end)
+    for g in (Main.InPlace.apply!, Main.InPlace.applyc!)
+        @test g(u -> (u .= 2 .* u; nothing), [1.0]) == [2.0]
+        e = try g(u -> (u .= 2 .* u), [1.0]); nothing catch err; err end
+        @test e isa TypeError
+        msg = sprint(showerror, e)
+        @test occursin("expected Nothing", msg) && occursin("Vector{Float64}", msg)
+        @test occursin("end the function with `nothing`", msg)
+    end
 end
 
 @testset "closures capturing a trait object are checked" begin

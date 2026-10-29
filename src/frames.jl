@@ -98,4 +98,8 @@ function _declared_implementations(@nospecialize(X))
     end
     return unique!(sort!(out))
 end
-_install_error_hints!() = (Base.Experimental.register_error_hint(_bound_hint, MethodError); nothing)
+function _install_error_hints!()
+    Base.Experimental.register_error_hint(_bound_hint, MethodError)
+    Base.Experimental.register_error_hint(_callable_result_hint, TypeError)
+    return nothing
+end
