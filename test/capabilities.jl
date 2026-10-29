@@ -202,3 +202,18 @@ end
     @test compiled_for(with_dynamic(x)) === compiled_for(x)
     @test with_dynamic(compiled_for(x)) === with_dynamic(x)
 end
+
+@testset "rewrap: a changed function keeps its attribute (traits §6.4)" begin
+    f(x) = 2x
+    h = rewrap(g -> (y -> g(y) + 1), compiled_for(f))
+    @test h isa TraitWorld.CompiledFor && getfield(h, :x)(3) == 7
+    h = rewrap(g -> (y -> g(y) + 1), with_dynamic(f))
+    @test h isa TraitWorld.WithDynamic && getfield(h, :x)(3) == 7
+    @test rewrap(g -> (y -> g(y) + 1), f)(3) == 7                       # a plain value: g(f)
+    S = Callable{Tuple{Int}, Int}
+    for (k, attr) in ((Kept{S}(compiled_for(f)), TraitWorld.CompiledFor), (Kept{S}(with_dynamic(f)), TraitWorld.WithDynamic),
+                      (Dynamic{S}(f), TraitWorld.WithDynamic), (Compiled{S}(f), TraitWorld.CompiledFor))
+        h = rewrap(g -> (y -> g(y) + 1), k)
+        @test h isa attr && getfield(h, :x)(3) == 7                                # the user's function, changed
+    end
+end

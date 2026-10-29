@@ -202,6 +202,24 @@ compiled_for(c::CompiledFor) = c
 compiled_for(w::WithDynamic) = compiled_for(w.x)
 with_dynamic(w::WithDynamic) = w
 with_dynamic(c::CompiledFor) = with_dynamic(c.x)
+
+"""
+    rewrap(g, f)
+
+`g` applied to what `f` holds, with `f`'s attribute (traits reference §6.4): `g(f)` for a plain value;
+for a cast `compiled_for(x)` or `with_dynamic(x)`, the same cast of `g(x)`; for a kept value (`Dynamic`,
+`Compiled`, `Kept`), `g` of the user's object (a `Callable`'s function), cast by the kept value's
+attribute. The result is not kept at `f`'s trait: it is a new value, which the next bound takes with
+that attribute (a partial application of a kept function has a signature of its own).
+"""
+rewrap(g, f) = g(f)
+rewrap(g, c::CompiledFor) = compiled_for(g(getfield(c, :x)))
+rewrap(g, w::WithDynamic) = with_dynamic(g(getfield(w, :x)))
+rewrap(g, d::Dynamic) = with_dynamic(g(_rewrap_object(d)))
+rewrap(g, c::Compiled) = compiled_for(g(_rewrap_object(c)))
+rewrap(g, k::Kept) = (x = g(_rewrap_object(k)); getfield(k, :compiled) ? compiled_for(x) : with_dynamic(x))
+_rewrap_object(h::HeldValue{C}) where {C<:Callable} = _callable_fn(h)
+_rewrap_object(h::HeldValue) = _dyn_object(h)
 # plain code's casts meet a held form: kept where the attribute matches, refused otherwise (constructors never cast)
 Compiled{X}(c::CompiledFor) where {X} = Compiled{X}(getfield(c, :x))
 Dynamic{X}(w::WithDynamic) where {X} = Dynamic{X}(getfield(w, :x))
