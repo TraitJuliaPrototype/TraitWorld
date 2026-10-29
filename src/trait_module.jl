@@ -1554,6 +1554,9 @@ function check_entry_ambiguities(@nospecialize(f))
         # two entries that differ in which position is trait-bounded overlap only where a value
         # has a projection in both: a call there raises Julia's own ambiguity error
         (_is_entry(ms[i]) && _is_entry(ms[j])) && continue
+        # a tagged fallback and any other method: only the machinery passes `Untyped()`, and it chooses
+        # among the tagged methods alone (`_tagged_fallback`), so no call reaches their intersection
+        _is_tagged(ms[i]) != _is_tagged(ms[j]) && continue
         Base.isambiguous(ms[i], ms[j]) && push!(problems, "$(ms[i])\n    and $(ms[j])")
     end
     isempty(problems) || throw(TraitBoundError("ambiguous methods of `$f`:\n  " * join(problems, "\n  ") *

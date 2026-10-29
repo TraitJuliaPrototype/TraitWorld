@@ -710,12 +710,32 @@ function _no_implementing_type(@nospecialize(Y), @nospecialize(w))
     return all(q -> q in fps, trait_params(Y))
 end
 
-"Whether `f` has the tagged untyped fallback for these arguments (a vararg entry accepts the tag too, so `hasmethod` is not enough)."
-function _has_tagged_fallback(f::F, args) where {F}
-    m = _match(Tuple{F,Untyped,map(typeof, args)...}, Base.get_world_counter())
-    m === nothing && return false
-    ps = Base.unwrap_unionall(m.method.sig).parameters
-    return length(ps) >= 2 && ps[2] === Untyped
+_is_tagged(m::Method) = (ps = Base.unwrap_unionall(m.sig).parameters; length(ps) >= 2 && ps[2] === Untyped)
+
+"""
+The tagged untyped fallback of `f` for these arguments: `true` when the call `f(Untyped(), args…)`
+reaches it, its signature (without the function) when that call is ambiguous with an ordinary method
+of one more argument, else `nothing`. Only the machinery passes `Untyped()`, so the choice is among the
+tagged methods alone (`f(::Untyped, x)` beside `f(x, v::AbstractVector)`, open issue 128): the most
+specific tagged method that applies, called by `invoke` at its own signature. A vararg entry accepts
+the tag too, so `hasmethod` is not enough.
+"""
+function _tagged_fallback(f::F, args) where {F}
+    T = Tuple{F,Untyped,map(typeof, args)...}
+    w = Base.get_world_counter()
+    m = _match(T, w)
+    m !== nothing && return _is_tagged(m.method) ? true : nothing
+    lo, hi, amb = Ref{UInt}(typemin(UInt)), Ref{UInt}(typemax(UInt)), Ref{Int32}(0)
+    ms = ccall(:jl_matching_methods, Any, (Any, Any, Cint, Cint, UInt, Ptr{UInt}, Ptr{UInt}, Ptr{Int32}),
+               T, nothing, -1, 1, w, lo, hi, amb)
+    ms isa Vector{Any} || return nothing
+    tagged = Method[mm.method for mm in ms if _is_tagged(mm.method)]
+    isempty(tagged) && return nothing
+    best = tagged[1]
+    for t in tagged
+        t === best || ccall(:jl_method_morespecific, Cint, (Any, Any), best, t) != 0 || return nothing
+    end
+    return Base.rewrap_unionall(Tuple{Base.unwrap_unionall(best.sig).parameters[2:end]...}, best.sig)
 end
 
 """
@@ -729,15 +749,27 @@ ColorVectorSpace extends, so loading Makie invalidated every entry).
 """
 function fallback(f::F, args...) where {F}
     CLOSED_WORLD[] && return f(Untyped(), args...)
-    Base.inferencebarrier(_has_tagged_fallback)(f, args)::Bool && return f(Untyped(), args...)
+    t = Base.inferencebarrier(_tagged_fallback)(f, args)
+    t === true && return f(Untyped(), args...)
+    t === nothing || return Base.inferencebarrier(_invoke_tagged)(nothing, f, t, args)
     return Base.inferencebarrier(_fallback_plain)(nothing, f, args)
 end
 
 "The untyped fallback of a function with keyword arguments."
 function kwfallback(nt::NamedTuple, f::F, args...) where {F}
     CLOSED_WORLD[] && return Core.kwcall(nt, f, Untyped(), args...)
-    Base.inferencebarrier(_has_tagged_fallback)(f, args)::Bool && return Core.kwcall(nt, f, Untyped(), args...)
+    t = Base.inferencebarrier(_tagged_fallback)(f, args)
+    t === true && return Core.kwcall(nt, f, Untyped(), args...)
+    t === nothing || return Base.inferencebarrier(_invoke_tagged)(nt, f, t, args)
     return Base.inferencebarrier(_fallback_plain)(nt, f, args)
+end
+
+"The tagged fallback at its own signature `sig`, where the call by dispatch is ambiguous with an ordinary method."
+@machinery @noinline function _invoke_tagged(@nospecialize(nt), @nospecialize(f), @nospecialize(sig), args::Tuple)
+    nt === nothing && return invoke(f, sig, Untyped(), args...)
+    u = Base.unwrap_unionall(sig)
+    ksig = Base.rewrap_unionall(Tuple{typeof(nt),Core.Typeof(f),u.parameters...}, sig)
+    return invoke(Core.kwcall, ksig, nt, f, Untyped(), args...)
 end
 
 @machinery @noinline function _fallback_plain(@nospecialize(nt), @nospecialize(f), args::Tuple)

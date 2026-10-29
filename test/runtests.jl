@@ -387,6 +387,29 @@ end
         end
     end)
     @test e isa TraitBoundError && occursin("ambiguous", e.msg)
+    # a tagged fallback against a typed method of one more argument (open issue 128, NetworkDynamics'
+    # `NWState(int::(IntegratorView, HasSystem))` beside `NWState(thing; …)` and `NWState(thing, uflat::AbstractVector)`):
+    # no call reaches their intersection, so it is not reported; the fallback is chosen among the tagged methods
+    e = thrown(quote
+        @trait_module module AmbTagged
+        using TraitWorld, ..Columns
+        nws(t::ColTable) = ("bounded", ncols(t))
+        nws(thing) = ("untyped", thing)
+        nws(thing, uflat::AbstractVector) = ("two", thing, uflat)
+        nwk(t::ColTable; k = 1) = ("bounded", ncols(t), k)
+        nwk(thing; k = 1) = ("untyped", thing, k)
+        nwk(thing, uflat::AbstractVector) = ("two", thing, uflat)
+        end
+    end)
+    @test e === nothing
+    A = Main.AmbTagged
+    @test A.nws([[1.0]]) == ("bounded", 1)
+    @test A.nws(5) == ("untyped", 5)
+    @test A.nws([1.0]) == ("untyped", [1.0])            # the call by dispatch is ambiguous; the tagged method is invoked
+    @test A.nws(5, [1.0]) == ("two", 5, [1.0])
+    @test A.nwk([1.0]; k = 2) == ("untyped", [1.0], 2)
+    @test A.nwk([1.0]) == ("untyped", [1.0], 1)
+    @test A.nwk([[1.0]]; k = 3) == ("bounded", 1, 3)
 end
 
 # differential test: adopting a trait method keeps every call that worked before
