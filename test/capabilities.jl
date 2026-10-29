@@ -139,6 +139,11 @@ end
         end
         Base.@nospecializeinfer run2(a::Alg, @nospecialize(x::AbstractVector)) = order(a) + sum(x)
         run3(@nospecialize(p), a::Alg) = order(a) * length(p)
+        # an ordinary vararg (lowering L-46): plain or after a bound, `@nospecialize` kept on it
+        run4(a::Alg, xs...) = order(a) + length(xs)
+        run5(a::Alg, @nospecialize(xs...)) = order(a) + length(xs)
+        run6(a::Alg, @nospecialize(xs::Int...)) = order(a) + sum(xs; init = 0)
+        plainva(@nospecialize(xs...)) = length(xs)
         end
     end)
     M = Base.invokelatest(getglobal, Main, :MacroWrapped)
@@ -148,6 +153,12 @@ end
     @test Base.invokelatest(g(:run2), a, [1.0, 2.0]) == 7.0
     @test Base.invokelatest(g(:run3), (1, 2, 3), a) == 12
     @test_throws MethodError Base.invokelatest(g(:run1), [1], :notanalg)      # the bound, not a plain annotation
+    @test Base.invokelatest(g(:run4), a, 1, "x") == 6
+    @test Base.invokelatest(g(:run5), a, 1, "x", :y) == 7
+    @test Base.invokelatest(g(:run6), a, 1, 2) == 7
+    @test Base.invokelatest(g(:plainva), 1, 2) == 2
+    @test all(m -> m.nospecialize & 2 != 0, methods(g(:run5)))                 # the vararg, on the entry and the worker
+    @test all(m -> m.nospecialize & 1 != 0, methods(g(:plainva)))
 end
 
 @testset "a bounded function's declared result, seen by plain inference at its entry (found by SciML's move 4)" begin

@@ -102,7 +102,7 @@ function _strip_nospecialize!(nospec::Set{Any}, a)
     else
         return a
     end
-    nm = inner isa Expr && inner.head === :(::) ? inner.args[1] : inner isa Expr && inner.head === :kw ? inner.args[1] : inner
+    nm = inner isa Expr && inner.head in (:(::), :kw, :...) ? inner.args[1] : inner     # `x::T`, `x = d`, `xs...`
     push!(nospec, nm isa Expr && nm.head === :(::) ? nm.args[1] : nm)
     return inner
 end
@@ -556,6 +556,9 @@ function _fdef_name(ex)
     return s.args[1]
 end
 
+"The element type of an ordinary vararg as written: `T` of `xs::T...`, `Any` of `xs...`."
+_vararg_eltype(a) = (b = a.args[1]; b isa Expr && b.head === :(::) ? b.args[end] : :Any)
+
 struct _Arg
     name::Any
     ann::Any        # the annotation as written, or nothing
@@ -602,7 +605,8 @@ function _classify(mod::Module, a, unbounded::Vector{Symbol} = Symbol[]; attr_bo
         inner = _classify(mod, a.args[1], unbounded; attr_bounds, wheres)
         inner.kind === :trait && return _Arg(inner.name, inner.ann, :vararg_trait, inner.traits, nothing, nothing, inner.M)
         inner.kind in (:callable, :callables) && error("@trait_module: a vararg of `Callable` is not supported")
-        return _Arg(a, nothing, :vararg, Any[], nothing, nothing, nothing)
+        # an ordinary vararg: its name, and as its annotation the argument as written (`xs...`, `xs::Int...`)
+        return _Arg(inner.name, a, :vararg, Any[], nothing, nothing, nothing)
     elseif a isa Expr && a.head === :kw
         x = _classify(mod, a.args[1], unbounded; attr_bounds, wheres)
         return _Arg(x.name, x.ann, x.kind, x.traits, x.A, x.S, x.M, a.args[2], false)
@@ -871,7 +875,7 @@ function _rewrite_fdef(mod::Module, ex)
     unbounded = Symbol[w for w in wheres if w isa Symbol && !any(a -> _bound_names(mod, a, w), rawargs)]
     attr_bounds = !_is_operation_function(mod, fname)
     args = [_classify(mod, a, unbounded; attr_bounds, wheres) for a in rawargs]
-    any(x -> x.name in nospec && !(x.kind in (:plain, :untyped)), args) &&
+    any(x -> x.name in nospec && !(x.kind in (:plain, :untyped, :vararg)), args) &&
         error("@trait_module: `$fname`: `@nospecialize` is for ordinary arguments; a bounded one is compiled per key or erased by its attribute")
     kws = [_classify_kw(mod, p, unbounded) for p in kwparams]
     istraitdef = any(x -> x.kind in (:trait, :callable, :callables, :vararg_trait), args) ||
@@ -880,7 +884,9 @@ function _rewrite_fdef(mod::Module, ex)
         return _expand_defaults(mod, head, fname, rawargs, kwparams, wheres, ret, body)
     end
     key = _fkey(mod, fname)
-    pattern = Any[(x.kind in (:trait, :callable, :callables, :untyped, :vararg_trait)) ? nothing : x.ann for x in args]
+    # a shape: an ordinary argument's annotation, `nothing` at a bounded or untyped one; a vararg by its element type
+    pattern = Any[(x.kind in (:trait, :callable, :callables, :untyped, :vararg_trait)) ? nothing :
+                  x.kind === :vararg ? Expr(:..., _vararg_eltype(x.ann)) : x.ann for x in args]
     entries = _registry(mod, key, :__tw_entries__)
     plain = _registry(mod, key, :__tw_plain__)
     pc = _PART_CONCRETE[]
@@ -1006,7 +1012,7 @@ function _rewrite_fdef(mod::Module, ex)
         elseif x.kind === :untyped
             push!(wargs, x.name in nospec ? :(@nospecialize($(x.name))) : x.name)
         elseif x.kind === :vararg
-            push!(wargs, x.name)                      # as written, `xs::Int...` or `xs...`
+            push!(wargs, x.name in nospec ? :(@nospecialize($(x.ann))) : x.ann)   # as written, `xs::Int...` or `xs...`
         else
             a = x.ann === nothing ? x.name : :($(x.name)::$(x.ann))
             push!(wargs, x.name in nospec ? :(@nospecialize($a)) : a)
@@ -1065,7 +1071,7 @@ function _rewrite_fdef(mod::Module, ex)
                 push!(eargs, :(@nospecialize($nm...)))
                 push!(callnames, Expr(:..., nm))
             elseif x.kind === :vararg
-                push!(eargs, x.ann)                   # as written
+                push!(eargs, nm in nospec ? :(@nospecialize($(x.ann))) : x.ann)     # as written
                 push!(callnames, Expr(:..., nm))
             elseif x.kind === :untyped
                 push!(eargs, nm in nospec ? :(@nospecialize($nm)) : nm)
