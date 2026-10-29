@@ -161,7 +161,7 @@ function _process(mod::Module, ex)
         inner = ex.args[end]
         fname = _fdef_name(_prefixed_fdef(inner))
         r = _process(mod, inner)
-        return Expr(:toplevel, r, :($TraitWorld.fully_typed_level(::typeof($fname)) = $(QuoteNode(level))))
+        return Expr(:toplevel, r, :($TraitWorld.fully_typed_level(::Core.Typeof($fname)) = $(QuoteNode(level))))
     elseif h === :struct
         st, ctor = _bounded_struct(mod, _dynamic_fields(mod, ex))
         return ctor === nothing ? st : Expr(:toplevel, st, ctor)
@@ -743,13 +743,37 @@ function _fkey(mod::Module, fname)
         # by name (`import Base: peek`, `using Base: peek`), is that function (traits reference §5.5)
         if isdefined(mod, fname) && !Base.is_some_implicit(Base.binding_kind(mod, fname))
             f = getfield(mod, fname)
-            f isa Function && return (parentmodule(f), nameof(f))
+            _named_callable(f) && return (parentmodule(f), nameof(f))
         end
         return (mod, fname)
     end
     f = Core.eval(mod, fname)
     return (parentmodule(f), nameof(f))
 end
+"""
+Whether `f` is found by its name in its module: a function, or a type whose constructor gets bounded
+methods (`NWState(int::IntegratorView)`), not an alias (`Vector`, whose name is `Array`).
+"""
+_named_callable(@nospecialize(f)) = f isa Function ||
+    (f isa Type && (m = parentmodule(f); n = nameof(f); isdefined(m, n) && getfield(m, n) === f))
+
+"""
+An ordinary constructor of type `fname` that an entry of an untyped shape (`pattern`, `nothing` at every
+position) would replace, having its signature: one of Julia's default constructors (`S(x)`, which converts
+to the field types; `S(x::T) where {T}` for a parametric struct), or an untyped inner one; else `nothing`.
+"""
+function _ctor_at_entry(mod::Module, fname, pattern)
+    fname isa Symbol && isdefined(mod, fname) || return nothing
+    f = getfield(mod, fname)
+    f isa Type && all(isnothing, pattern) || return nothing
+    sig = Tuple{Core.Typeof(f),Any[Any for _ in pattern]...}
+    for m in methods(f)
+        (_is_entry(m) || _is_tagged(m) || _isworker(m)) && continue
+        m.sig <: sig && sig <: m.sig && return m
+    end
+    return nothing
+end
+
 function _registry(mod::Module, key, which::Symbol)
     owner_mod = key[1]
     regmod = isdefined(owner_mod, which) ? owner_mod : mod
@@ -1053,6 +1077,12 @@ function _rewrite_fdef(mod::Module, ex)
             error("@trait_module: `$fname` already has an untyped method of the shape its trait-bounded method needs " *
                   "for an entry; define the trait-bounded methods first, then the untyped fallback")
         end
+        cm = _ctor_at_entry(mod, fname, pattern)
+        cm === nothing || error("@trait_module: the constructor of `$fname` already has an untyped method of the shape its " *
+                                "trait-bounded method needs for an entry ($cm: one of Julia's default constructors, or an untyped " *
+                                "inner one). Give the struct inner constructors with typed arguments (`$fname(x::Int) = new(x)`; for a " *
+                                "parametric struct `$fname{T}(x::T) where {T} = new{T}(x)`), so Julia defines no untyped one; an " *
+                                "untyped constructor written after the trait-bounded methods becomes their fallback")
         if key[1] !== mod
             # an entry is a method at Any: only the function's owner may add one (rule 3)
             owns(owner(mod), owner(key[1])) || error("@trait_module: `$fname` belongs to $(key[1]); $(mod) may add trait-bounded " *
@@ -1104,14 +1134,14 @@ function _rewrite_fdef(mod::Module, ex)
                 viewof[x.name] = v
                 # `known_type` in the entry's own body: in a helper called with an `Any`-typed value it would be
                 # compiled for the value's type, where it folds to `true` (E-148)
-                push!(stmts, :($v = $TraitWorld.enter($TraitWorld.EntryPos{typeof($fname),$i,$nargs}(), $(x.name),
+                push!(stmts, :($v = $TraitWorld.enter($TraitWorld.EntryPos{Core.Typeof($fname),$i,$nargs}(), $(x.name),
                                                       Val($TraitWorld._known_type($(x.name))))))
                 fb = haskw ? :($TraitWorld.kwfallback($ntname, $fname, $(callnames...))) : :($TraitWorld.fallback($fname, $(callnames...)))
                 push!(stmts, :($v === $TraitWorld.NOTRAIT && return $fb))
                 push!(newnames, v)
             elseif x.kind === :vararg_trait
                 v = gensym(Symbol(x.name, :_views))
-                push!(stmts, :($v = $TraitWorld.enter_each($TraitWorld.EntryPos{typeof($fname),$i,-1}(), $(x.name),
+                push!(stmts, :($v = $TraitWorld.enter_each($TraitWorld.EntryPos{Core.Typeof($fname),$i,-1}(), $(x.name),
                                                            Val($TraitWorld._known_type($(x.name))))))
                 fb = haskw ? :($TraitWorld.kwfallback($ntname, $fname, $(callnames...))) : :($TraitWorld.fallback($fname, $(callnames...)))
                 push!(stmts, :($v === $TraitWorld.NOTRAIT && return $fb))
@@ -1231,7 +1261,7 @@ function _rewrite_fdef(mod::Module, ex)
             tpos = [i for (i, x) in enumerate(args) if x.kind === :trait]
             bsyms = [gensym(:b) for _ in tpos]
             known = foldl((a, b) -> :($a | $b), [:($TraitWorld._known_object($(args[i].name), $TraitWorld._known_type($(args[i].name)))) for i in tpos])
-            served = foldl((a, b) -> :($a & $b), [:($TraitWorld._tabled($TraitWorld.EntryPos{typeof($fname),$i,$nargs}(), $(args[i].name))) for i in tpos])
+            served = foldl((a, b) -> :($a & $b), [:($TraitWorld._tabled($TraitWorld.EntryPos{Core.Typeof($fname),$i,$nargs}(), $(args[i].name))) for i in tpos])
             # the values the table compiles for: a `compiled_for`'s held value, or the value
             usyms = Dict(i => gensym(Symbol(args[i].name, :_u)) for i in tpos)
             unwrap = Any[:($(usyms[i]) = $TraitWorld._unconverted($(args[i].name))) for i in tpos]
@@ -1239,7 +1269,7 @@ function _rewrite_fdef(mod::Module, ex)
             wsym = gensym(:w)
             look = Any[:($wsym = Base.tls_world_age())]
             for (j, i) in enumerate(tpos)
-                push!(look, :($(bsyms[j]) = $TraitWorld._ubuilder($TraitWorld.EntryPos{typeof($fname),$i,$nargs}(),
+                push!(look, :($(bsyms[j]) = $TraitWorld._ubuilder($TraitWorld.EntryPos{Core.Typeof($fname),$i,$nargs}(),
                                                                      $(Expr(:new, :($TraitWorld.XAny), usyms[i])), $wsym)))
             end
             found = foldl((a, b) -> :($a & $b), [:($(bsyms[j]) isa $TraitWorld.Builder) for j in eachindex(tpos)])
@@ -1251,7 +1281,7 @@ function _rewrite_fdef(mod::Module, ex)
                 tblock = :(if !($known) && $served
                                $(unwrap...)
                                $wsym = Base.tls_world_age()
-                               $esym = $TraitWorld._pentry($TraitWorld.EntryPos{typeof($fname),$i1,$nargs}(), $tag(),
+                               $esym = $TraitWorld._pentry($TraitWorld.EntryPos{Core.Typeof($fname),$i1,$nargs}(), $tag(),
                                                            $(Expr(:new, :($TraitWorld.XAny), usyms[i1])), $wsym, Val($nall))
                                if getfield($esym, :fp) != C_NULL
                                    return ccall(getfield($esym, :fp), Any, ($([:Any for _ in 0:nall]...),), getfield($esym, :fo), $(ucall...))
@@ -1280,7 +1310,7 @@ function _rewrite_fdef(mod::Module, ex)
                     push!(cstmts, :($(x.name) = getfield($xa, :x)))
                     j = findfirst(==(i), tpos)
                     push!(cstmts, :($v = $TraitWorld._build_any($(bsyms[j]), $xa)))
-                    push!(cstmts, :($TraitWorld.keeps($TraitWorld.KeepOf{typeof($fname)}()) && ($v = $TraitWorld._with_object_any($v, $xa))))
+                    push!(cstmts, :($TraitWorld.keeps($TraitWorld.KeepOf{Core.Typeof($fname)}()) && ($v = $TraitWorld._with_object_any($v, $xa))))
                     push!(cnames, v)
                 else
                     # an ordinary argument: the entry's dispatch has checked its declared type. A concrete type is
@@ -1352,7 +1382,7 @@ end
 "An ordinary method must never take an entry's place (same signature): that would silently switch the trait methods off."
 function _check_entries_intact(mod::Module, fname)
     f = Core.eval(mod, fname)
-    f isa Function || return nothing
+    _named_callable(f) || return nothing
     key = (parentmodule(f), nameof(f))
     entries = _registry(mod, key, :__tw_entries__)
     entries === nothing && return nothing
@@ -1364,21 +1394,21 @@ function _check_entries_intact(mod::Module, fname)
     return nothing
 end
 
-"Define `attribute(EntryPos{typeof(f), pos, nargs})` in `mod` where a bound there declares one (`Compiled{X}`, `Dynamic{X}`)."
+"Define `attribute(EntryPos{_ftype(f), pos, nargs})` in `mod` where a bound there declares one (`Compiled{X}`, `Dynamic{X}`)."
 function _fix_attribute!(mod::Module, @nospecialize(f), pos::Int, nargs::Int)
     isdefined(mod, :__tw_attrs__) || return nothing
     a = get(mod.__tw_attrs__, (f, pos, nargs), nothing)
     a === nothing && return nothing
-    P = EntryPos{typeof(f),pos,nargs}
+    P = EntryPos{_ftype(f),pos,nargs}
     m = Base._which(Tuple{typeof(attribute),P}; raise = false)
     m !== nothing && Base.unwrap_unionall(m.method.sig).parameters[2] === P && Base.invokelatest(attribute, P()) === a && return nothing
     Core.eval(mod, :($TraitWorld.attribute(::$P) = $(QuoteNode(a))))
     return nothing
 end
 
-"Define `crossing(EntryPos{typeof(f), pos, nargs})` in `mod` as a constant, as `needed` (redefined only when it changes)."
+"Define `crossing(EntryPos{_ftype(f), pos, nargs})` in `mod` as a constant, as `needed` (redefined only when it changes)."
 function _fix_crossing!(mod::Module, @nospecialize(f), pos::Int, nargs::Int)
-    P = EntryPos{typeof(f),pos,nargs}
+    P = EntryPos{_ftype(f),pos,nargs}
     C = crossing_at(f, pos, nargs)
     m = Base._which(Tuple{typeof(crossing),P}; raise = false)
     if m !== nothing && Base.unwrap_unionall(m.method.sig).parameters[2] === P
@@ -1410,11 +1440,11 @@ function _note_position(mod::Module, @nospecialize(f), pos::Int, nargs::Int, att
 end
 
 """
-Define `needed(EntryPos{typeof(f), pos, nargs})` in `mod`: the traits the workers of `f` need
+Define `needed(EntryPos{_ftype(f), pos, nargs})` in `mod`: the traits the workers of `f` need
 there, as a constant, so that an entry folds for a known type. Redefined only when they change.
 """
 function _fix_needed!(mod::Module, @nospecialize(f), pos::Int, nargs::Int)
-    P = EntryPos{typeof(f),pos,nargs}
+    P = EntryPos{_ftype(f),pos,nargs}
     _fix_crossing!(mod, f, pos, nargs)
     _fix_attribute!(mod, f, pos, nargs)
     L = Tuple{traits_at(f, pos, nargs)...}

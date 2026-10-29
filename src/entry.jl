@@ -185,7 +185,20 @@ end
 
 # --- what an entry position needs --------------------------------------------------
 
-"An entry position: argument `pos` of function type `F` called with `nargs` arguments (`-1`: a vararg position)."
+"""
+The type an entry is keyed by, for the function `f` whose bounded methods it serves: `Core.Typeof(f)`,
+as the first parameter of `f`'s method signatures. For a function it is `typeof(f)`; for a type's
+constructor it is `Type{T}` (`typeof(T)` would be `DataType` or `UnionAll`, shared by every type).
+"""
+_ftype(@nospecialize(f)) = Core.Typeof(f)
+"Whether `F` is a constructor's key type, `Type{T}`."
+_isctor(@nospecialize(F)) = F isa DataType && F.name === Type.body.name
+"Whether `F` is an entry's key type: a singleton function type, or `Type{T}`."
+_iskey(@nospecialize(F)) = F isa DataType && (_isctor(F) || isdefined(F, :instance))
+"The function of an entry's key type `F` (`_ftype`): the singleton's instance, or the type `T` of `Type{T}`."
+_fof(@nospecialize(F)) = _isctor(F) ? F.parameters[1] : F.instance
+
+"An entry position: argument `pos` of function type `F` (`_ftype(f)`) called with `nargs` arguments (`-1`: a vararg position)."
 struct EntryPos{F,pos,nargs} end
 "The traits a bound or a position needs, as a type: `TraitList{Tuple{ColTable, RowTable}}`."
 struct TraitList{L<:Tuple} end
@@ -200,7 +213,7 @@ definition adds a bound; until then this fallback computes it.
 """
 needed
 needed(::EntryPos{F,pos,nargs}) where {F,pos,nargs} = Base.inferencebarrier(_needed_slow)(F, pos, nargs)
-@machinery _needed_slow(@nospecialize(F), pos::Int, nargs::Int) = TraitList{Tuple{traits_at(F.instance, pos, nargs)...}}()
+@machinery _needed_slow(@nospecialize(F), pos::Int, nargs::Int) = TraitList{Tuple{traits_at(_fof(F), pos, nargs)...}}()
 
 """
     enter(EntryPos{F, pos, nargs}(), t, Val(known))
@@ -476,7 +489,7 @@ end
 end
 
 @noinline function _rule3_error(@nospecialize(P), @nospecialize(t))
-    f, pos = P.parameters[1].instance, P.parameters[2]
+    f, pos = _fof(P.parameters[1]), P.parameters[2]
     throw(TraitBoundError("a trait object carrying $(_traitlist(typeof(t))) reached the entry of `$f` at argument $pos, " *
                           "whose methods need other traits there. Inside the trait world a value is passed on only where " *
                           "its own trait is expected (rule 2): declare every bound the callee needs, so the caller projects each."))
@@ -555,7 +568,7 @@ that conforms to none of them is refused at the entry.
     v === NOTRAIT && Base.inferencebarrier(_kw_refused)(f, k, t, l)
     if dyn
         v = _erase(v, t)
-    elseif keeps(KeepOf{F}()) && !ismutable(t) && v isa TObj
+    elseif keeps(KeepOf{_ftype(f)}()) && !ismutable(t) && v isa TObj      # `F` is `DataType` for a constructor
         v = _with_object(v, t)
     end
     return merge(nt, NamedTuple{(k,)}((v,)))
@@ -621,7 +634,7 @@ accepts. Raised at the signature's first call (`_check_once`), naming the bounds
 """
 function _no_worker_error(@nospecialize(sig))
     ps = sig.parameters
-    f = ps[1].instance
+    f = _fof(ps[1])
     nargs = length(ps) - 1
     for pos in 1:nargs
         T = ps[pos + 1]
@@ -711,14 +724,14 @@ tagged methods alone (`f(::Untyped, x)` beside `f(x, v::AbstractVector)`, open i
 specific tagged method that applies, called by `invoke` at its own signature. A vararg entry accepts
 the tag too, so `hasmethod` is not enough.
 """
-_tagged_fallback(f::F, args) where {F} = _tagged_at(Tuple{F,Untyped,map(typeof, args)...}, 2)
+_tagged_fallback(@nospecialize(f), args) = _tagged_at(Tuple{_ftype(f),Untyped,map(typeof, args)...}, 2)
 """
 The same for a call with keywords `nt`, among the tagged methods that take keywords (their keyword
 sorters, `Core.kwcall(nt, f, ::Untyped, …)`), as Julia sorts a call with keywords among the methods
 that take keywords (open issue 130). The signature returned is the sorter's, without `Core.kwcall`.
 """
-_tagged_kwfallback(nt::NamedTuple, f::F, args) where {F} =
-    _tagged_at(Tuple{typeof(Core.kwcall),typeof(nt),F,Untyped,map(typeof, args)...}, 4)
+_tagged_kwfallback(nt::NamedTuple, @nospecialize(f), args) =
+    _tagged_at(Tuple{typeof(Core.kwcall),typeof(nt),_ftype(f),Untyped,map(typeof, args)...}, 4)
 
 function _tagged_at(@nospecialize(T), i::Int)
     w = Base.get_world_counter()
@@ -1134,7 +1147,7 @@ _dyn_identity(h::HeldValue{C}) where {C<:Callable} = _callable_fn(h)
 
 "Functions with a method declared `::Like{t}`: their workers return a pending result, which their entry makes into the caller's type."
 const _LIKE_FUNCS = Base.IdSet{Any}()
-_like!(@nospecialize(f)) = (push!(_LIKE_FUNCS, typeof(f)); nothing)
+_like!(@nospecialize(f)) = (push!(_LIKE_FUNCS, _ftype(f)); nothing)
 
 "No new receiver: a result like the input with only fields replaced."
 struct KeepSelf end

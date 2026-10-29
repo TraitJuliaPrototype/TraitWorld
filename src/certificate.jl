@@ -95,4 +95,4 @@ end
 Base.showerror(io::IO, e::NotFullyTypedError) = show(io, MIME"text/plain"(), e.report)
 
 "The certificate of a worker signature (its function at the trait objects' types)."
-_worker_certificate(@nospecialize(sig)) = fully_typed(sig.parameters[1].instance, Tuple(sig.parameters[2:end]))
+_worker_certificate(@nospecialize(sig)) = fully_typed(_fof(sig.parameters[1]), Tuple(sig.parameters[2:end]))

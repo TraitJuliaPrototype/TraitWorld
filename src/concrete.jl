@@ -423,7 +423,7 @@ traced to its root cause.
 function concrete_findings(@nospecialize(sig))
     world = Base.get_world_counter()
     F = _worker_ftype(sig)
-    tr = _Tracer(_Walk(world), owner(F.name.module), IdDict{Core.MethodInstance,Any}(), IdDict{Core.MethodInstance,Any}())
+    tr = _Tracer(_Walk(world), owner(_isctor(F) ? parentmodule(F.parameters[1]) : F.name.module), IdDict{Core.MethodInstance,Any}(), IdDict{Core.MethodInstance,Any}())
     root = _target_mi(sig, world)
     root === nothing && return AbstractFinding[]
     findings = AbstractFinding[]
@@ -530,7 +530,7 @@ run-time site on a normal path, in the worker and in what it reaches).
 """
 @machinery function _check_fully_typed(@nospecialize(sig))
     F = _worker_ftype(sig)
-    f = F.instance
+    f = _fof(F)
     lv = Base.invokelatest(fully_typed_level, f)::Symbol
     lv === :off && return nothing
     fs = concrete_findings(sig)

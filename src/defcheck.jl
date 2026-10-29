@@ -318,10 +318,10 @@ end
     return false
 end
 
-"Define `keeps(KeepOf{typeof(f)}())` in `mod`, once its methods are known; redefined only when the answer changes."
+"Define `keeps(KeepOf{_ftype(f)}())` in `mod`, once its methods are known; redefined only when the answer changes."
 function _fix_keeps!(mod::Module, @nospecialize(f))
     K = _latest(_analyze_keeps, f)::Bool
-    P = KeepOf{typeof(f)}
+    P = KeepOf{_ftype(f)}
     m = Base._which(Tuple{typeof(keeps),P}; raise = false)
     if m !== nothing && Base.unwrap_unionall(m.method.sig).parameters[2] === P
         Base.invokelatest(keeps, P()) === K && return nothing

@@ -815,7 +815,7 @@ function _scan(mi::Core.MethodInstance, cx::_Walk)
                     end
                     ts = Core.MethodInstance[]
                     for cmb in combos
-                        t = _target_mi(Tuple{typeof(f),cmb...}, world)
+                        t = _target_mi(Tuple{_ftype(f),cmb...}, world)
                         t === nothing || push!(ts, t)
                     end
                     site(:trait, i, :worker, ats, ts)
@@ -985,7 +985,7 @@ function verify_main(@nospecialize(f), @nospecialize(argtypes::Tuple = ()); comp
                 combos = Vector{Any}[Any[cmb..., x] for cmb in combos for x in opts]
             end
             for cmb in combos
-                t = _target_mi(Tuple{typeof(f), cmb...}, world)
+                t = _target_mi(Tuple{_ftype(f), cmb...}, world)
                 (t === nothing || t in s.targets) && continue
                 push!(s.targets, t)
                 push!(work, (t, _sublevel(level[smi], s.doomed, s.intry)))

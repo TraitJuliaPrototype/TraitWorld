@@ -472,7 +472,7 @@ function callpath(@nospecialize(f), args...; time::Bool = true)
     paths = PositionPath[]
     views = Any[args...]
     for pos in poss
-        p = EntryPos{typeof(f),pos,nargs}()
+        p = EntryPos{_ftype(f),pos,nargs}()
         a = args[pos]
         form, o = _cp_form(a)
         L = needed(p)
@@ -495,7 +495,7 @@ function callpath(@nospecialize(f), args...; time::Bool = true)
     csites = RuntimeSite[]
     folded = String[]
     try
-        for (src, _) in Base.code_typed(_cp_typed, Tuple{typeof(f),types...}; optimize = true, debuginfo = :source)
+        for (src, _) in Base.code_typed(_cp_typed, Tuple{_ftype(f),types...}; optimize = true, debuginfo = :source)
             ss, _ = _ir_sites(src, "the typed caller")
             append!(csites, ss)
             for st in src.code
@@ -511,7 +511,7 @@ function callpath(@nospecialize(f), args...; time::Bool = true)
     wsites = RuntimeSite[]
     if worker isa Method
         try
-            wsites = factscode(Tuple{typeof(f),Any[typeof(v) for v in views]...}; depth = 1).sites
+            wsites = factscode(Tuple{_ftype(f),Any[typeof(v) for v in views]...}; depth = 1).sites
         catch
         end
     end
@@ -521,7 +521,7 @@ function callpath(@nospecialize(f), args...; time::Bool = true)
         xs = Any[args...]
         un, ub = _cp_time(n -> _cp_loop_untyped(f, xs, Val(nargs), n))
     end
-    wsig = worker isa Method ? Tuple{typeof(f),Any[typeof(v) for v in views]...} : nothing
+    wsig = worker isa Method ? Tuple{_ftype(f),Any[typeof(v) for v in views]...} : nothing
     return CallPath(call, entry, tabled, paths, worker, wsig, csites, folded, wsites, tn, tb, un, ub)
 end
 

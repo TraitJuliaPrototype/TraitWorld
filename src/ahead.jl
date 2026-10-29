@@ -98,17 +98,17 @@ function _entry_positions(mod::Module)
         P = Base.unwrap_unionall(m.sig).parameters[2]
         (P isa DataType && P <: EntryPos && isconcretetype(P)) || continue
         F, pos, nargs = P.parameters
-        (F isa DataType && isdefined(F, :instance) && pos isa Int && nargs isa Int) || continue
+        (_iskey(F) && pos isa Int && nargs isa Int) || continue
         (F, pos, nargs) in seen && continue
         push!(seen, (F, pos, nargs))
-        push!(out, (m.module, F.instance, pos, nargs))
+        push!(out, (m.module, _fof(F), pos, nargs))
     end
     m = mod
     while true
         if isdefined(m, :__trait_module__) && isdefined(m, :__tw_positions__)
             for (f, pos, nargs) in m.__tw_positions__
-                (typeof(f), pos, nargs) in seen && continue
-                push!(seen, (typeof(f), pos, nargs))
+                (_ftype(f), pos, nargs) in seen && continue
+                push!(seen, (_ftype(f), pos, nargs))
                 push!(out, (m, f, pos, nargs))
             end
         end
@@ -126,7 +126,7 @@ end
     for (mod, f, pos, nargs) in _entry_positions(mod)
         begin
             nargs < 0 && continue
-            L = needed(EntryPos{typeof(f),pos,nargs}())
+            L = needed(EntryPos{_ftype(f),pos,nargs}())
             Xs = Any[typeof(L).parameters[1].parameters...]
             any(Y -> _family(Y) === FX, Xs) || continue
             b = _builder_for(Xs, T)
@@ -149,9 +149,9 @@ end
                         empty!(argt); break
                     end
                 end
-                if length(argt) == nargs && Tuple{typeof(f),argt...} <: m.sig && precompile(f, Tuple(argt))
+                if length(argt) == nargs && Tuple{_ftype(f),argt...} <: m.sig && precompile(f, Tuple(argt))
                     n += 1
-                    _check_ahead!(mod, T, Tuple{typeof(f),argt...})
+                    _check_ahead!(mod, T, Tuple{_ftype(f),argt...})
                 end
             end
             # the entry's method for `Compiled` values whose callers do not know the type: once per builder (key)
