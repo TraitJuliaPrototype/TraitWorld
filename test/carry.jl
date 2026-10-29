@@ -49,6 +49,12 @@ toplevel(quote
         x::T
     end
     applyhf(h::HolderF) = h.f(h.x)
+    struct LaterFn                                     # a function kept before its signature is known (traits reference §7.5, open issue 102)
+        g::Callable                                    # Kept{Callable}
+    end
+    useat(f::Callable{Tuple{Float64}, Float64}, x::Float64) = (TraitWorld.is_dynamic(f) ? :dynamic : :compiled, f(x))
+    uselater(l::LaterFn, x::Float64) = useat(l.g, x)
+    openres(f::Callable{Tuple{T}, S}, xs::Vector{T}) where {T, S} = (S, f(xs[1]))
     struct ShapeBox{S <: Shape}
         s::S
     end
@@ -169,6 +175,31 @@ end
         e
     end
     @test err isa LoadError                                              # a bounded parameter types one field
+end
+
+@testset "a function kept before its signature is known (traits reference §7.5, open issue 102)" begin
+    C = Main.Carry
+    sq(x) = x^2
+    @test fieldtype(C.LaterFn, :g) === Kept{Callable}
+    d, c = Dynamic{Callable}(sq), Compiled{Callable}(sq)
+    @test C.useat(d, 2.0) == (:dynamic, 4.0) && C.useat(c, 2.0) == (:compiled, 4.0)       # entered at its first bound's signature
+    @test C.uselater(C.LaterFn(sq), 2.0) == (:dynamic, 4.0)                                # stored: Callable's default
+    @test C.uselater(C.LaterFn(compiled_for(sq)), 2.0) == (:compiled, 4.0)                 # a cast kept
+    @test C.uselater(C.LaterFn(d), 2.0)[1] === :dynamic && C.uselater(C.LaterFn(c), 2.0)[1] === :compiled
+    @test C.openres(d, [3]) == (Int, 9) && C.openres(d, [3.0]) == (Float64, 9.0)               # one function, two signatures
+    @test d(3) == 9 && c(3) == 9 && Kept{Callable}(d)(4) == 16                             # without a signature: the function's own call
+    @test compiled_for(d) isa Compiled{Callable} && with_dynamic(c) isa Dynamic{Callable}
+    @test !getfield(with_dynamic(Kept{Callable}(c)), :compiled) && getfield(compiled_for(Kept{Callable}(d)), :compiled)
+    @test_throws TraitBoundError Dynamic{Callable}(compiled_for(sq))                       # constructors never cast
+    @test_throws TraitBoundError Compiled{Callable}(d)
+    @test_throws TraitBoundError C.useat(Dynamic{Callable}(x -> "s"), 1.0)                 # checked where it is entered
+    @test_throws TraitBoundError C.useat(Dynamic{Callable}((a, b) -> a), 1.0)
+    h = C.Holder(d, 2.0)                                                                    # at a struct parameter with a signature
+    @test typeof(h).parameters[2] <: Dynamic && C.applyh(h) == 4.0
+    @test typeof(C.Holder(c, 2.0)).parameters[2] === typeof(sq)
+    k = Kept{Callable{Tuple{Float64}, Float64}}(Kept{Callable}(compiled_for(sq)))
+    @test getfield(k, :compiled) && k(3.0) == 9.0
+    @test sprint(show, d) == "Dynamic{Callable}" && occursin("Compiled at", sprint(show, Kept{Callable}(c)))
 end
 
 @testset "the bound at the field: the same struct as the bound in the header (W-42)" begin

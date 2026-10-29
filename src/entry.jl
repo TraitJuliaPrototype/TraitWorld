@@ -860,7 +860,7 @@ function _check_at_signature(::Type{A}, ::Type{S}, @nospecialize(f)) where {A,S}
         R = Base.invokelatest(Base.infer_return_type, f, A)
         ok = typeintersect(R, S) !== Union{}           # a result that always throws (`Union{}`) is disjoint too
     end
-    ok || throw(TraitBoundError("a function kept at another signature was passed where Callable{$A, $S} is expected, " *
+    ok || throw(TraitBoundError("a function kept at another signature, or without one, was passed where Callable{$A, $S} is expected, " *
                                 "and has no method there with a result of type $S (traits reference §6.5)"))
     @lock _LOCK begin
         d = copy(_SIG_CHECKED[]); d[key] = true; _SIG_CHECKED[] = d
@@ -965,6 +965,7 @@ to `S`, of a type that does not depend on the function. Made from a plain functi
 """
 (::Type{Dynamic{C}})(@nospecialize(f)) where {C<:Callable} = _callable_dynamic(C, f)
 function _callable_dynamic(::Type{C}, @nospecialize(f)) where {C<:Callable}
+    C === Callable && return _unsigned_dynamic(f)
     u = Base.unwrap_unionall(C)
     A, S = u.parameters
     f isa Dynamic{C} && return f
@@ -995,9 +996,12 @@ end
 # default, `Dynamic`.
 (::Type{Kept{C}})(@nospecialize(f)) where {C<:Callable} = _callable_kept(C, f)
 function _callable_kept(::Type{C}, @nospecialize(f)) where {C<:Callable}
+    f isa Kept{C} && return f
+    if C === Callable && f isa CObj      # a function argument kept without its signature: the function, by how it is held
+        return Kept{C}(Val(:checked), _callable_fn(f), !(getfield(f, :f) isa Erased))
+    end
     u = Base.unwrap_unionall(C)
     A, S = u.parameters
-    f isa Kept{C} && return f
     if f isa CObj
         return getfield(f, :f) isa Erased ? Kept{C}(Val(:checked), _erased_at(A, S, f), false) : Kept{C}(Val(:checked), _callable_fn(f), true)
     end
@@ -1026,6 +1030,31 @@ end
     getfield(k, :compiled) && return CObj{A,S}(getfield(k, :t))(args...)::S
     return (getfield(k, :t)::CObj{A,S,Erased{A,S}})(args...)
 end
+# --- a function kept before its signature is known: `Dynamic{Callable}`, `Compiled{Callable}`,
+# `Kept{Callable}` (traits reference §7.5, open issue 102). They hold the user's function; its first
+# bound with a signature enters it there (`enter_callable`: checked at the signature, then erased to a
+# pointer or passed as the function itself), and the code that calls it is compiled per signature.
+"`Dynamic{Callable}(f)`: the function, `Dynamic`; a `Compiled` one is refused (constructors never cast)."
+function _unsigned_dynamic(@nospecialize(f))
+    _held_callable_compiled(f) && Base.inferencebarrier(_cast_refuse)(Callable, :Dynamic, :Compiled)
+    f isa WithDynamic && (f = getfield(f, :x))
+    if f isa CObj
+        getfield(f, :f) isa Erased || Base.inferencebarrier(_cast_refuse)(Callable, :Dynamic, :Compiled)
+        f = _callable_fn(f)
+    end
+    f isa HeldValue && (f = _callable_fn(f))
+    return Dynamic{Callable}(Val(:checked), f)
+end
+# without a signature there is nothing to check: a call is the function's own call
+@inline (h::Dynamic{Callable})(args...; kw...) = getfield(h, :t)(args...; kw...)
+@inline (h::Compiled{Callable})(args...; kw...) = getfield(h, :t)(args...; kw...)
+@inline (h::Kept{Callable})(args...; kw...) = getfield(h, :t)(args...; kw...)
+with_dynamic(c::Compiled{Callable}) = Dynamic{Callable}(Val(:checked), getfield(c, :t))
+with_dynamic(k::Kept{Callable}) = getfield(k, :compiled) ? Kept{Callable}(Val(:checked), getfield(k, :t), false) : k
+Base.show(io::IO, d::Compiled{Callable}) = print(io, "Compiled{Callable} at ", typeof(getfield(d, :t)))
+Base.show(io::IO, d::Kept{Callable}) =
+    getfield(d, :compiled) ? print(io, "Kept{Callable}: Compiled at ", typeof(getfield(d, :t))) : print(io, "Kept{Callable}: Dynamic")
+
 # the casts, on `Callable`'s held values: the function moves between its forms
 compiled_for(d::Dynamic{C}) where {C<:Callable} = Compiled{C}(Val(:checked), _callable_fn(d))
 compiled_for(k::Kept{C}) where {C<:Callable} = Kept{C}(Val(:checked), _callable_fn(k), true)

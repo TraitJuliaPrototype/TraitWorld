@@ -413,7 +413,7 @@ function _dyn_type(mod::Module, T, arg::Bool = false, inner::Bool = false)
     T isa Expr && T.head === :curly && (h0 = _tryeval(mod, T.args[1]); h0 === Dynamic || h0 === Compiled || h0 === Opened) && return T   # `Opened{X}`: a bound
     if T isa Symbol || (T isa Expr && T.head === :.)
         v = _tryeval(mod, T)
-        return (v isa Type && is_trait(v)) ? kept(T) : T
+        return ((v isa Type && is_trait(v)) || (v === Callable && (inner || !arg))) ? kept(T) : T   # `Callable` without a signature too
     elseif T isa Expr && T.head === :curly
         h = _tryeval(mod, T.args[1])
         ((h === Callable && (inner || !arg)) || (h isa Type && is_trait(h))) && return kept(T)   # `f::Callable{…}` on an argument stays a bound
