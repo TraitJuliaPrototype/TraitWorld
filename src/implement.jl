@@ -920,6 +920,7 @@ since (`_MOVED`). The first builder published stands.
         reg[] = d                                       # readers see the old table or the new one
     end
     _OVR_BUILT[] && @_lr _lr_member_group() :index (X, U) _index_builder!(X, U, b)
+    ccall(:jl_generating_output, Cint, ()) == 1 && _note_image_member!(X, U, b)
     return b
 end
 
@@ -966,6 +967,13 @@ function _member_fold_at_load(reg::Base.RefValue{IdDict{Any,Any}}, @nospecialize
         _LR_ON[] && _lr_add!(:member_at_load, :already_fixed, UInt64(0), UInt64(0), nothing)
         return b
     end
+    # fixed while an image was built, and the methods that serve it are the same: fixed from its record (W-84)
+    t0 = _LR_ON[] ? _lr_now() : (UInt64(0), UInt64(0))
+    b = _member_from_record!(reg, X, U)
+    if b isa Builder
+        _LR_ON[] && _lr_done!(:member_at_load, :from_record, t0, (X, U))
+        return b
+    end
     _LR_ON[] && (_LR_ATLOAD[] = true)
     try
         return @_lr :member_at_load :total (X, U) _member_fix!(reg, X, U)
@@ -976,6 +984,143 @@ function _member_fold_at_load(reg::Base.RefValue{IdDict{Any,Any}}, @nospecialize
         _LR_ATLOAD[] = false
     end
 end
+# --- a member fixed while a package image is built, recorded in that image (W-84) ------------------
+# The registry a member's builder goes to belongs to the family's declaring package, usually another
+# image, so a fold kept in an image fixes the member again at each load. The image that made the fix
+# keeps a record of it as a method, `_member_record(::Type{X}, ::Type{U}, ::Val{image})`, written just
+# before the image is written. At load, dispatch finds it (an image's methods are in the method table
+# before its code is validated). It holds while dispatch selects the same methods for the member's
+# conformance and operations; then the member is fixed from it, without its check and its builder
+# (the plan: writeup/plans/2026-10-29-w84-member-checks-at-load.md).
+
+"""
+    _member_record(::Type{X}, ::Type{U}, ::Val{image}) -> _MemberRecord
+
+Member `U` of a family implementation of `X`, fixed while package image `image` was built: one method
+per member and image, defined in that package (`_write_image_members`).
+"""
+function _member_record end
+"""
+A member's fix as an image keeps it: its builder; the signatures its check depends on beyond the image's
+dependencies, with the methods dispatch selected there; its override index records.
+"""
+struct _MemberRecord
+    builder::Any                     # a `Builder` (entry.jl)
+    sigs::Vector{Any}
+    methods::Vector{Vector{Method}}
+    index::Vector{Any}
+end
+"The members fixed while this package image is built, written into the package before the image is written."
+const _IMAGE_MEMBERS = Any[]
+"Members whose check warned (abstract parts) outside a fold: checked again where an image holds them."
+const _MEMBERS_WARNED = Set{Pair{Any,Any}}()
+
+"The methods dispatch selects at `sig` in world `w`."
+function _selected_methods(@nospecialize(sig), w::UInt)
+    ms = Base._methods_by_ftype(sig, -1, w)
+    ms isa Vector || return Method[]
+    return Method[(m::Core.MethodMatch).method for m in ms]
+end
+"""
+The signatures whose methods serve member `U` of `X`, what its check depends on beyond the image's
+dependencies: for each trait of `X`'s closure, its conformance at `U`; for each operation of `X` at
+each declared arity, the declared argument types. They follow from the trait's and the type's
+declarations, which belong to the image's dependencies.
+"""
+@machinery function _member_sigs(@nospecialize(X), @nospecialize(U))
+    out = Any[]
+    for Y in trait_closure(X)
+        push!(out, Tuple{typeof(conformance),As{Y},U})
+    end
+    for op in _ops(X)
+        f = _opfn(X, op)
+        for N in _arities(X, op)
+            A = _declared_args(X, op, U, N)
+            push!(out, Tuple{typeof(f),U,A.parameters...})
+        end
+    end
+    return out
+end
+"While an image is built: keep member `U` of `X`, fixed with builder `b`, for the image's record."
+@machinery function _note_image_member!(@nospecialize(X), @nospecialize(U), @nospecialize(b))
+    key = Pair{Any,Any}(X, U)
+    (@lock _LOCK key in _MEMBERS_WARNED) && return nothing
+    rec = try
+        recs = Any[(_opfn(Y, op), (Y, op, R, X2, U2)) for (Y, op, R, X2, U2) in _builder_records(X, U, b)]
+        sigs = _member_sigs(X, U)
+        w = _decision_world()
+        _MemberRecord(b, sigs, Vector{Method}[_selected_methods(sig, w) for sig in sigs], recs)
+    catch
+        return nothing                                   # not recorded: checked again at load
+    end
+    @lock _LOCK push!(_IMAGE_MEMBERS, (X, U, rec))
+    return nothing
+end
+"Whether dispatch selects, in world `w`, the methods a member's record was made with, at each of its signatures."
+function _record_holds(rec::_MemberRecord, w::UInt)
+    for i in eachindex(rec.sigs)
+        _selected_methods(rec.sigs[i], w) == rec.methods[i] || return false
+    end
+    return true
+end
+"The package module this process builds an image of: the root module not loaded from an image."
+function _image_module()
+    for m in values(Base.loaded_modules)
+        m isa Module || continue
+        ccall(:jl_object_in_image, UInt8, (Any,), m) == 0 && return m
+    end
+    return nothing
+end
+"""
+At the end of an image's build (an `atexit` hook, before Julia writes the image): each member fixed
+while it was built becomes a method of `_member_record` in the package's module, compiled there.
+"""
+function _write_image_members()
+    ccall(:jl_generating_output, Cint, ()) == 1 || return nothing
+    recs = @lock _LOCK copy(_IMAGE_MEMBERS)
+    isempty(recs) && return nothing
+    P = _image_module()
+    P === nothing && return nothing
+    K = Val{Symbol(string(Base.PkgId(P)))}
+    for (X, U, rec) in recs
+        try
+            Core.eval(P, :($TraitWorld._member_record(::Type{$X}, ::Type{$U}, ::$K) = $rec))
+            precompile(_member_record, (Type{X}, Type{U}, K))
+        catch
+            # not recorded: checked again at load
+        end
+    end
+    return nothing
+end
+"""
+At a load: fix member `U` of `X` from an image's record if one holds (the methods that serve it are
+those it was checked with): the registry entry, the checked mark, the override index. Its builder,
+or `nothing`.
+"""
+@machinery function _member_from_record!(reg::Base.RefValue{IdDict{Any,Any}}, @nospecialize(X), @nospecialize(U))
+    w = _decision_world()
+    ms = Base._methods_by_ftype(Tuple{typeof(_member_record),Type{X},Type{U},Any}, -1, w)
+    (ms isa Vector && !isempty(ms)) || return nothing
+    for m in ms
+        K = Base.unwrap_unionall((m::Core.MethodMatch).method.sig).parameters[4]
+        (K isa DataType && K <: Val) || continue
+        rec = Base.invoke_in_world(w, _member_record, X, U, K.instance)
+        (rec isa _MemberRecord && _record_holds(rec, w)) || continue
+        b = rec.builder
+        @lock _LOCK begin
+            e = get(reg[], U, nothing)
+            e isa Builder && return e
+            d = copy(reg[])
+            d[U] = b
+            reg[] = d
+            push!(_MEMBERS_CHECKED, Pair{Any,Any}(X, U))
+        end
+        _OVR_BUILT[] && _ovr_push!(rec.index)
+        return b
+    end
+    return nothing
+end
+
 "Whether the patched Julia has `Compiler.fold_call` (W-40)."
 const _HAS_FOLD = isdefined(CC, :fold_call)
 @static if isdefined(CC, :AtLoad)
@@ -1033,8 +1178,10 @@ single type's implementation is at its declaration, its declared fields, and the
         end
         errs, warns = _concrete_problems(X, U, p)
         append!(out, errs)
-        isempty(out) && !isempty(warns) &&
+        if isempty(out) && !isempty(warns)
+            _IN_FOLD[] || (@lock _LOCK push!(_MEMBERS_WARNED, Pair{Any,Any}(X, U)))   # not recorded in an image (W-84)
             _tw_warn("$U conforms to $X with abstract parts: code compiled for it dispatches at run time where it uses them:\n  " * join(warns, "\n  "))
+        end
     end
     return out
 end

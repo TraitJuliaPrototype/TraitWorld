@@ -26,6 +26,8 @@ function __init__()
     get(ENV, "JULIA_TW_LOADREPORT", "0") == "1" && ccall(:jl_generating_output, Cint, ()) == 0 && loadreport_switch!(true)
     empty!(_NOT_EXTENSIONS)
     empty!(_CHECKED_IN_SESSION)                       # this session's checks, not those of the image's build
+    empty!(_IMAGE_MEMBERS); empty!(_MEMBERS_WARNED)   # this build's members (W-84), not TraitWorld's own build's
+    ccall(:jl_generating_output, Cint, ()) == 1 && atexit(_write_image_members)   # before Julia writes the image
     _SESSION[] = (time_ns() ⊻ UInt(getpid()) << 32) | 1   # tables of untyped calls saved in images are ignored (untyped.jl)
     _hooks_init!()
     _strict_init!()
@@ -200,6 +202,11 @@ if ccall(:jl_generating_output, Cint, ()) == 1
     # first image load (0.26 s of D's 0.81 s load, E-169)
     precompile(_on_image_methods, (Vector{Any}, String))
     precompile(_on_method_definition, (Method, Bool))
+    # a fold kept in an image, evaluated at its load, and the member's record (W-84)
+    @static if isdefined(CC, :AtLoad)
+        precompile(_member_fold, (CC.AtLoad, Base.RefValue{IdDict{Any,Any}}, Any, Any))
+    end
+    precompile(_member_from_record!, (Base.RefValue{IdDict{Any,Any}}, Any, Any))
 end
 
 end

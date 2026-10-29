@@ -588,7 +588,7 @@ Base.show(io::IO, c::CallPath) = print(io, "CallPath(", c.call, ")")
 # --- loadreport -----------------------------------------------------------------------------
 
 const _LR_GROUPS = [
-    :member_at_load => "family members fixed at a package's load (a fold kept in its image, checked again: fold_holds)",
+    :member_at_load => "family members fixed at a package's load (a fold kept in its image: from the image's record, or checked again)",
     :member_in_fold => "family members fixed in inference (a fold, W-40)",
     :member_at_first_use => "family members fixed or checked at first use (the run-time path, the table)",
     :image_hook => "the image hook (each package image's methods: overrides, strict mode)",
@@ -633,7 +633,7 @@ function loadreport(io::IO = stdout; top::Int = 5)
             println(io, "    ", rpad(replace(string(p), "_" => " "), 24), lpad(v[1], 6), lpad(v[2] == 0 ? "" : _ms(v[2]), 10),
                     lpad(v[2] == 0 ? "" : _ms(v[3]), 11))
         end
-        tot = [(it, ns, cns) for (gg, p, it, ns, cns) in items if gg === g && p === :total]
+        tot = [(it, ns, cns) for (gg, p, it, ns, cns) in items if gg === g && (p === :total || p === :from_record)]
         isempty(tot) && (tot = [(it, ns, cns) for (gg, p, it, ns, cns) in items if gg === g])
         if length(tot) > 1 && top > 0
             sort!(tot; by = x -> -Int(x[2]))
