@@ -19,14 +19,18 @@ mktempdir() do dir
         using TraitWorld
         export count_in
         count_in(f::Callable{Tuple{T}, Bool}, xs::Iterable{T}) where {T} = (n = 0; for x in xs; f(x) && (n += 1); end; n)
+        # an open result type: inferred at run time by `_callable_result` (open issue 121)
+        map_in(f::Callable{Tuple{T}, S}, xs::Iterable{T}) where {T, S} = (out = S[]; for x in xs; push!(out, f(x)); end; out)
         end
         using .Inner
         # a plain caller that knows neither type, as DataFrames' `_byrow` calls `byrow`: the entry reads `T` from
         # the argument's key and enters the function at `Callable{Tuple{T}, Bool}` by a dynamic call, which the
         # workload records (no caller in the image has an edge to it)
         plain_count(@nospecialize(f), xs::AbstractVector) = Inner.count_in(f, xs)
+        plain_map(@nospecialize(f), xs::AbstractVector) = Inner.map_in(f, xs)
         TraitWorld.@workload begin
             plain_count(x -> !ismissing(x) && x > 1, Union{Missing, Float64}[1.0, missing, 3.0])
+            plain_map(x -> coalesce(x, 0.0), Union{Missing, Float64}[1.0, missing, 3.0])
         end
         end
         """)
@@ -72,16 +76,22 @@ mktempdir() do dir
             println("NOHASH ", getfield(Base.unwrap_unionall(Tuple{typeof(TW._callable_result), Any, Type{Tuple{Union{Missing, Float64}}}}), :hash))
             # a new function at the prompt, through the plain caller as in the workload
             v = Union{Missing, Float64}[2.0, missing, 0.5, 4.0]
+            # the open result type's inference: one specialization, `A` taken as data, kept in the image (open issue 121)
+            println("RESULT ", native(only(methods(TW._callable_result)), T -> true))
             println("COUNT ", CallImg.plain_count(x -> ismissing(x) || x > 1, v))
+            println("MAP ", CallImg.plain_map(x -> coalesce(x, -1.0), v))
             """; trace)
         @test ok
         @test occursin(r"ENTRY [1-9]", s)
         @test occursin("NOHASH 0", s)
         @test occursin("COUNT 3", s)
+        @test occursin(r"RESULT [1-9]", s)
+        @test occursin("MAP [2.0, -1.0, 0.5, 4.0]", s)
         # the call compiled neither the entry nor its helpers (the user's new function is compiled, as it must)
         t = read(trace, String)
         @test !occursin("enter_callable", t)
         @test !occursin("_wrap_callable", t)
+        @test !occursin("_callable_result", t)
     end
 end
 end

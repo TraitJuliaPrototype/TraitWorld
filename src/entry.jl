@@ -960,12 +960,13 @@ end
 """
 The result type of function argument `f` called with arguments of type `A`: an open result type
 (`Callable{A, S} where S`, traits reference §5.8), plain inference's answer, as `return_type` gives it
-at run time. A constant where `f`'s type is known; `Any` for a function without a method at `A`, whose
-call raises `MethodError`.
+at run time. `Any` for a function without a method at `A`, whose call raises `MethodError`. `A` is taken
+as data (`@nospecialize`), as `return_type` takes its argument: one specialization, which a package image
+keeps, where `A` (`Tuple{Union{Missing, Float64}}`) has no hash as a type value (compiler §2.9; open issue 121).
 """
-function _callable_result(@nospecialize(f), ::Type{A}) where {A}
+function _callable_result(@nospecialize(f), @nospecialize(A::Type))
     g = f isa CompiledFor || f isa WithDynamic ? getfield(f, :x) : f isa CObj || f isa HeldValue ? _callable_fn(f) : f
-    S = Core.Compiler.return_type(Tuple{Core.Typeof(g), A.parameters...})
+    S = Core.Compiler.return_type(Tuple{Core.Typeof(g), (A::DataType).parameters...})
     return S === Union{} ? Any : S
 end
 
