@@ -1103,7 +1103,7 @@ function _rewrite_fdef(mod::Module, ex)
                 push!(newnames, Expr(:..., v))
             elseif x.kind === :callable
                 v = gensym(Symbol(x.name, :_fn))
-                ent = :($v = $TraitWorld.enter_callable($(x.A), $(x.S), $(QuoteNode(x.M)), $(x.name),
+                ent = :($v = $TraitWorld.enter_callable($TraitWorld.Callable{$(x.A), $(x.S)}, $(QuoteNode(x.M)), $(x.name),
                                                         Val($TraitWorld._known_type($(x.name)))))
                 cw = Symbol[_wherevar(w) for w in wheres if _uses(x.A, _wherevar(w)) || _uses(x.S, _wherevar(w))]
                 # argument types that follow the other arguments: entered after them (traits reference §5.8)
@@ -1111,7 +1111,7 @@ function _rewrite_fdef(mod::Module, ex)
                 push!(newnames, v)
             elseif x.kind === :callables
                 v = gensym(Symbol(x.name, :_fn))
-                sigs = Expr(:tuple, [Expr(:tuple, A, S, QuoteNode(M)) for (A, S, M) in x.traits]...)
+                sigs = Expr(:tuple, [Expr(:tuple, :($TraitWorld.Callable{$A, $S}), QuoteNode(M)) for (A, S, M) in x.traits]...)
                 push!(stmts, :($v = $TraitWorld.enter_callables($sigs, $(x.name), Val($TraitWorld._known_type($(x.name))))))
                 push!(newnames, v)
             elseif x.kind === :vararg
@@ -1162,7 +1162,7 @@ function _rewrite_fdef(mod::Module, ex)
                 tl = :($TraitWorld.TraitList{Tuple{$(x.traits...)}}())
                 push!(stmts, :($ntname = $TraitWorld.enter_kw($tl, $fname, $k, $ntname, $(QuoteNode(x.M)), Val($TraitWorld._known_type($ntname)))))
             else
-                push!(stmts, :($ntname = $TraitWorld.enter_kw_callable($(x.A), $(x.S), $(QuoteNode(x.M)), $k, $ntname,
+                push!(stmts, :($ntname = $TraitWorld.enter_kw_callable($TraitWorld.Callable{$(x.A), $(x.S)}, $(QuoteNode(x.M)), $k, $ntname,
                                                                        Val($TraitWorld._known_type($ntname)))))
             end
         end

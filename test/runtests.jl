@@ -208,9 +208,9 @@ end
     @test colsum(abs2, [[1.0, 2.0]], 1) == 5.0                     # Base's function: not affected by Callable's Dynamic default
     @test colsum(x -> x + 1, [[1.0, 2.0]], 1) == 5.0               # the bound's attribute: Compiled
     @test_throws TypeError colmap(x -> 1, [[1.0, 2.0]], 1)       # a result of another type: an error, not widening
-    e = TraitWorld.enter_callable(Tuple{Float64}, Float64, nothing, x -> x, Val(true))
+    e = TraitWorld.enter_callable(Callable{Tuple{Float64},Float64}, nothing, x -> x, Val(true))
     @test e.f isa TraitWorld.Erased
-    @test TraitWorld.enter_callable(Tuple{Float64}, Float64, nothing, sin, Val(true)).f === sin
+    @test TraitWorld.enter_callable(Callable{Tuple{Float64},Float64}, nothing, sin, Val(true)).f === sin
 end
 
 @testset "closures capturing a trait object are checked" begin
@@ -591,8 +591,8 @@ end
     end) === nothing
     @test Main.TwoPos.f([[1.0]], 1) == 1 && Main.TwoPos.f(1, [[1.0]]) == 2
     # 12. a Base wrapper around a function from above is from above
-    @test TraitWorld.enter_callable(Tuple{Float64}, Float64, nothing, Base.Fix1(*, 2.0), Val(true)).f isa Base.Fix1
-    @test TraitWorld.enter_callable(Tuple{Float64}, Float64, nothing, Base.Fix1(userf2, 2.0), Val(true)).f isa TraitWorld.Erased
+    @test TraitWorld.enter_callable(Callable{Tuple{Float64},Float64}, nothing, Base.Fix1(*, 2.0), Val(true)).f isa Base.Fix1
+    @test TraitWorld.enter_callable(Callable{Tuple{Float64},Float64}, nothing, Base.Fix1(userf2, 2.0), Val(true)).f isa TraitWorld.Erased
 end
 
 @testset "review: a pirate behind a catch; a closed world in a session" begin
@@ -672,13 +672,13 @@ userdbl(x) = 2x
 @testset "poc3 M2: Callable, Compiled and Dynamic" begin
     v = [[1.0, 2.0]]
     @test cmap(userdbl, v, 1) == [2.0, 4.0] && csum(userdbl, v, 1) == 6.0
-    @test TraitWorld.enter_callable(Tuple{Float64}, Float64, nothing, userdbl, Val(true)).f isa TraitWorld.Erased   # Callable's Dynamic default
-    @test TraitWorld.enter_callable(Tuple{Float64}, Float64, :compiled, userdbl, Val(true)).f === userdbl
-    @test TraitWorld.enter_callable(Tuple{Float64}, Float64, :dynamic, compiled_for(userdbl), Val(true)).f === userdbl   # the conversion wins
-    @test TraitWorld.enter_callable(Tuple{Float64}, Float64, :compiled, with_dynamic(userdbl), Val(true)).f isa TraitWorld.Erased
-    @test TraitWorld.enter_callable(Tuple{Float64}, Float64, :compiled, Dynamic{Callable{Tuple{Float64},Float64}}(userdbl), Val(true)).f isa TraitWorld.Erased   # carried
+    @test TraitWorld.enter_callable(Callable{Tuple{Float64},Float64}, nothing, userdbl, Val(true)).f isa TraitWorld.Erased   # Callable's Dynamic default
+    @test TraitWorld.enter_callable(Callable{Tuple{Float64},Float64}, :compiled, userdbl, Val(true)).f === userdbl
+    @test TraitWorld.enter_callable(Callable{Tuple{Float64},Float64}, :dynamic, compiled_for(userdbl), Val(true)).f === userdbl   # the conversion wins
+    @test TraitWorld.enter_callable(Callable{Tuple{Float64},Float64}, :compiled, with_dynamic(userdbl), Val(true)).f isa TraitWorld.Erased
+    @test TraitWorld.enter_callable(Callable{Tuple{Float64},Float64}, :compiled, Dynamic{Callable{Tuple{Float64},Float64}}(userdbl), Val(true)).f isa TraitWorld.Erased   # carried
     # a Dynamic function at another signature: the same function, Dynamic, through its own pointer
-    @test TraitWorld.enter_callable(Tuple{Float64}, Float64, nothing, Dynamic{Callable{Tuple{Int},Int}}(userdbl), Val(true)).f isa TraitWorld.Erased{Tuple{Float64},Float64}
+    @test TraitWorld.enter_callable(Callable{Tuple{Float64},Float64}, nothing, Dynamic{Callable{Tuple{Int},Int}}(userdbl), Val(true)).f isa TraitWorld.Erased{Tuple{Float64},Float64}
     @test cmap(compiled_for(userdbl), v, 1) == [2.0, 4.0] && csum(with_dynamic(userdbl), v, 1) == 6.0
     @test csum(abs2, v, 1) == 5.0 && cmap(abs2, v, 1) == [1.0, 4.0]   # Base's function: not affected by Callable's Dynamic default
     @test cboth(with_dynamic(x -> x + one(x)), 1.5, 2) == (2.5, 3)
@@ -866,4 +866,5 @@ include("concreteness.jl")
 include("joint.jl")
 include("fold.jl")
 include("member_records.jl")
+include("callable_images.jl")
 include("diagnostics.jl")

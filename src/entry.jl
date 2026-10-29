@@ -575,9 +575,9 @@ end
                           "$(join(string.(typeof(l).parameters[1].parameters), ", "))"))
 
 "A `Callable` keyword: wrapped like a positional one if supplied."
-@noinline function enter_kw_callable(::Type{A}, ::Type{S}, @nospecialize(attr), k::Symbol, nt::NamedTuple, ::Val{kn}) where {A,S,kn}
+@noinline function enter_kw_callable(::Type{C}, @nospecialize(attr), k::Symbol, nt::NamedTuple, ::Val{kn}) where {C<:Callable,kn}
     haskey(nt, k) || return nt
-    return merge(nt, NamedTuple{(k,)}((enter_callable(A, S, attr, getfield(nt, k), Val(kn)),)))
+    return merge(nt, NamedTuple{(k,)}((enter_callable(C, attr, getfield(nt, k), Val(kn)),)))
 end
 
 "The trait patterns each worker of `f` needs at position `pos` (`StateVector{Float64, R}`), one list per method."
@@ -805,7 +805,7 @@ edges at abstract signatures (in `owner`, `is_trait_world`) that unrelated loads
 end
 
 """
-    enter_callable(A, S, attr, f, Val(known))
+    enter_callable(Callable{A, S}, attr, f, Val(known))
 
 A function handed down for a `Callable{A, S}` argument, as a `CObj`: `Compiled` (the function itself,
 the worker compiled per function type) or `Dynamic` (erased to a pointer, the worker compiled once
@@ -813,16 +813,21 @@ per signature). The caller's conversion wins (`compiled_for(f)`, `with_dynamic(f
 `Dynamic{Callable{A, S}}` is carried; else the bound's attribute (`attr`); else `Callable`'s
 default, `Dynamic`, for a function whose type is not of the trait world; else whether the caller knew
 the function's type (`known`, evaluated in the entry's body). In a closed build nothing is erased.
+
+The entry and its helpers are keyed by the bound, `Callable{A, S}`, not by `A` and `S` apart: a tuple
+type such as `Tuple{Union{Missing, Float64}}` as a type value has no hash in Julia, and a package image
+keeps no code specialized at a signature without one (compiler reference §2.9); the bound has one.
 """
-@noinline function enter_callable(::Type{A}, ::Type{S}, @nospecialize(attr), @nospecialize(f), ::Val{kn}) where {A,S,kn}
+@noinline function enter_callable(::Type{Callable{A,S}}, @nospecialize(attr), @nospecialize(f), ::Val{kn}) where {A,S,kn}
+    C = Callable{A,S}
     f isa CObj{A,S} && return f
     # a function held or cast keeps its attribute, at this signature too (a `Dynamic` one through its own pointer)
     if _held_callable_dynamic(f) && !(f isa WithDynamic)
-        _check_at_signature(A, S, _callable_fn(f))
-        return _erased_at(A, S, _callable_fn(f))
+        _check_at_signature(C, _callable_fn(f))
+        return _erased_at(C, _callable_fn(f))
     elseif f isa CObj
-        _check_at_signature(A, S, _callable_fn(f))
-        return getfield(f, :f) isa Erased ? _erased_at(A, S, f) : CObj{A,S}(_callable_fn(f))
+        _check_at_signature(C, _callable_fn(f))
+        return getfield(f, :f) isa Erased ? _erased_at(C, f) : CObj{A,S}(_callable_fn(f))
     end
     if _held_callable_compiled(f)
         f = f isa CompiledFor ? getfield(f, :x) : _callable_fn(f); attr = :compiled
@@ -835,16 +840,16 @@ the function's type (`known`, evaluated in the entry's body). In a closed build 
     T = typeof(f)
     if Base.issingletontype(T)
         # functions that capture nothing (Base's `abs2`, a closure without state): one wrapper per type
-        key = (A, S, attr, T)
+        key = (C, attr, T)
         c = get(_CALLABLE[], key, nothing)               # copy-on-write: read without the lock
         c === nothing || return c
-        c = _wrap_callable(A, S, attr, f)
+        c = _wrap_callable(C, attr, f)
         @lock _LOCK begin
             d = copy(_CALLABLE[]); d[key] = c; _CALLABLE[] = d
         end
         return c
     end
-    return _wrap_callable(A, S, attr, f)
+    return _wrap_callable(C, attr, f)
 end
 const _CALLABLE = Ref(Dict{Any,Any}())           # copy-on-write
 """
@@ -852,8 +857,8 @@ A function kept at one signature, seen at another (traits reference §6.5): chec
 (signature, function type): a method at the new argument types whose inferred result is not disjoint
 from the declared one, else `TraitBoundError`.
 """
-function _check_at_signature(::Type{A}, ::Type{S}, @nospecialize(f)) where {A,S}
-    key = (A, S, typeof(f))
+function _check_at_signature(::Type{Callable{A,S}}, @nospecialize(f)) where {A,S}
+    key = (Callable{A,S}, typeof(f))
     haskey(_SIG_CHECKED[], key) && return nothing
     ok = Base.invokelatest(hasmethod, f, A)
     if ok
@@ -870,7 +875,7 @@ end
 const _SIG_CHECKED = Ref(Dict{Any,Bool}())          # copy-on-write
 @noinline _callable_mismatch(@nospecialize(C), @nospecialize(A), @nospecialize(S)) =
     throw(TraitBoundError("a Dynamic{$C} was passed where Callable{$A, $S} is expected"))
-_wrap_callable(::Type{A}, ::Type{S}, attr::Symbol, @nospecialize(f)) where {A,S} =
+_wrap_callable(::Type{Callable{A,S}}, attr::Symbol, @nospecialize(f)) where {A,S} =
     attr === :compiled ? CObj{A,S}(f) : CObj{A,S}(Erased{A,S}(f))
 
 Base.Experimental.@max_methods 1 function bounded_constructor end
@@ -887,8 +892,7 @@ as a bound gives it (the caller's cast, a value's carried attribute, else the fi
 A `Compiled{X}` or a `Kept{X}` with `Compiled` is opened here, by its object's type.
 """
 function _kept_at(::Type{C}, @nospecialize(x), ::Val{kn}) where {C<:Callable,kn}
-    u = Base.unwrap_unionall(C)
-    c = enter_callable(u.parameters[1], u.parameters[2], nothing, x, Val(kn))
+    c = enter_callable(C, nothing, x, Val(kn))
     f = getfield(c, :f)
     return f isa Erased ? Dynamic{C}(Val(:checked), c) : f
 end
@@ -921,7 +925,7 @@ which the next bound takes as `Compiled`.
 "A function argument with several `Callable` bounds: one `CObj` per signature."
 function enter_callables(sigs::Tuple, @nospecialize(f), ::Val{kn}) where {kn}
     f isa CMulti && return f
-    return CMulti(map(s -> enter_callable(s[1], s[2], s[3], f, Val(kn)), sigs))
+    return CMulti(map(s -> enter_callable(s[1], s[2], f, Val(kn)), sigs))
 end
 
 # --- `Callable`'s held values (traits reference §5.8; lowering §12) -------------------------------
@@ -947,7 +951,7 @@ end
 @inline _callable_fn(c::CObj) = (f = getfield(c, :f); f isa Erased ? getfield(f, :obj) : f)
 @inline _callable_fn(h::HeldValue{C}) where {C<:Callable} = (t = getfield(h, :t); t isa CObj ? _callable_fn(t) : t)
 "The function argument `f`, a plain function or a function argument, as a `Dynamic` at `Callable{A, S}`."
-@inline _erased_at(::Type{A}, ::Type{S}, @nospecialize(f)) where {A,S} =
+@inline _erased_at(::Type{Callable{A,S}}, @nospecialize(f)) where {A,S} =
     f isa CObj{A,S,Erased{A,S}} ? f : CObj{A,S}(Erased{A,S}(f isa CObj ? _callable_fn(f) : f))
 "Whether a value is a `Callable` value held with the attribute `Compiled` (the caller's `compiled_for`, or kept so)."
 @inline _held_callable_compiled(@nospecialize(f)) = f isa CompiledFor || (f isa Compiled && f isa Compiled{<:Callable}) ||
@@ -966,13 +970,11 @@ to `S`, of a type that does not depend on the function. Made from a plain functi
 (::Type{Dynamic{C}})(@nospecialize(f)) where {C<:Callable} = _callable_dynamic(C, f)
 function _callable_dynamic(::Type{C}, @nospecialize(f)) where {C<:Callable}
     C === Callable && return _unsigned_dynamic(f)
-    u = Base.unwrap_unionall(C)
-    A, S = u.parameters
     f isa Dynamic{C} && return f
     _held_callable_compiled(f) && Base.inferencebarrier(_cast_refuse)(C, :Dynamic, :Compiled)
     f isa WithDynamic && (f = getfield(f, :x))
     f isa HeldValue && (f = _callable_fn(f))
-    return Dynamic{C}(Val(:checked), _erased_at(A, S, f))
+    return Dynamic{C}(Val(:checked), _erased_at(C, f))
 end
 (::Type{Dynamic{C}})(f::Dynamic{C}) where {C<:Callable} = f
 #     Compiled{Callable{A, S}}(f)
@@ -1000,10 +1002,8 @@ function _callable_kept(::Type{C}, @nospecialize(f)) where {C<:Callable}
     if C === Callable && f isa CObj      # a function argument kept without its signature: the function, by how it is held
         return Kept{C}(Val(:checked), _callable_fn(f), !(getfield(f, :f) isa Erased))
     end
-    u = Base.unwrap_unionall(C)
-    A, S = u.parameters
     if f isa CObj
-        return getfield(f, :f) isa Erased ? Kept{C}(Val(:checked), _erased_at(A, S, f), false) : Kept{C}(Val(:checked), _callable_fn(f), true)
+        return getfield(f, :f) isa Erased ? Kept{C}(Val(:checked), _erased_at(C, f), false) : Kept{C}(Val(:checked), _callable_fn(f), true)
     end
     _held_callable_compiled(f) && return Kept{C}(Val(:of), Compiled{C}(f), true)
     return Kept{C}(Val(:of), Dynamic{C}(f), false)
@@ -1059,9 +1059,9 @@ Base.show(io::IO, d::Kept{Callable}) =
 compiled_for(d::Dynamic{C}) where {C<:Callable} = Compiled{C}(Val(:checked), _callable_fn(d))
 compiled_for(k::Kept{C}) where {C<:Callable} = Kept{C}(Val(:checked), _callable_fn(k), true)
 with_dynamic(c::Compiled{C}) where {C<:Callable} =
-    (u = Base.unwrap_unionall(C); Dynamic{C}(Val(:checked), _erased_at(u.parameters[1], u.parameters[2], _callable_fn(c))))
+    Dynamic{C}(Val(:checked), _erased_at(C, _callable_fn(c)))
 with_dynamic(k::Kept{C}) where {C<:Callable} = getfield(k, :compiled) ?
-    (u = Base.unwrap_unionall(C); Kept{C}(Val(:checked), _erased_at(u.parameters[1], u.parameters[2], _callable_fn(k)), false)) : k
+    Kept{C}(Val(:checked), _erased_at(C, _callable_fn(k)), false) : k
 Base.show(io::IO, d::Dynamic{C}) where {C<:Callable} = print(io, "Dynamic{", C, "}")
 Base.show(io::IO, d::Compiled{C}) where {C<:Callable} = print(io, "Compiled{", C, "} at ", typeof(getfield(d, :t)))
 Base.show(io::IO, d::Kept{C}) where {C<:Callable} =

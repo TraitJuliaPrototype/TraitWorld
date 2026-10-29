@@ -662,16 +662,16 @@ function _scan(mi::Core.MethodInstance, cx::_Walk)
                 site(:trait, i, :enter, Any[T], ts)
                 continue
             elseif cm === _enter_callable_method()
-                # enter_callable(A, S, spec, f): in a closed world, the function itself
+                # enter_callable(Callable{A, S}, spec, f): in a closed world, the function itself
                 a = st.args[3:end]
-                Av = _constval(src, sptypes, a[1]); Sv = _constval(src, sptypes, a[2])
-                Ft = _argT(src, sptypes, a[4])
+                Cv = _constval(src, sptypes, a[1])
+                Ft = _argT(src, sptypes, a[3])
                 c2 = _union_split(Any[Ft], 32)
-                if Av === nothing || Sv === nothing || c2 === nothing
+                if Cv === nothing || c2 === nothing || !(something(Cv) isa DataType && something(Cv) <: Callable)
                     hole(:trait_arg, i, :enter_callable, Any[Ft])
                     continue
                 end
-                A, S = something(Av), something(Sv)
+                A, S = something(Cv).parameters
                 ts = Core.MethodInstance[]
                 outs = Any[]
                 for x in c2
@@ -711,13 +711,14 @@ function _scan(mi::Core.MethodInstance, cx::_Walk)
                 continue
             elseif cm === _enter_kw_callable_method()
                 a = st.args[3:end]
-                Av = _constval(src, sptypes, a[1]); Sv = _constval(src, sptypes, a[2]); kv = _constval(src, sptypes, a[4])
-                NT = _argT(src, sptypes, a[5])
-                if Av === nothing || Sv === nothing || kv === nothing || !(NT isa DataType && NT <: NamedTuple)
+                Cv = _constval(src, sptypes, a[1]); kv = _constval(src, sptypes, a[3])
+                NT = _argT(src, sptypes, a[4])
+                if Cv === nothing || kv === nothing || !(NT isa DataType && NT <: NamedTuple) ||
+                   !(something(Cv) isa DataType && something(Cv) <: Callable)
                     hole(:trait_arg, i, :enter_kw_callable, Any[NT])
                     continue
                 end
-                A, S, k = something(Av), something(Sv), something(kv)
+                (A, S), k = something(Cv).parameters, something(kv)
                 if !(k in NT.parameters[1])
                     alts[i] = Any[NT]
                     site(:trait, i, :enter_kw_callable, Any[NT])

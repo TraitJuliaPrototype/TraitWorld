@@ -1312,8 +1312,9 @@ _ctype(@nospecialize(T)) = isbitstype(T) && sizeof(T) > 0 ? T : Any
 _cdecl(@nospecialize(T)) = isbitstype(T) && sizeof(T) > 0 ? T : isconcretetype(T) ? Ref{T} : Any
 # The calling convention `:caller_world` (a patch of the compiler): the call runs in the caller's
 # world, as a direct call does; the pointer's thunk is a world-checked call-site cache. (A plain
-# `@cfunction` runs in the latest world, as a callback from C must.)
-@generated function _fptr(::Type{A}, ::Type{S}, ::Type{F}) where {A,S,F}
+# `@cfunction` runs in the latest world, as a callback from C must.) Keyed by the bound, which has a hash
+# as a type value where `A` may not, so that a package image keeps it (compiler reference §2.9).
+@generated function _fptr(::Type{Callable{A,S}}, ::Type{F}) where {A,S,F}
     ats = Any[_cdecl(a) for a in (A::DataType).parameters]
     return Expr(:cfunction, Ptr{Cvoid}, QuoteNode(_CallWrap{S}()), _ctype(S),
                 :(Core.svec($(Ref{F}), $(ats...))), QuoteNode(:caller_world))
@@ -1322,7 +1323,7 @@ end
 Erased{A,S}(@nospecialize(f)) where {A,S} = Erased{A,S}(_PtrCell(C_NULL), f)
 "The pointer of `e` in this session: made at its first call, and again after an image load reset it."
 @noinline function _erased_ptr_slow(e::Erased{A,S}) where {A,S}
-    p = Base.invokelatest(_fptr, A, S, typeof(getfield(e, :obj)))::Ptr{Cvoid}
+    p = Base.invokelatest(_fptr, Callable{A,S}, typeof(getfield(e, :obj)))::Ptr{Cvoid}
     @atomic getfield(e, :cell).ptr = p
     return p
 end
