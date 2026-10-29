@@ -874,6 +874,14 @@ keeps no code specialized at a signature without one (compiler reference §2.9);
     return _wrap_callable(C, attr, f)
 end
 const _CALLABLE = Ref(Dict{Any,Any}())           # copy-on-write
+"A function kept at another signature refused at `Callable{A, S}`: its inferred result there `R` (`Union{}`: no method, or it always throws), with a hint where `S` is `Nothing` (open issue 120)."
+@noinline function _signature_refused(@nospecialize(A), @nospecialize(S), @nospecialize(R))
+    got = R === Union{} ? "it has no method there, or always throws" : "its result there is inferred `$R`"
+    hint = S === Nothing && R !== Union{} ?
+        " The bound declares the result `Nothing`: end the function with `nothing` (an in-place function whose last line is `du .= …` returns `du`)." : ""
+    throw(TraitBoundError("a function kept at another signature, or without one, was passed where Callable{$A, $S} is expected; " *
+                          "$got, declared `$S` (traits reference §6.5).$hint"))
+end
 """
 A function kept at one signature, seen at another (traits reference §6.5): checked there, once per
 (signature, function type): a method at the new argument types whose inferred result is not disjoint
@@ -883,12 +891,12 @@ function _check_at_signature(::Type{Callable{A,S}}, @nospecialize(f)) where {A,S
     key = (Callable{A,S}, typeof(f))
     haskey(_SIG_CHECKED[], key) && return nothing
     ok = Base.invokelatest(hasmethod, f, A)
+    R = Union{}
     if ok
         R = Base.invokelatest(Base.infer_return_type, f, A)
         ok = typeintersect(R, S) !== Union{}           # a result that always throws (`Union{}`) is disjoint too
     end
-    ok || throw(TraitBoundError("a function kept at another signature, or without one, was passed where Callable{$A, $S} is expected, " *
-                                "and has no method there with a result of type $S (traits reference §6.5)"))
+    ok || _signature_refused(A, S, R)
     @lock _LOCK begin
         d = copy(_SIG_CHECKED[]); d[key] = true; _SIG_CHECKED[] = d
     end

@@ -1347,7 +1347,9 @@ The result `x` of the function `f` at a `Callable` bound declaring the result `S
 else a `TypeError` naming both types (traits reference §5.8), with a hint where `S` is `Nothing`
 (`_callable_result_hint`). Asserted, never converted.
 """
-@inline _checked_result(x, ::Type{S}, f) where {S} = x isa S ? x : Base.inferencebarrier(_callable_result_error)(f, S, x)
+# the error path called directly, so that a result of another type infers `Union{}` (a member check sees
+# that the function "always throws" there and refuses the member, traits reference §4.9)
+@inline _checked_result(x, ::Type{S}, f) where {S} = x isa S ? x : _callable_result_error(f, S, x)
 @noinline function _callable_result_error(@nospecialize(f), @nospecialize(S), @nospecialize(x))
     fname = !(f isa Function) ? "a $(typeof(f))" : startswith(string(nameof(f)), "#") ? "an anonymous function" : "`$(nameof(f))`"
     throw(TypeError(:Callable, "the result of $fname", S, x))

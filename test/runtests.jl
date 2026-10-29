@@ -228,6 +228,11 @@ end
         @test occursin("expected Nothing", msg) && occursin("Vector{Float64}", msg)
         @test occursin("end the function with `nothing`", msg)
     end
+    # kept without a signature, checked where it is entered: the same names and hint (a `TraitBoundError`)
+    e = try Main.InPlace.apply!(Dynamic{Callable}(u -> (u .= 2 .* u)), [1.0]); nothing catch err; err end
+    @test e isa TraitBoundError
+    msg = sprint(showerror, e)
+    @test occursin("inferred `Vector{Float64}`, declared `Nothing`", msg) && occursin("end the function with `nothing`", msg)
 end
 
 @testset "closures capturing a trait object are checked" begin
