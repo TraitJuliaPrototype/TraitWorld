@@ -91,29 +91,83 @@ end)
         e = try M.COnly(2) catch err; err end
         @test e isa MethodError && occursin("CNamed", sprint(showerror, e))
     end
-    @testset "an untyped constructor the entry would replace is refused" begin
-        e = thrown(quote
-            @trait_module module CtorBad
-            using TraitWorld
-            @trait CBSized begin
-                cbw(s::Self)::Int
-            end
-            struct CBad{T}; w::T; end                                    # Julia's default constructor `CBad(w::T) where {T}`
-            CBad(s::CBSized) = CBad(cbw(s))
-            end
-        end)
-        @test e isa ErrorException && occursin("the constructor of `CBad` already has an untyped method", e.msg)
-        e = thrown(quote
-            @trait_module module CtorBad2
-            using TraitWorld
-            @trait CBSized2 begin
-                cbw2(s::Self)::Int
-            end
-            struct CBad2; w::Int; end                                    # Julia's default constructor `CBad2(w)` converts
-            CBad2(s::CBSized2) = CBad2(cbw2(s))
-            end
-        end)
-        @test e isa ErrorException && occursin("the constructor of `CBad2` already has an untyped method", e.msg)
+end
+
+# Lowering L-50: an ordinary constructor at the entry's signature (Julia's default ones, an untyped inner one) is
+# taken out of the method table when the entry is defined, and becomes the entry's fallback, called by its method
+toplevel(quote
+    @trait_module module CtorCap
+    using TraitWorld
+    @trait KSized begin
+        kw(s::Self)::Int
+    end
+    struct KA; w::Int; end                               # Julia's default constructor `KA(w)` converts to `Int`
+    KA(s::KSized) = KA(kw(s))
+    struct KB{T}; w::T; end                              # Julia's default constructor `KB(w::T) where {T}`
+    KB(s::KSized) = KB{Int}(kw(s) * 10)
+    kb_fallback(s::KSized) = KB(kw(s) * 10)              # trait code reaches the fallback with an `Int`
+    struct KC
+        w::Int
+        KC(x; k = 1) = new(length(x) * k)                # an untyped inner constructor with keywords
+    end
+    KC(s::KSized) = KC(fill(0, kw(s)); k = 2)
+    struct KD
+        w::Int
+        KD(x, y::Int) = new(x + y)                       # an inner constructor at the entry's signature, one argument typed
+    end
+    KD(s::KSized, y::Int) = KD(kw(s), y)
+    struct KE; w::Int; end
+    KE(s::KSized; add = 0) = KE(kw(s) + add)             # a bounded method with keywords; `KE(w)` its fallback
+    kwrap(s::KSized) = KA(s)                             # trait code calls the bounded constructor
+    end
+end)
+toplevel(quote
+    struct KSurf; w::Int; end
+    @implement CtorCap.KSized KSurf begin
+        kw(s) = s.w
+    end
+    kctor_typed(s::KSurf) = CtorCap.KA(s)
+    kctor_typed_b(s::KSurf) = CtorCap.KB(s)
+end)
+
+@testset "lowering L-50: the constructor at the entry's signature is its fallback" begin
+    M = Main.CtorCap
+    s = Main.KSurf(3)
+    @testset "Julia's default constructor, a struct without parameters" begin
+        @test M.KA(s) == M.KA(3)
+        @test M.KA(2.0) == M.KA(2)                                     # the fallback converts, as Julia's constructor does
+        @test M.KA(Int8(4)).w === 4
+        @test_throws InexactError M.KA(2.5)
+        @test M.KA(Dynamic{M.KSized}(s)) == M.KA(3)
+        @test Base.inferencebarrier(M.KA)(Base.inferencebarrier(2.0)) == M.KA(2)
+        @test Base.invokelatest(Main.kctor_typed, s) == M.KA(3)
+        @test Base.return_types(Main.kctor_typed, (Main.KSurf,)) == Any[M.KA]
+        @test M.kwrap(s) == M.KA(3)
+        @test count(TraitWorld._is_entry, methods(M.KA)) == 1
+        @test count(m -> TraitWorld._is_tagged(m), methods(M.KA)) == 1
+    end
+    @testset "Julia's default constructor, a parametric struct" begin
+        @test M.KB(s) isa M.KB{Int} && M.KB(s).w == 30
+        @test M.KB(1.5) isa M.KB{Float64} && M.KB(1.5).w == 1.5
+        @test M.KB{Float64}(2) isa M.KB{Float64}
+        @test M.kb_fallback(s) isa M.KB{Int} && M.kb_fallback(s).w == 30
+        @test Base.return_types(Main.kctor_typed_b, (Main.KSurf,)) == Any[M.KB{Int}]
+    end
+    @testset "an untyped inner constructor, with keywords (open issue 130)" begin
+        @test M.KC(s).w == 6
+        @test M.KC([1, 2]).w == 2
+        @test M.KC([1, 2]; k = 3).w == 6                              # its keyword sorter, the keyword fallback
+        @test_throws MethodError M.KC(s; k = 3)                        # sorted among the methods that take keywords
+    end
+    @testset "an inner constructor with a typed argument" begin
+        @test M.KD(s, 1).w == 4
+        @test M.KD(1.0, 2).w == 3
+    end
+    @testset "a bounded method with keywords" begin
+        @test M.KE(s).w == 3
+        @test M.KE(s; add = 2).w == 5
+        @test M.KE(2.0).w == 2
+        @test_throws MethodError M.KE(2.0; add = 1)
     end
 end
 
@@ -179,5 +233,29 @@ mktempdir() do dir
         @test ok
         @test occursin(r"NATIVE [1-9]\d* [1-9]", s)
         @test occursin("CALL 4 5 1.5", s)
+    end
+    # lowering L-50: Julia refuses to take a method out of the method table while it writes a package image, so a
+    # bounded constructor at the signature of Julia's default one is refused there (in a session it is its fallback)
+    mkpath(joinpath(pkgs, "CtorImg2", "src"))
+    write(joinpath(pkgs, "CtorImg2", "src", "CtorImg2.jl"), """
+        module CtorImg2
+        using TraitWorld
+        @trait_module module Inner
+        using TraitWorld
+        @trait Sized2 begin
+            width2(s::Self)::Int
+        end
+        struct Box2; w::Int; end
+        Box2(s::Sized2) = Box2(width2(s))
+        end
+        end
+        """)
+    out = IOBuffer(); err = IOBuffer()
+    cmd2 = `$(Base.julia_cmd()) --startup-file=no --compiled-modules=yes -e "using CtorImg2"`
+    ok2 = success(pipeline(setenv(cmd2, env); stdout = out, stderr = err))
+    e2 = String(take!(err))
+    @testset "lowering L-50: refused while Julia writes a package image" begin
+        @test !ok2
+        @test occursin("lowering L-50", e2)
     end
 end

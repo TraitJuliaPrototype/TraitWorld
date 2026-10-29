@@ -759,21 +759,45 @@ _named_callable(@nospecialize(f)) = f isa Function ||
     (f isa Type && (m = parentmodule(f); n = nameof(f); isdefined(m, n) && getfield(m, n) === f))
 
 """
-An ordinary constructor of type `fname` that an entry of an untyped shape (`pattern`, `nothing` at every
-position) would replace, having its signature: one of Julia's default constructors (`S(x)`, which converts
-to the field types; `S(x::T) where {T}` for a parametric struct), or an untyped inner one; else `nothing`.
+The ordinary constructors of type `fname` an entry of signature type `sig` would take the place of: the
+method at `sig` (one of Julia's default constructors, `S(x)`, which converts to the field types, and
+`S(x::T) where {T}` of a parametric struct; or an untyped inner one) and its keyword sorter, at
+`Core.kwcall`'s signature of the same arguments; each `nothing` where there is none. `nothing` when
+neither exists, or `fname` names no type.
 """
-function _ctor_at_entry(mod::Module, fname, pattern)
+function _ctors_at_entry(mod::Module, fname, @nospecialize(sig))
     fname isa Symbol && isdefined(mod, fname) || return nothing
     f = getfield(mod, fname)
-    f isa Type && all(isnothing, pattern) || return nothing
-    sig = Tuple{Core.Typeof(f),Any[Any for _ in pattern]...}
+    f isa Type && sig isa Type || return nothing
+    plain(m) = !(_is_entry(m) || _is_tagged(m) || _is_tagged(m, 4) || _isworker(m))
+    pos = nothing
     for m in methods(f)
-        (_is_entry(m) || _is_tagged(m) || _isworker(m)) && continue
-        m.sig <: sig && sig <: m.sig && return m
+        plain(m) && m.sig == sig && (pos = m; break)
     end
-    return nothing
+    body = Base.unwrap_unionall(sig)
+    ksig = Base.rewrap_unionall(Tuple{typeof(Core.kwcall),NamedTuple,body.parameters...}, sig)
+    kw = nothing
+    for m in Base._methods_by_ftype(ksig, -1, Base.get_world_counter())::Vector
+        plain(m.method) && m.method.sig == ksig && (kw = m.method; break)
+    end
+    pos === nothing && kw === nothing && return nothing
+    return (pos, kw)
 end
+
+"""
+Take constructor `m` out of the method table, so that an entry takes its signature, and return it: the
+tagged fallback that takes its place calls it by `invoke` with the method itself (lowering §8.1).
+"""
+function _take_ctor!(m::Method)
+    Base.delete_method(m)
+    return m
+end
+
+"""
+Whether this session may take a method out of the method table: Julia refuses it while it writes a
+package image (incremental output), lowering L-50.
+"""
+_may_take_methods() = !(ccall(:jl_generating_output, Cint, ()) == 1 && Base.JLOptions().incremental == 1)
 
 function _registry(mod::Module, key, which::Symbol)
     owner_mod = key[1]
@@ -1078,12 +1102,6 @@ function _rewrite_fdef(mod::Module, ex)
             error("@trait_module: `$fname` already has an untyped method of the shape its trait-bounded method needs " *
                   "for an entry; define the trait-bounded methods first, then the untyped fallback")
         end
-        cm = _ctor_at_entry(mod, fname, pattern)
-        cm === nothing || error("@trait_module: the constructor of `$fname` already has an untyped method of the shape its " *
-                                "trait-bounded method needs for an entry ($cm: one of Julia's default constructors, or an untyped " *
-                                "inner one). Give the struct inner constructors with typed arguments (`$fname(x::Int) = new(x)`; for a " *
-                                "parametric struct `$fname{T}(x::T) where {T} = new{T}(x)`), so Julia defines no untyped one; an " *
-                                "untyped constructor written after the trait-bounded methods becomes their fallback")
         if key[1] !== mod
             # an entry is a method at Any: only the function's owner may add one (rule 3)
             owns(owner(mod), owner(key[1])) || error("@trait_module: `$fname` belongs to $(key[1]); $(mod) may add trait-bounded " *
@@ -1231,6 +1249,39 @@ function _rewrite_fdef(mod::Module, ex)
         push!(stmts, plainret ? :(return $res) :
                      :(return $res isa $TraitWorld.LikeResult ? $TraitWorld._like_return($res, $us, $vs) : $res))
         kept = Any[w for w in wheres if any(x -> x.kind in (:plain, :vararg) && x.ann !== nothing && _uses(x.ann, _wherevar(w)), args)]
+        # a constructor of the entry's signature (Julia's default ones, an untyped inner one): taken out of the method
+        # table and its place given to the entry; the tagged fallback calls it by its method (lowering §8.1)
+        targs = Any[x.kind in (:trait, :callable, :callables, :untyped) ? :Any :
+                    x.kind === :vararg_trait ? :(Vararg{Any}) :
+                    x.kind === :vararg ? :(Vararg{$(_vararg_eltype(x.ann))}) :
+                    x.ann === nothing ? :Any : x.ann for x in args]
+        sigex = :(Tuple{Core.Typeof($fname),$(targs...)})
+        isempty(kept) || (sigex = Expr(:where, sigex, kept...))
+        cms = _ctors_at_entry(mod, fname, _tryeval(mod, sigex))
+        if cms !== nothing
+            _may_take_methods() || error("@trait_module: the constructor of `$fname` has an ordinary method at the signature " *
+                "its trait-bounded method needs for an entry ($(something(cms...)): one of Julia's default constructors, or " *
+                "an untyped inner one). The entry takes its place, with it as the fallback; but Julia refuses to take a method " *
+                "out of the method table while it writes a package image (lowering L-50). Give the struct inner constructors " *
+                "with typed arguments (`$fname(x::Int) = new(x)`; for a parametric struct `$fname{T}(x::T) where {T} = new{T}(x)`), " *
+                "so Julia defines no untyped one; an untyped constructor written after the trait-bounded methods becomes their fallback")
+            pm, km = cms
+            ctorsig(head) = isempty(kept) ? head : Expr(:where, head, kept...)
+            if pm !== nothing
+                g = gensym(Symbol(:tw_ctor_, fname))
+                push!(rest, :(const $g = $TraitWorld._take_ctor!($(QuoteNode(pm)))))
+                push!(rest, Expr(:function, ctorsig(Expr(:call, fname, :(::$TraitWorld.Untyped), eargs...)),
+                                 Expr(:block, :(return invoke($fname, $g, $(callnames...))))))
+            end
+            if km !== nothing
+                g = gensym(Symbol(:tw_kwctor_, fname))
+                ntk = gensym(:nt)
+                push!(rest, :(const $g = $TraitWorld._take_ctor!($(QuoteNode(km)))))
+                push!(rest, Expr(:function, ctorsig(Expr(:call, :(Core.kwcall), :($ntk::NamedTuple), :(::Core.Typeof($fname)),
+                                                         :(::$TraitWorld.Untyped), eargs...)),
+                                 Expr(:block, :(return invoke(Core.kwcall, $g, $ntk, $fname, $(callnames...))))))
+            end
+        end
         # with keywords, the entry is its own keyword sorter: Julia's would be specialized on the named tuple of
         # the supplied keywords, where `known_type` always sees their types; taken unspecialized, as the
         # positional arguments are, a typed caller inlines it and an untyped one does not (traits reference §5.7)
