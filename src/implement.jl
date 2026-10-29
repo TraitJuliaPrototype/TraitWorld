@@ -604,7 +604,9 @@ function _field_problems(@nospecialize(X), @nospecialize(T), fmap, @nospecialize
     ps = String[]
     isempty(trait_fields(X)) && return ps
     T isa DataType || return ["$T is not a concrete type with fields"]
-    own_gp = which(getproperty, Tuple{T,Symbol}).sig.parameters[2] !== Any
+    gp = which(getproperty, Tuple{T,Symbol})
+    # TraitWorld's read of a field kept at a parameter bounded by `Callable` (traits reference §7.4) reads every other field as `getfield` does
+    own_gp = Base.unwrap_unionall(gp.sig).parameters[2] !== Any && String(gp.file) != _TRAIT_MODULE_FILE
     # the key with every declared field: a field's declared type may use a parameter another field defines
     fnames = Symbol[]; ftypes = Any[]
     for (f, _) in trait_fields(X)

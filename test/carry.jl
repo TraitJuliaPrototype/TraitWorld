@@ -35,6 +35,15 @@ toplevel(quote
         x::T
     end
     applyh(h::Holder) = h.f(h.x)
+    fkind(f::Callable{Tuple{Float64}, Float64}) = TraitWorld.is_dynamic(f) ? :dynamic : :compiled
+    passon(h::Holder) = fkind(h.f)                     # a value read back keeps the attribute the parameter records
+    passany(@nospecialize(h)) = fkind(h.f)             # also where the code does not know the struct's type
+    rekeep(h::Holder) = Holder(h.f, h.x)
+    @trait HasX begin
+        @const x::Float64
+    end
+    @implement HasX Holder{Float64, F} where {F}       # its fields read by `getfield`; the kept read is TraitWorld's
+    getx(h::HasX) = h.x
     struct HolderF{T}                                  # the bound at the field (traits reference §7.4, W-42): the same type as Holder's
         f::(F <: Callable{Tuple{T}, T})
         x::T
@@ -138,6 +147,13 @@ end
     @test typeof(tboxit(h)).parameters[1] === Main.CHex                   # from trait code: the trait object by its key
     @test typeof(C.boxit(h)).parameters[1] <: Dynamic
     @test C.boxkind(tboxit(h)) === :compiled && C.boxkind(C.boxit(h)) === :dynamic
+    hc, hd = C.Holder(compiled_for(sq), 2.0), C.Holder(sq, 2.0)                 # read back (traits reference §7.4, open issue 104)
+    @test C.passon(hc) === :compiled && C.passon(hd) === :dynamic
+    @test C.passany(hc) === :compiled && C.passany(hd) === :dynamic
+    @test typeof(C.rekeep(hc)).parameters[2] === typeof(sq) && typeof(C.rekeep(hd)).parameters[2] <: Dynamic
+    @test getfield(hc, :f) === sq && hc.f(3.0) == 9.0 && hd.f(3.0) == 9.0      # `getfield` gives the stored value; a call is the checked call
+    @test_throws MethodError hc.f(3)
+    @test C.getx(hc) == C.getx(hd) == 2.0                                       # a family member with the kept read
     err = try
         toplevel(quote
             @trait_module module CarryBad

@@ -908,6 +908,16 @@ function _kept_at(::Type{X}, @nospecialize(x), ::Val{kn}) where {X,kn}
     return dyn ? Dynamic{X}(x) : getfield(Compiled{X}(x), :t)
 end
 
+"""
+    _read_kept(Callable{A, S}, x)
+
+A field kept at a struct parameter bounded by `Callable{A, S}`, read back with the attribute the
+parameter records (traits reference §7.4): a `Dynamic{Callable{A, S}}` as it is; the function itself
+(`Compiled`) as the function argument at the bound's signature, whose call is the checked call and
+which the next bound takes as `Compiled`.
+"""
+@inline _read_kept(::Type{Callable{A,S}}, @nospecialize(x)) where {A,S} = x isa HeldValue ? x : CObj{A,S}(x)
+
 "A function argument with several `Callable` bounds: one `CObj` per signature."
 function enter_callables(sigs::Tuple, @nospecialize(f), ::Val{kn}) where {kn}
     f isa CMulti && return f

@@ -232,6 +232,9 @@ function _istraitbound(mod::Module, B)
     v = _tryeval(mod, h)
     return v === Callable || (v isa Type && is_trait(v))
 end
+"This file: the methods it generates (a bounded struct's `getproperty`) are known by it."
+const _TRAIT_MODULE_FILE = @__FILE__
+
 "The name a struct parameter declares (`T`, `T <: Real`)."
 _paramname(p) = p isa Expr && p.head === :(<:) ? p.args[1] : p
 
@@ -378,7 +381,23 @@ function _bounded_struct(mod::Module, ex::Expr)
     sig = Expr(:call, name, args...)
     isempty(free) || (sig = Expr(:where, sig, free...))
     ctor = Expr(:function, sig, Expr(:block, stmts...))
-    return st, Expr(:toplevel, ctor, :($TraitWorld.bounded_constructor(::Type{<:$name}) = true))
+    out = Expr(:toplevel, ctor, :($TraitWorld.bounded_constructor(::Type{<:$name}) = true))
+    # a field kept at a parameter bounded by `Callable` reads back with the attribute the parameter
+    # records (traits reference §7.4): `getfield` gives the stored value
+    reads = Any[]
+    for (fname, ft) in fields
+        ft isa Symbol && haskey(bounds, ft) || continue
+        B = bounds[ft]
+        B isa Expr && B.head === :curly && _tryeval(mod, B.args[1]) === Callable || continue
+        push!(reads, :(n === $(QuoteNode(fname)) && return $TraitWorld._read_kept($B, getfield(s, $(QuoteNode(fname))))))
+    end
+    if !isempty(reads)
+        push!(out.args, :(Base.@constprop :aggressive @inline function Base.getproperty(s::$name{$(pnames...)}, n::Symbol) where {$(params...)}
+            $(reads...)
+            return getfield(s, n)
+        end))
+    end
+    return st, out
 end
 
 """
