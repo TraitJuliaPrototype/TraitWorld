@@ -617,9 +617,9 @@ function _classify(mod::Module, a, unbounded::Vector{Symbol} = Symbol[]; attr_bo
         ann isa Symbol && ann in unbounded && return _Arg(name, ann, :untyped, Any[], nothing, nothing, nothing)
         if ann isa Expr && ann.head === :tuple
             # an element may name the method's `where` variables (`(ValueProvider{U, P}, IndexProvider)`): evaluated
-            # with them open, as a single bound is (traits reference §5.1, §3.7)
-            evalopen(x) = (v = _tryeval(mod, x); v !== nothing ? v :
-                           (used = Any[w for w in wheres if _uses(x, _wherevar(w))]; isempty(used) ? nothing : _tryeval(mod, Expr(:where, x, used...))))
+            # with them open, as a single bound is (traits reference §5.1, §3.7); they shadow the module's globals
+            evalopen(x) = (used = Any[w for w in wheres if _uses(x, _wherevar(w))];
+                           isempty(used) ? _tryeval(mod, x) : _tryeval(mod, Expr(:where, x, used...)))
             vs = Any[evalopen(x) for x in ann.args]
             cps = Any[_callable_params(v) for v in vs]
             if all(c -> c !== nothing, cps)
@@ -650,10 +650,11 @@ function _classify(mod::Module, a, unbounded::Vector{Symbol} = Symbol[]; attr_bo
                 return _Arg(name, ann, :trait, traits, nothing, nothing, attr)
             end
         end
-        v = _tryeval(mod, ann)
+        # a `where` variable shadows a global of the module of the same name (LinearAlgebra's `I`), as in plain Julia
+        used = Any[w for w in wheres if _uses(ann, _wherevar(w))]
+        v = isempty(used) ? _tryeval(mod, ann) : nothing
         if v === nothing && ann isa Expr && ann.head === :curly
             # a bound that names a method's `where` variables (traits reference §5.1): evaluated with them open
-            used = Any[w for w in wheres if _uses(ann, _wherevar(w))]
             if !isempty(used)
                 h = _tryeval(mod, ann.args[1])
                 if (h === Callable || h === Compiled || h === Dynamic) && _callable_args_use(mod, ann, used)

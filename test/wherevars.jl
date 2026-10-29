@@ -61,3 +61,37 @@ end)
     end
     @test err isa LoadError && occursin("no other argument fixes", sprint(showerror, err))
 end
+
+# lowering L-49 (retired): a bound's `where` variable shadows a global of the module of the same name, as in
+# plain Julia (ODECore has LinearAlgebra's `I`; `IndexProvider{I}` was read as `IndexProvider{LinearAlgebra.I}`)
+toplevel(quote
+    @trait_module module WVShadow
+    using TraitWorld
+    using LinearAlgebra: I
+    export ixdyn
+    @trait SIx{K} begin
+        skey(x::Self)::Int
+    end
+    @trait SNamed begin
+        sname(x::Self)::String
+    end
+    struct SA; end
+    @implement SIx{Symbol} SA begin
+        skey(a) = 1
+    end
+    @implement SNamed SA begin
+        sname(a) = "a"
+    end
+    ixof(x::SIx{I}) where {I} = I
+    ixboth(x::(SIx{I}, SNamed)) where {I} = (I, sname(x))
+    ixdyn(x::Dynamic{SIx{I}}) where {I} = I
+    plainof(x::Vector{I}) where {I} = I
+    end
+end)
+@testset "lowering L-49: a where variable shadows a module global" begin
+    S = Main.WVShadow
+    @test S.plainof([1.0]) === Float64
+    @test S.ixof(S.SA()) === Symbol
+    @test S.ixboth(S.SA()) === (Symbol, "a")
+    @test S.ixdyn(S.SA()) === Symbol
+end
