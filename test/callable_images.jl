@@ -52,14 +52,15 @@ mktempdir() do dir
         ok, s = session("""
             using CallImg, TraitWorld
             const TW = TraitWorld
-            # the entry's instances with machine code, valid now, before any call
+            # the entry's instances with machine code, valid now, before any call (plain code, or the facts owner's
+            # under the facts image, where TraitWorld's code runs by facts)
             function native(m, pred)
                 n = 0
                 for mi in Base.specializations(m)
                     pred(mi.specTypes) || continue
                     ci = isdefined(mi, :cache) ? mi.cache : nothing
                     while ci isa Core.CodeInstance
-                        ci.owner === nothing && ci.max_world == typemax(UInt) && ci.invoke != C_NULL && (n += 1)
+                        (ci.owner === nothing || ci.owner === :facts) && ci.max_world == typemax(UInt) && ci.invoke != C_NULL && (n += 1)
                         ci = isdefined(ci, :next) ? ci.next : nothing
                     end
                 end
