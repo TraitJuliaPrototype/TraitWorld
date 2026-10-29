@@ -44,7 +44,7 @@ const _RARE_PATHS = [
     "_check_once" => "the first-call check: once per signature",
     "_umiss" => "first sight of a type at a table", "_pmiss" => "first sight of a type at a table",
     "_conf_family_slow" => "a family member's first use",
-    "_held_refused" => "an error path", "_rule3_error" => "an error path", "_cast_refuse" => "an error path",
+    "_rule3_error" => "an error path", "_cast_refuse" => "an error path",
     "_dyn_refuse" => "an error path", "_no_worker_error" => "an error path", "_closed_miss" => "an error path",
     "_dyn_nonconforming" => "an error path", "_like_return" => "only for a result like the input",
     "_like_out" => "only for a result like the input", "fallback(" => "the untyped fallback: a value without the traits",

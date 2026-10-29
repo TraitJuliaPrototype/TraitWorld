@@ -223,23 +223,13 @@ evaluated in the entry's own body. Specialized: for a known type it folds to the
 end
 """
 A kept value at a bound: seen through every trait its held object conforms to (traits reference §6.5),
-with its attribute. One whose object conforms to none of the position's traits is refused: it is a
-trait-world value, so it does not reach an ordinary fallback.
+with its attribute. One whose object conforms to none of the position's traits gives `NOTRAIT`: the
+call reaches the ordinary fallback with the kept value, as its plain object would (§5.5; open issue 127).
 """
 @inline function _enter_held(p::EntryPos, t::HeldValue)
-    v = t isa Dynamic ? _enter_erased(p, _dyn_held(t)) :
-        t isa Compiled ? _enter_compiled(p, _dyn_held(t)) :
-        getfield(t, :compiled) ? _enter_compiled(p, _dyn_held(t)) : _enter_erased(p, _dyn_held(t))
-    v === NOTRAIT && Base.inferencebarrier(_held_refused)(typeof(p), t)
-    return v
-end
-@noinline function _held_refused(@nospecialize(P), @nospecialize(t))
-    F, pos = P.parameters[1], P.parameters[2]
-    fname = isdefined(F, :instance) ? nameof(F.instance) : F
-    o = _dyn_held(t)
-    ot = o isa TObj ? "a trait object" : string(typeof(o))
-    throw(TraitBoundError("`$fname`, argument $pos: $(typeof(t)) holds $ot, which conforms to none of the traits the " *
-                          "bounds there name (traits reference §6.5)"))
+    return t isa Dynamic ? _enter_erased(p, _dyn_held(t)) :
+           t isa Compiled ? _enter_compiled(p, _dyn_held(t)) :
+           getfield(t, :compiled) ? _enter_compiled(p, _dyn_held(t)) : _enter_erased(p, _dyn_held(t))
 end
 "The trait object at its key of a plain value: a container crossing where the position asks (§13.1); the whole object kept where the worker may keep it."
 @inline function _enter_compiled(p::EntryPos{F}, t) where {F}

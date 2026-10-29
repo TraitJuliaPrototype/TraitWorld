@@ -18,6 +18,8 @@ toplevel(quote
     end
     ckind(c::CCol) = :plain
     ckind(c::(CCol, CPooled)) = :pooled
+    hasmass(c::CCol) = true
+    hasmass(x) = false                          # the fallback: also for a kept value of another trait (open issue 127)
     ccount(f::Callable{Tuple{T}, Bool}, xs::Iterable{T}) where {T} = (n = 0; for x in xs; f(x) && (n += 1); end; n)
     # a `Dynamic` bound whose parameter a `where` variable fixes (traits reference §5.1)
     @trait CCells{T} begin
@@ -44,7 +46,15 @@ end)
     M = Main.CapT
     cols = Dynamic{M.CCol}[Dynamic{M.CCol}(Main.CPlainCol([1.0])), Dynamic{M.CCol}(Main.CPoolCol([1, 2]))]
     @test [Base.invokelatest(M.ckind, c) for c in cols] == [:plain, :pooled]   # selected by the held object
-    @test_throws TraitBoundError Base.invokelatest(M.ckind, Dynamic{M.CShape}(Main.CCircle(1.0)))
+    # a kept value whose object conforms to none of the bounds' traits reaches the fallback, as its object would
+    # (traits reference §5.5, §6.5; open issue 127): here none, so `MethodError`, as for a plain `CCircle`
+    @test_throws MethodError Base.invokelatest(M.ckind, Dynamic{M.CShape}(Main.CCircle(1.0)))
+    @test_throws MethodError Base.invokelatest(M.ckind, Main.CCircle(1.0))
+    for k in (Dynamic{M.CShape}(Main.CCircle(1.0)), Compiled{M.CShape}(Main.CCircle(1.0)), Kept{M.CShape}(Main.CCircle(1.0)))
+        @test Base.invokelatest(M.hasmass, k) === false
+    end
+    @test Base.invokelatest(M.hasmass, Main.CCircle(1.0)) === false
+    @test Base.invokelatest(M.hasmass, Dynamic{M.CCol}(Main.CPlainCol([1.0]))) === true
     g = Dynamic{Callable{Tuple{Int}, Int}}(x -> 2x)
     @test Base.invokelatest(M.sigf, g, 1.5) == 3.0                             # a method at the new signature
     @test_throws TraitBoundError Base.invokelatest(M.sigs, g, "a")             # none with a result of that type
