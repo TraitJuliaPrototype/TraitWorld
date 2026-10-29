@@ -106,6 +106,18 @@ function _strip_nospecialize!(nospec::Set{Any}, a)
     push!(nospec, nm isa Expr && nm.head === :(::) ? nm.args[1] : nm)
     return inner
 end
+"An argument `name::Opened{X}` (or with a default) as `name::X`, its name recorded in `opened`."
+function _strip_opened!(opened::Vector{Symbol}, mod::Module, @nospecialize(a))
+    if a isa Expr && a.head === :kw
+        return Expr(:kw, _strip_opened!(opened, mod, a.args[1]), a.args[2])
+    end
+    a isa Expr && a.head === :(::) && length(a.args) == 2 || return a
+    T = a.args[2]
+    (T isa Expr && T.head === :curly && length(T.args) == 2 && _tryeval(mod, T.args[1]) === Opened) || return a
+    a.args[1] isa Symbol || error("@trait_module: an `Opened` argument needs a name")
+    push!(opened, a.args[1])
+    return Expr(:(::), a.args[1], T.args[2])
+end
 "Each `return x` in `ex` as `return x::R` (not inside a nested function)."
 _assert_returns(@nospecialize(ex), @nospecialize(R)) =
     !(ex isa Expr) || ex.head in (:function, :->, :quote) ? ex :
@@ -379,7 +391,7 @@ value kept with its attribute; `Dynamic{X}` and `Compiled{X}` written out stay t
 function _dyn_type(mod::Module, T, arg::Bool = false, inner::Bool = false)
     kept(X) = arg && inner ? Expr(:(<:), :($TraitWorld.HeldValue{$X})) : :($TraitWorld.Kept{$X})
     _iskepttype(mod, T) && return T                          # `Kept{X}`, `HeldValue{X}`: already the storage type
-    T isa Expr && T.head === :curly && (h0 = _tryeval(mod, T.args[1]); h0 === Dynamic || h0 === Compiled) && return T
+    T isa Expr && T.head === :curly && (h0 = _tryeval(mod, T.args[1]); h0 === Dynamic || h0 === Compiled || h0 === Opened) && return T   # `Opened{X}`: a bound
     if T isa Symbol || (T isa Expr && T.head === :.)
         v = _tryeval(mod, T)
         return (v isa Type && is_trait(v)) ? kept(T) : T
@@ -485,7 +497,7 @@ function _dyn_body(mod::Module, x)
     x.head in (:quote, :inert, :meta) && return x
     if x.head in (:ref, :typed_vcat, :typed_hcat, :typed_comprehension) && _istraittype(mod, x.args[1])
         return Expr(x.head, :($TraitWorld.Kept{$(x.args[1])}), Any[_dyn_body(mod, a) for a in x.args[2:end]]...)
-    elseif x.head === :curly && (_isattribute(mod, x.args[1]) || _iskepttype(mod, x))
+    elseif x.head === :curly && (_isattribute(mod, x.args[1]) || _iskepttype(mod, x) || _tryeval(mod, x.args[1]) === Opened)
         return x                                     # `Dynamic{X}(t)`, `::Compiled{X}`, `Kept{X}(t)`: a type, not storage
     elseif x.head === :(::) && length(x.args) == 2 && _has_attributed(mod, x.args[2])
         return Expr(:(::), _dyn_body(mod, x.args[1]), x.args[2])   # a type assertion: written as it is meant, not storage
@@ -834,6 +846,9 @@ function _rewrite_fdef(mod::Module, ex)
     # as written, and kept on the entry's and the worker's argument
     nospec = Set{Any}()
     rawargs = Any[_strip_nospecialize!(nospec, a) for a in rawargs]
+    # `c::Opened{X}`: the bound `X`, the value opened at the entry (traits reference §6.4)
+    opened = Symbol[]
+    rawargs = Any[_strip_opened!(opened, mod, a) for a in rawargs]
     unbounded = Symbol[w for w in wheres if w isa Symbol && !any(a -> _bound_names(mod, a, w), rawargs)]
     attr_bounds = !_is_operation_function(mod, fname)
     args = [_classify(mod, a, unbounded; attr_bounds, wheres) for a in rawargs]
@@ -1246,6 +1261,9 @@ function _rewrite_fdef(mod::Module, ex)
             push!(rest, :(isdefined(@__MODULE__, :__tw_untyped__) && push!(__tw_untyped__, ($fname, $nargs, $tag(), $(Tuple(tpos))))))
         end
         pushfirst!(stmts, Expr(:meta, :facts_boundary))
+        for nm in opened
+            insert!(stmts, 2, :($nm = $TraitWorld.compiled_for($nm)))
+        end
         # the declared result on the entry too, where it is a plain type or a `Dynamic{X}`: a caller's
         # plain inference (the member check's, a plain caller's) then sees it, not the entry's `Any`. Asserted at each
         # `return`, not converted: the worker returns the declared type already, and a conversion of a result typed

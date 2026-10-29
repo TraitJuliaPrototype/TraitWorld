@@ -15,7 +15,7 @@ using Serialization: Serialization
 include("report.jl")
 
 export @joint_owners
-export Trait, Callable, TObj, Dynamic, Compiled, Kept, compiled_for, with_dynamic,
+export Trait, Callable, TObj, Dynamic, Compiled, Kept, Opened, compiled_for, with_dynamic,
        @trait, @implement, @trait_module, @workload,
        TraitBoundError, TraitUseError, ImplementError, OwnershipError, verify_main, isclosed,
        @enforce_concrete_only, @warn_on_abstract, @enforce_fully_typed, @warn_not_fully_typed, @error_on_abstract, AbstractTypeError, check_fully_typed, check_definitions, conforms, withfields,

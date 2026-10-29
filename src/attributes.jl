@@ -197,6 +197,11 @@ end
 struct WithDynamic
     x::Any
 end
+# a cast of a cast mark (traits reference §6.4): the same attribute returns it unchanged; the later cast wins
+compiled_for(c::CompiledFor) = c
+compiled_for(w::WithDynamic) = compiled_for(w.x)
+with_dynamic(w::WithDynamic) = w
+with_dynamic(c::CompiledFor) = with_dynamic(c.x)
 # plain code's casts meet a held form: kept where the attribute matches, refused otherwise (constructors never cast)
 Compiled{X}(c::CompiledFor) where {X} = Compiled{X}(getfield(c, :x))
 Dynamic{X}(w::WithDynamic) where {X} = Dynamic{X}(getfield(w, :x))
@@ -346,3 +351,12 @@ operations, so they are not bounded functions.
 is_operation_function(@nospecialize(f)) = false
 "Whether the function a definition names is an operation's function."
 _is_operation_function(mod::Module, @nospecialize(fname)) = (f = _tryeval(mod, fname); f !== nothing && is_operation_function(f))
+
+"""
+    Opened{X}
+
+A bound in a trait module that opens its value at the entry (traits reference §6.4): `f(c::Opened{Column})` is
+`f(c::Column)` whose entry first casts `c = compiled_for(c)`, so a `Dynamic` or kept value runs the code compiled
+for its key, one dispatch per call, as if every caller had written the cast. Only an annotation: no value has this type.
+"""
+struct Opened{X} end

@@ -164,3 +164,41 @@ end
     @test Base.invokelatest(g(:asix), Base.invokelatest(g(:Names), [:a])) isa Dynamic{g(:Ix)}
     @test all(==(Dynamic{g(:Ix)}), Base.invokelatest(Base.return_types, g(:asix), (Any,)))
 end
+
+@testset "a bound that opens its value: Opened{X} (traits §6.4, open issue 98)" begin
+    toplevel(quote
+        @trait_module module OpenedBound
+        using TraitWorld
+        export OSh, oarea, OSq, OCirc, total_open, total_plain
+        @trait OSh begin
+            oarea(s::OSh)::Float64
+        end
+        struct OSq; a::Float64; end
+        struct OCirc; r::Float64; end
+        @implement OSh OSq begin oarea(s) = s.a^2 end
+        @implement OSh OCirc begin oarea(s) = 3.0 * s.r^2 end
+        total_open(s::Opened{OSh})::Float64 = oarea(s) + oarea(s)       # the callee opens its value
+        total_plain(s::OSh)::Float64 = oarea(s) + oarea(s)              # a Dynamic value stays Dynamic
+        end
+    end)
+    M = Base.invokelatest(getglobal, Main, :OpenedBound)
+    g(s) = Base.invokelatest(getglobal, M, s)
+    OSh, OSq, OCirc = g(:OSh), g(:OSq), g(:OCirc)
+    topen, tplain = g(:total_open), g(:total_plain)
+    shapes = Dynamic{OSh}[Dynamic{OSh}(OSq(2.0)), Dynamic{OSh}(OCirc(1.0))]
+    @test Base.invokelatest(topen, shapes[1]) == 8.0 && Base.invokelatest(topen, shapes[2]) == 6.0
+    @test Base.invokelatest(topen, OSq(3.0)) == 18.0                                   # a plain value
+    @test Base.invokelatest(topen, compiled_for(OSq(3.0))) == 18.0                     # a caller's cast as well
+    @test Base.invokelatest(topen, with_dynamic(OSq(3.0))) == 18.0
+    @test Base.invokelatest(tplain, shapes[1]) == 8.0
+    # the Dynamic value ran code compiled for its key: a worker specialization names the square's type
+    specs(f) = [string(mi.specTypes) for m in methods(f) for mi in Base.specializations(m) if mi isa Core.MethodInstance]
+    @test any(s -> occursin("OSq", s), specs(topen))
+    @test !any(s -> occursin("OSq", s) && !occursin("CompiledFor", s), specs(tplain))  # Dynamic: the erased key
+    # casts of cast marks: the same attribute unchanged, the later cast wins (traits §6.4)
+    x = OSq(1.0)
+    @test compiled_for(compiled_for(x)) === compiled_for(x)
+    @test with_dynamic(with_dynamic(x)) === with_dynamic(x)
+    @test compiled_for(with_dynamic(x)) === compiled_for(x)
+    @test with_dynamic(compiled_for(x)) === with_dynamic(x)
+end
