@@ -28,7 +28,7 @@ Every suite of the design repository, with this package's under both settings, r
 
 | Variable | Effect |
 |---|---|
-| `JULIA_TW_STRICT=1` | strict mode on ([facts §10](../writeup/reference/facts.md#10-pirates-and-strict-mode)); also `TraitWorld.strict!()` |
+| `JULIA_TW_STRICT=1` | strict mode on ([facts §10](../attic/writeup/reference/facts.md#10-pirates-and-strict-mode)); also `TraitWorld.strict!()` |
 | `JULIA_TW_ALL_FRAMES=1` | error backtraces keep TraitWorld's own frames |
 | `JULIA_TW_DEBUG=1` | the machinery's slow paths print as they run |
 | `JULIA_TW_DEFCHECK=0` | no definition checking at a trait module's end (for measurement) |
