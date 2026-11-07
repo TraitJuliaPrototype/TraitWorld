@@ -3,5 +3,9 @@ uuid = "7a3c1e52-9b4d-4f6e-8a21-5d0c3b9e7f14"
 authors = ["trait-bound PoC"]
 version = "0.2.0"
 
+[deps]
+Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+
 [compat]
 julia = "1.13"

@@ -46,6 +46,12 @@ include("hints.jl")
 include("strict.jl")
 include("ahead.jl")
 
+# BaseTraits (traits §10): a module of the library, its names exported with the library's
+include("BaseTraits.jl")
+using .BaseTraits
+export HasLength, Iterable, Indexable, MutableIndexable, Resizable, Keyed, Solvable,
+       LinearOp, apply!, BoundedText, textbound, asvector, IndexableVector, retain!
+
 function __init__()
     # the member hook (compiler §10.4): a member of a pattern is checked at its first use
     ccall(:jl_set_member_hook, Cvoid, (Any,), _member_hook)

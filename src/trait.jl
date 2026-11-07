@@ -67,7 +67,7 @@ function _trait(mod::Module, head, body)
         arities[k] = get(arities, k, 0) + 1
     end
     for op in items.ops
-        push!(out.args, _trait_method(name, params, bounds, op, arities[(op.fname, length(op.args))] > 1))
+        push!(out.args, _trait_method(name, params, bounds, op, arities[(op.fname, length(op.args))] > 1, items.inputs))
         # its declared result, covering every member (compiler §6.8), unless it names Self
         _mentions(op.result, :Self) && continue
         push!(out.args, Expr(:latestworld),
@@ -204,6 +204,11 @@ function _parse_op(trait::Symbol, sig, body)
     (Meta.isexpr(sig, :(::)) && length(sig.args) == 2 && Meta.isexpr(sig.args[1], :call)) ||
         error("@trait $trait: an operation declares its result type, f(x::$trait, …)::R; got $sig")
     call, result = sig.args[1], sig.args[2]
+    # `f(…)::R where {D}` parses as `f(…)::(R where {D})`: the grammar's `where` is the operation's
+    while Meta.isexpr(result, :where)
+        append!(wherevars, result.args[2:end])
+        result = result.args[1]
+    end
     fname = call.args[1]
     (fname isa Symbol || Meta.isexpr(fname, :.)) || error("@trait $trait: an operation's name is f or Module.f: $fname")
     args = Pair{Symbol,Any}[]
@@ -252,7 +257,12 @@ _subst(ex, s::Symbol, by) = ex === s ? by : ex isa Expr ? Expr(ex.head, Any[_sub
 # type where it binds a parameter or one of the operation's own `where` variables, or where two
 # declarations of the operation at one arity differ (traits §4.1). The checks use the declared
 # types (traits §5.10).
-function _trait_method(trait::Symbol, params::Vector{Symbol}, bounds::Vector{Any}, op, overloaded::Bool = false)
+# A further argument keeps its declared type only where it binds an input parameter or one of the
+# operation's own `where` variables, or where two declarations at one arity differ (lowering §2): a
+# parameter the receiver fixes (an equation of Self, or the instance a membership states) is bound by
+# the receiver, so a member's own method, typed loosely there, still wins
+function _trait_method(trait::Symbol, params::Vector{Symbol}, bounds::Vector{Any}, op, overloaded::Bool = false,
+                       inputs::Vector{Symbol} = Symbol[])
     lib(s) = GlobalRef(@__MODULE__, s)
     full = isempty(params) ? trait : Expr(:curly, trait, params...)
     args = copy(op.args)
@@ -264,7 +274,7 @@ function _trait_method(trait::Symbol, params::Vector{Symbol}, bounds::Vector{Any
     for (i, (nm, ty)) in enumerate(args)
         ty = ty === nothing ? nothing : _subst(ty, :Self, full)
         if i != op.receiver && ty !== nothing && !overloaded &&
-           !any(p -> _mentions(ty, p), params) && !any(w -> _mentions(ty, w), wnames)
+           !any(p -> _mentions(ty, p), inputs) && !any(w -> _mentions(ty, w), wnames)
             ty = nothing
         end
         a = ty === nothing ? nm : Expr(:(::), nm, ty)

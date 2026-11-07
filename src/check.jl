@@ -171,12 +171,28 @@ function _check_contract!(problems, c::Contract, env, @nospecialize(S), @nospeci
             if m === nothing
                 # a default serves the operation at S: recorded for the override rule (traits §5.11)
                 op.hasdefault && (defaults === nothing || push!(defaults, (c.trait, op.f, tt)); continue)
-                push!(problems, "no method serves $(_declared(op, c)) at $S$(_near(op, R))")
+                h = _hidden_method(op, tt)
+                if h !== nothing
+                    push!(problems, "$(op.name)'s method $(h.sig) takes any receiver, so the trait's method, more specific, " *
+                                    "would hide it: define $(op.name) at $S")
+                else
+                    push!(problems, "no method serves $(_declared(op, c)) at $S$(_near(op, R))")
+                end
+                continue
+            end
+            if _untyped_receiver(m, op)
+                # a method that takes any receiver loses to the trait's method, or is ambiguous with it,
+                # once S is a member (traits §6.2; open issue 150)
+                push!(problems, "$(op.name)'s method $(m.sig) takes any receiver, so the trait's method, more specific, " *
+                                "would hide it: define $(op.name) at $S")
                 continue
             end
             own = true
             declared = try _eval_in(c, op.result, env, R) catch; nothing end
             declared isa Type || continue
+            # at a further argument declared abstract (an iteration state, say), inference says little:
+            # the method's existence is checked, and each call through the trait asserts the result (§7.9)
+            any(i -> i != op.receiver && !isconcretetype(tt.parameters[i]), 1:length(tt.parameters)) && continue
             rt = Base.infer_return_type(op.f, tt)
             rt <: declared ||
                 push!(problems, "$(op.name)'s method at $S infers its result as $rt, wider than the declared $(op.result) = $declared")
@@ -184,6 +200,18 @@ function _check_contract!(problems, c::Contract, env, @nospecialize(S), @nospeci
     end
     complete_env && S isa DataType && _check_fields!(problems, c, env, S)
     return own
+end
+
+function _where_env(c::Contract, op::OperationDecl, env, @nospecialize(R))
+    env2 = Dict{Symbol,Any}(env)
+    for w in op.wherevars
+        if w isa Symbol
+            env2[w] = Any
+        elseif Meta.isexpr(w, :<:) && w.args[1] isa Symbol
+            env2[w.args[1]] = _eval_in(c, w.args[2], env2, R)
+        end
+    end
+    return env2
 end
 
 # The call's argument types: the receiver at R, the others as declared.
@@ -194,8 +222,10 @@ function _call_types(c::Contract, op::OperationDecl, env, @nospecialize(R))
             push!(ts, R)
         else
             t = ty === nothing ? Any : try
-                ty2 = isempty(op.wherevars) ? ty : ty
-                _eval_in(c, ty2, env, R)
+                # the operation's own `where` variables at their bounds: a variable the trait's parameters
+                # do not fix is checked at its widest (`get(d, k, default::D) where {D}`)
+                env2 = isempty(op.wherevars) ? env : _where_env(c, op, env, R)
+                _eval_in(c, ty, env2, R)
             catch
                 return nothing
             end
@@ -207,19 +237,40 @@ function _call_types(c::Contract, op::OperationDecl, env, @nospecialize(R))
     return Tuple{ts...}
 end
 
-# The method that serves the operation at the call types, other than the trait's own method.
+# The method that serves the operation at the call types, other than the trait's own method. At a further
+# argument declared abstract (an iteration state), a method that meets the declared signature serves:
+# the member's own state is narrower (traits §5.10)
 function _serving_method(op::OperationDecl, @nospecialize(tt))
-    ms = Base._methods_by_ftype(Tuple{Core.Typeof(op.f), tt.parameters...}, -1, Base.get_world_counter())
+    open = any(i -> i != op.receiver && !isconcretetype(tt.parameters[i]), 1:length(tt.parameters))
+    return _first_serving(Tuple{Core.Typeof(op.f), tt.parameters...}, Base.get_world_counter(), !open)
+end
+# whether a serving method's argument at the receiver's position is untyped (`Any`)
+function _untyped_receiver(m::Method, op::OperationDecl)
+    sig = Base.unwrap_unionall(m.sig)
+    (sig isa DataType && op.receiver + 1 <= length(sig.parameters)) || return false
+    p = sig.parameters[op.receiver + 1]
+    Base.isvarargtype(p) && (p = Base.unwrapva(p))
+    p isa TypeVar && (p = p.ub)
+    return p === Any
+end
+# A method untyped at the receiver (a function's fallback, `mul!(C, A, B)`) that would serve the
+# operation but that the trait's method, more specific there, hides (open issue 150)
+function _hidden_method(op::OperationDecl, @nospecialize(tt))
+    ps = Any[tt.parameters...]
+    op.receiver <= length(ps) || return nothing
+    ps[op.receiver] = Any
+    return _first_serving(Tuple{Core.Typeof(op.f), ps...}, Base.get_world_counter())
+end
+function _first_serving(@nospecialize(T), world::UInt, covers::Bool = true)
+    ms = Base._methods_by_ftype(T, -1, world)
     ms isa Vector || return nothing
-    best = nothing
     for match in ms
         m = (match::Core.MethodMatch).method
         _is_trait_method(m) && continue
-        match.fully_covers || continue
-        best = m
-        break
+        (match.fully_covers || !covers) || continue
+        return m
     end
-    return best
+    return nothing
 end
 
 # a trait's method calls _fwd on its receiver (lowering §2); no other method does
