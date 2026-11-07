@@ -22,6 +22,20 @@ falls short of them, the references' Deviations tables say so.
   hook at dispatch.
 - `Dynamic{X}`, `unwrap`, `like`, `withfields`.
 
+## What later stages added
+
+- W-109: the classification of methods as fully bounded or open; `check_definitions`.
+- W-111: the attribute (`Compiled`, `Dynamic`), the casts and `keep` (Julia's), `@trait_module`,
+  `detect_dynamic_fallbacks`, `detect_unused_casts`.
+- W-113: `Callable{A, S}` (Julia's), `Dynamic{Callable{A, S}}`.
+- W-114: fully typed mode (`@enforce_fully_typed`, `@warn_not_fully_typed`, `fully_typed`,
+  `isfullytyped`), concrete parts (`@enforce_concrete_only`, `@warn_on_abstract`); ownership
+  (`@joint_owners`, `OwnershipError`) and pirates; strict mode (`TraitWorld.strict!`,
+  `JULIA_TW_STRICT=1`, `PirateError`); hints on `MethodError`; compiling ahead while a package is
+  precompiled (`JULIA_TW_AHEAD=0` turns it off); `verify_main`; BaseTraits (`HasLength`,
+  `Iterable`, `Indexable`, `MutableIndexable`, `Resizable`, `Keyed`, `Solvable`, `LinearOp`,
+  `BoundedText`, `asvector`, `retain!`).
+
 ## Running
 
 ```sh
