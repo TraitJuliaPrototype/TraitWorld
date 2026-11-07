@@ -85,6 +85,10 @@ function _trait(mod::Module, head, body)
         Symbol[$(QuoteNode.(params)...)], Any[$(QuoteNode.(bounds)...)], Symbol[$(QuoteNode.(items.inputs)...)],
         Any[$(QuoteNode.(supers)...)], $(lib(:OperationDecl))[$(opdecls...)],
         $(lib(:FieldDecl))[$(fielddecls...)], Pair{Symbol,Any}[$(eqs...)], $(QuoteNode(items.attribute))))))
+    # the trait's default attribute (traits §4.6), read by the compiler at a trait argument (§6.3)
+    items.attribute === :none ||
+        push!(out.args, :(ccall(:jl_set_default_attribute, Cvoid, (Any, Cint), $name,
+                                $(items.attribute === :dynamic ? 2 : 1))))
     # the declared fields' names and types, read by inference (compiler §7.1)
     isempty(items.fields) || push!(out.args, :($(lib(:_set_declared_fields!))($name, $mod,
         Symbol[$([QuoteNode(f[1]) for f in items.fields]...)], Any[$([QuoteNode(f[2]) for f in items.fields]...)])))

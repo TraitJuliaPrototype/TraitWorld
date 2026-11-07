@@ -1,6 +1,6 @@
-# Dynamic{X}: a member of X kept with the attribute `Dynamic` (traits §7.7; lowering §7).
-# The reference puts the struct in Core (for `keep`, W-111); until then it is the library's
-# (lowering L-51).
+# Dynamic{X}: a member of X kept with the attribute `Dynamic` (traits §7.7; lowering §7). The struct
+# is Julia's `Core.Dynamic`, so that the compiler can make one for `keep`; the library declares its
+# memberships (each trait's, at `@trait`) and defines its methods here.
 
 """
     Dynamic{X}(x)
@@ -9,22 +9,7 @@ A member `x` of the trait `X`, held so that code for it is compiled once: its op
 dispatch on the held object when they run, with their declared results. `X` is a trait with its
 parameters. `Dynamic{X}` is a member of `X` and of `X`'s supertraits only.
 """
-struct Dynamic{X}
-    object::X
-    function Dynamic{X}(@nospecialize(x)) where {X}
-        X isa UnionAll &&
-            throw(ArgumentError("Dynamic{$X} needs the trait's parameters, as in Dynamic{$(_with_params(X))}"))
-        x isa Dynamic && (x = getfield(x, :object))
-        x isa X || throw(TypeError(:Dynamic, "", X, x))
-        return new{X}(x)
-    end
-end
-
-function _with_params(@nospecialize(X))
-    c = contract(X)
-    c === nothing && return string(X)
-    return string(bare(X), "{", join(c.params, ", "), "}")
-end
+const Dynamic = Core.Dynamic
 
 """
     unwrap(d::Dynamic)

@@ -12,7 +12,12 @@ isdefined(Core, :MembershipEntry) ||
     error("TraitWorld needs Julia's unified build, whose type system has memberships")
 
 export @trait, @implement, Dynamic, unwrap, like, withfields, ImplementError, TraitUseError,
-       @bounded, @open, check_definitions, classify
+       @bounded, @open, check_definitions, classify, @trait_module, compiled_for, with_dynamic, keep,
+       detect_dynamic_fallbacks, detect_unused_casts
+
+# the casts and `keep` (traits §7.6, §7.8): Julia's own, re-exported; the casts' names are reserved,
+# so they are imported, never assigned
+import Core: compiled_for, with_dynamic, keep
 
 # Intersections All{X, Y, …} (traits §3.6): Core does not export the name, and the library does,
 # so a module that also uses DataAPI's `All` qualifies one of them (open issue 148)
@@ -30,6 +35,7 @@ include("check.jl")
 include("implement.jl")
 include("like.jl")
 include("classify.jl")
+include("scope.jl")
 
 function __init__()
     # the member hook (compiler §10.4): a member of a pattern is checked at its first use
