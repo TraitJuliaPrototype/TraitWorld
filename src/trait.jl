@@ -98,6 +98,8 @@ function _trait(mod::Module, head, body)
                    init = :(Core.UnionAll($Z, $(lib(:Dynamic)){$Z})))
     push!(out.args, Expr(:let, Expr(:block, tvdefs..., :($Z = Core.TypeVar($(QuoteNode(:Z)), $T))),
         :($(lib(:_declare!))($dynpat, $T, $mod, :object, :field))), Expr(:latestworld))
+    # a docstring written before `@trait` documents the trait's binding
+    push!(out.args, :(Core.@__doc__ $name))
     push!(out.args, nothing)
     return esc(out)
 end

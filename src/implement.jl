@@ -96,8 +96,12 @@ function _implement!(mod::Module, traits::Vector{Any}, @nospecialize(member), by
             push!(added, Base.invokelatest(_implement_one!, mod, X, member, how)...)
         end
     catch
-        foreach(Base.delete_method, defined)
-        foreach(Base.delete_method, added)
+        # a refused membership takes its block's methods away; while an image is built a method cannot
+        # be deleted, and the error fails the build
+        if ccall(:jl_generating_output, Cint, ()) == 0
+            foreach(Base.delete_method, defined)
+            foreach(Base.delete_method, added)
+        end
         rethrow()
     end
     return nothing
@@ -291,7 +295,7 @@ function _define_block!(mod::Module, traits::Vector{Any}, @nospecialize(member),
             end
         end
     catch
-        foreach(Base.delete_method, defined)
+        ccall(:jl_generating_output, Cint, ()) == 0 && foreach(Base.delete_method, defined)
         rethrow()
     end
     return defined

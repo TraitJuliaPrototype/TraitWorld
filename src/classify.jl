@@ -54,6 +54,7 @@ end
 
 # the trait a value of type T is known by: a trait instance or an intersection, not a concrete member
 function _trait_of(@nospecialize(T))
+    T isa Core.TypeofVararg && (T = Base.unwrapva(T))   # a splatted call's tail: its element's type
     T = CC.widenconst(T)
     (isconcretetype(T) || !(T isa Type)) && return nothing
     u = Base.unwrap_unionall(T)
@@ -62,8 +63,44 @@ function _trait_of(@nospecialize(T))
     return T
 end
 
+# whether the call stores the argument `k` (known by the trait `X`) in a slot typed by `X` or a
+# supertype: a field (`setproperty!`, `setfield!`), an element (`push!`, `pushfirst!`, `setindex!`)
+function _stores_in_slot(@nospecialize(f), argtypes::Vector{Any}, k::Int, @nospecialize(X))
+    if (f === setproperty! || f === setfield!) && k == 4 && length(argtypes) >= 4
+        T = CC.widenconst(argtypes[2])
+        name = argtypes[3]
+        (name isa CC.Const && (name.val isa Symbol || name.val isa Int) && T isa DataType && isconcretetype(T)) || return false
+        Base.fieldindex(T, name.val, false) == 0 && return false
+        return X <: fieldtype(T, name.val)
+    elseif (f === push! || f === pushfirst!) && k >= 3
+        V = CC.widenconst(argtypes[2])
+        return V <: AbstractArray && X <: eltype(V)
+    elseif f === setindex! && k == 3
+        V = CC.widenconst(argtypes[2])
+        return V <: AbstractArray && X <: eltype(V)
+    end
+    return false
+end
+
+# whether `f` is a function of `Self` that an equation of the trait `X` or a supertrait names,
+# `P = f(Self)`
+function _equation_function(@nospecialize(X), @nospecialize(f))
+    for (c, _) in _contracts_of(X), (_, e) in c.equations
+        (Meta.isexpr(e, :call) && length(e.args) == 2 && e.args[2] === :Self) || continue
+        g = try
+            Core.eval(c.mod, e.args[1])
+        catch
+            nothing
+        end
+        g === f && return true
+    end
+    return false
+end
+
 # whether the call of `f` at `argtypes` stays in the contract of the traits its arguments are known by
 function _in_contract(interp::ClassifyInterp, @nospecialize(f), argtypes::Vector{Any}, k::Int, @nospecialize(X))
+    # a splat of values known by a trait: not a call of the contract's (traits §7.3)
+    any(a -> a isa Core.TypeofVararg, argtypes) && return false
     atype = CC.argtypes_to_type(argtypes)
     # an operation of the trait or a supertrait, or a declared field: the compiler's rule
     CC.declared_operation_result(interp, argtypes, atype) === nothing || return true
@@ -75,6 +112,12 @@ function _in_contract(interp::ClassifyInterp, @nospecialize(f), argtypes::Vector
     end
     # keeping it with its attribute (traits §7.8), or a cast's unwrapping of a `Dynamic{X}`
     (f === Core.keep || f === Core._cast_compiled) && return true
+    # storing it in a slot typed by the trait or a supertype (traits §7.3): a field, or an element of a
+    # container
+    _stores_in_slot(f, argtypes, k, X) && return true
+    # a function of `Self` that one of the trait's equations names, called on it: `eltype(t)` where
+    # the trait defines `T = eltype(Self)` (traits §7.3); its value is the member's
+    k == 2 && length(argtypes) == 2 && _equation_function(X, f) && return true
     if f isa Core.Builtin
         # `===` and `isa` against the trait or a supertrait; asserting it to such a type
         f === (===) && return true
@@ -111,6 +154,10 @@ end
 
 function _record_use!(interp::ClassifyInterp, @nospecialize(f), argtypes::Vector{Any}, sv::CC.AbsIntState)
     sv isa CC.InferenceState || return nothing
+    # uses count in the method and the functions of its module it is followed into; a call into
+    # another module is judged where it is made (traits §7.3)
+    d = sv.linfo.def
+    (d isa Method && d.module === interp.mod) || return nothing
     for k in 2:length(argtypes)
         X = _trait_of(argtypes[k])
         X === nothing && continue
@@ -247,7 +294,9 @@ function _check_bounded(m::Method)
     _bounded(m) || return nothing
     uses = classify(m)
     isempty(uses) && return nothing
-    Base.delete_method(m)
+    # the refused method goes; while an image is built a method cannot be deleted, and the error
+    # fails the build
+    ccall(:jl_generating_output, Cint, ()) == 0 && Base.delete_method(m)
     lines = ["$(u.what) at line $(u.line) is not in the contract of $(u.trait)" for u in uses]
     throw(TraitUseError("$(m.name) is declared bounded, and is open:\n  " * join(lines, "\n  ")))
 end

@@ -53,9 +53,41 @@ end
 "the trait's bare type: `X` for `X{Int}`"
 bare(@nospecialize(X)) = (Base.unwrap_unionall(X)::DataType).name.wrapper
 
-# Evaluate a type expression of the contract with the parameters' values and `Self` bound.
+# Evaluate a type expression of the contract with the parameters' values and `Self` bound. The
+# forms contracts use (names, `X{…}`, calls such as `eltype(Self)`, `M.name`) are evaluated without
+# `eval`: a membership checked while another package's image is built may not evaluate into the
+# trait's module. Any other form falls back to `eval` there.
 function _eval_in(c::Contract, @nospecialize(ex), env::AbstractDict{Symbol}, @nospecialize(self))
+    v = _eval_pure(c.mod, ex, env, self)
+    v isa _NotPure || return v
     binds = Any[Expr(:(=), p, QuoteNode(v)) for (p, v) in env]
     self === nothing || push!(binds, Expr(:(=), :Self, QuoteNode(self)))
     return Core.eval(c.mod, Expr(:let, Expr(:block, binds...), ex))
+end
+
+struct _NotPure end
+
+function _eval_pure(mod::Module, @nospecialize(ex), env::AbstractDict{Symbol}, @nospecialize(self))
+    if ex isa Symbol
+        ex === :Self && self !== nothing && return self
+        haskey(env, ex) && return env[ex]
+        return isdefined(mod, ex) ? getglobal(mod, ex) : _NotPure()
+    elseif ex isa QuoteNode
+        return ex.value
+    elseif !(ex isa Expr)
+        return ex
+    elseif ex.head === :. && length(ex.args) == 2 && ex.args[2] isa QuoteNode
+        m = _eval_pure(mod, ex.args[1], env, self)
+        m isa _NotPure && return m
+        return getproperty(m, ex.args[2].value)
+    elseif ex.head === :curly || ex.head === :call
+        args = Any[]
+        for a in ex.args
+            v = _eval_pure(mod, a, env, self)
+            v isa _NotPure && return v
+            push!(args, v)
+        end
+        return ex.head === :curly ? Core.apply_type(args...) : args[1](args[2:end]...)
+    end
+    return _NotPure()
 end
