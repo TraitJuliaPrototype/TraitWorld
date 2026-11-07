@@ -13,19 +13,20 @@ Check the type `S` against the contract of the trait `X` (and its supertraits').
 the trait instance the declaration wrote, `X{p…}`, or the bare `X`. Returns the trait's
 instance at `S`, the receiver kind (`:self`, `:field`, `:none`) and the problems found.
 """
-function check_member(@nospecialize(X), @nospecialize(S); @nospecialize(stated = X), how::How = How(nothing))
+function check_member(@nospecialize(X), @nospecialize(S); @nospecialize(stated = X), how::How = How(nothing),
+                      defaults::Union{Nothing,Vector{Any}} = nothing)
     problems = String[]
     c = contract(X)
     c === nothing && return (stated, :self, String["$X has no contract: it is not a trait"])
     env = _params_at(c, S, stated, how, problems)
     inst = _instance(c, env, stated)
-    served_own = _check_contract!(problems, c, env, S, inst, how)
+    served_own = _check_contract!(problems, c, env, S, inst, how, defaults)
     # the supertraits' contracts, at the parameters the subtrait gives them (traits §4.5)
     if inst isa DataType
         for (sc, senv) in _contracts_of(inst)
             sc === c && continue
             sinst = _instance(sc, senv, bare(sc.trait))
-            served_own |= _check_contract!(problems, sc, senv, S, sinst, how)
+            served_own |= _check_contract!(problems, sc, senv, S, sinst, how, defaults)
             _agree!(problems, sc, sinst, S, how)
         end
     end
@@ -122,7 +123,8 @@ end
 
 # Completeness, results and fields of one contract at S. Returns whether S serves an
 # operation by its own method.
-function _check_contract!(problems, c::Contract, env, @nospecialize(S), @nospecialize(inst), how::How)
+function _check_contract!(problems, c::Contract, env, @nospecialize(S), @nospecialize(inst), how::How,
+                          defaults::Union{Nothing,Vector{Any}} = nothing)
     own = false
     R = _receiver_type(S, how)
     complete_env = length(env) == length(c.params)
@@ -145,7 +147,8 @@ function _check_contract!(problems, c::Contract, env, @nospecialize(S), @nospeci
             tt === nothing && (push!(problems, "the declared signature of $(op.name) cannot be evaluated at $S"); continue)
             m = _serving_method(op, tt)
             if m === nothing
-                op.hasdefault && continue
+                # a default serves the operation at S: recorded for the override rule (traits §5.11)
+                op.hasdefault && (defaults === nothing || push!(defaults, (c.trait, op.f, tt)); continue)
                 push!(problems, "no method serves $(_declared(op, c)) at $S$(_near(op, R))")
                 continue
             end

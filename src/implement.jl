@@ -87,6 +87,7 @@ function _implement!(mod::Module, traits::Vector{Any}, @nospecialize(member), by
     for X in traits
         istrait(X) || throw(ArgumentError("@implement: $X is not a trait"))
     end
+    foreach(X -> _forget_defaults!(X, member), traits)   # a redeclaration fixes them anew (traits §5.11)
     defined = block === nothing ? Method[] : _define_block!(mod, traits, member, block)
     added = Method[]
     try
@@ -106,10 +107,11 @@ _is_pattern(@nospecialize(T)) = !(T isa DataType) || isabstracttype(T) || Base.h
 
 function _implement_one!(mod::Module, @nospecialize(X), @nospecialize(member), how::How)
     added = Method[]
+    defaults = Any[]
     if _is_pattern(member)
         inst = _pattern_instance(X, member)
     else
-        inst, receiver, problems = check_member(bare(X), member; stated = X, how)
+        inst, receiver, problems = check_member(bare(X), member; stated = X, how, defaults)
         isempty(problems) || throw(ImplementError(X, member, problems))
     end
     receiver = how.by === nothing ? :self : :field
@@ -130,7 +132,88 @@ function _implement_one!(mod::Module, @nospecialize(X), @nospecialize(member), h
         how.by === nothing || (_FORWARD_FIELD[(Base.unwrap_unionall(member)::DataType).name] = how.by)
     end
     _is_pattern(member) && _pending!(member, inst, how)
+    _record_defaults!(member, defaults)
+    push!(_IMPLEMENTED, (Base.unwrap_unionall(member).name, Base.unwrap_unionall(bare(X)).name))
     return added
+end
+
+## What the hooks read (traits §5.2, §5.11; lowering §11)
+
+# every `@implement X S` of this session, as (S's TypeName, X's TypeName): the module-end hook
+const _IMPLEMENTED = Set{Any}()
+
+# the operations a default serves at a member, fixed at its membership: function => [(trait, member,
+# call types), …]. A later method that would take such a call is refused (the definition hook).
+const _DEFAULT_SERVED = IdDict{Any,Vector{Any}}()
+
+function _record_defaults!(@nospecialize(member), defaults::Vector{Any})
+    for (X, f, tt) in defaults
+        push!(get!(Vector{Any}, _DEFAULT_SERVED, f), (X, member, tt))
+    end
+end
+
+function _forget_defaults!(@nospecialize(X), @nospecialize(member))
+    for recs in values(_DEFAULT_SERVED)
+        filter!(r -> !(r[2] === member && bare(r[1]) === bare(X)), recs)
+    end
+end
+
+# The definition hook (compiler §10.1): before a method is visible, one that would take a call
+# that a default serves at a member since its membership is refused (traits §5.11).
+function _definition_hook(m::Method, after::Bool)
+    after && return nothing
+    sig = Base.unwrap_unionall(m.sig)
+    (sig isa DataType && !isempty(sig.parameters)) || return nothing
+    fT = sig.parameters[1]
+    (fT isa DataType && isdefined(fT, :instance)) || return nothing
+    recs = get(_DEFAULT_SERVED, fT.instance, nothing)
+    recs === nothing && return nothing
+    for (X, S, tt) in recs
+        Tuple{fT, tt.parameters...} <: m.sig || continue
+        throw(ImplementError(X, S, "a default of $(bare(X)) serves $(nameof(fT.instance)) at $S since its membership: " *
+                                   "define the method before `@implement`, or in its block"))
+    end
+    return nothing
+end
+
+# The image hook (compiler §10.1): an image's method that would take a call a default serves at a
+# member since its membership stays inactive, with a warning (traits §5.11).
+function _image_methods_hook(ms::Vector{Any}, pkg::String)
+    drop = Any[]
+    for m in ms
+        m isa Method || continue
+        try
+            _definition_hook(m, false)
+        catch e
+            e isa ImplementError || rethrow()
+            @warn "$pkg: a method left inactive" method = m exception = e
+            push!(drop, m)
+        end
+    end
+    return drop
+end
+
+# The module-end hook (compiler §10.1): a type the module defines with a trait as its declared
+# supertype, and no `@implement` for it, is refused at the module's end (traits §5.2).
+function _module_end_hook(m::Module)
+    for name in names(m; all = true)
+        isdefined(m, name) || continue
+        T = try getglobal(m, name) catch; continue end
+        T isa Type || continue
+        S = Base.unwrap_unionall(T)
+        (S isa DataType && S.name.module === m && S.name.name === name) || continue
+        istrait(S) && continue
+        X = supertype(S)
+        while X !== Any && !istrait(X)
+            X = supertype(X)
+        end
+        X === Any && continue
+        (S.name, X.name) in _IMPLEMENTED && continue
+        kind = isabstracttype(S) ? "abstract type" : "struct"
+        throw(ImplementError(X.name.wrapper, S.name.wrapper,
+            "$kind $(S.name.name) <: $(X.name.name) needs `@implement $(X.name.name) $(S.name.name)` before the end of module $m"))
+    end
+    return nothing
 end
 
 # whether S is a subtype of the trait instance by its declared supertypes alone

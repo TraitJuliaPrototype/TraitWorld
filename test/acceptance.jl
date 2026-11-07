@@ -11,6 +11,7 @@ area(c::Circle) = π * c.r^2
 @implement Shape Circle
 struct Square <: Shape; a::Float64; end           # with its definition
 area(s::Square) = s.a^2
+describe(::Square) = "a square"                      # the member's own method, before its membership
 @implement Shape Square
 mutable struct Holder; s::Shape; end
 struct Problem{F <: Shape}; f::F; end
@@ -96,7 +97,6 @@ end
 
 struct Fwd; inner::Circle; end
 @implement Shape Fwd by inner
-describe(::Square) = "a square"                      # the member's own method
 @testset "F8: defaults and forwarding reach plain callers" begin
     @test describe(Circle(1.0)) == "a shape of area $(Float64(π))"
     @test area(Fwd(Circle(1.0))) == Float64(π)       # forwarding, from plain code

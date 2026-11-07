@@ -32,6 +32,10 @@ include("like.jl")
 function __init__()
     # the member hook (compiler §10.4): a member of a pattern is checked at its first use
     ccall(:jl_set_member_hook, Cvoid, (Any,), _member_hook)
+    # the definition and module-end hooks (compiler §10.1): the override rule, a missing `@implement`
+    ccall(:jl_set_method_definition_hook, Cvoid, (Any,), _definition_hook)
+    ccall(:jl_set_module_end_hook, Cvoid, (Any,), _module_end_hook)
+    ccall(:jl_set_image_methods_hook, Cvoid, (Any,), _image_methods_hook)
 end
 
 end # module

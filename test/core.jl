@@ -255,3 +255,40 @@ if isdefined(Core, :All)
         @test_throws TypeError Dynamic{ShapeAt}(IDot())
     end
 end
+
+## the override rule (traits §5.11) and the module's end (traits §5.2), by Julia's hooks (W-108)
+if isdefined(Core, :All)
+    @trait Greeter begin
+        greet(g::Greeter)::String = "hello"              # a default
+    end
+    struct Polite end
+    @implement Greeter Polite
+    struct Formal end
+    greet(::Formal) = "good evening"                     # before the membership: its own method
+    @implement Greeter Formal
+    @testset "override rule" begin
+        @test greet(Polite()) == "hello"
+        @test_throws ImplementError @eval greet(::Polite) = "good day"
+        @test greet(Polite()) == "hello"                  # refused before it was visible
+        @test greet(Formal()) == "good evening"
+        @eval greet(::Formal) = "good night"              # not a default's call: allowed
+        @test Base.invokelatest(greet, Formal()) == "good night"
+    end
+    @testset "module end" begin
+        err = try
+            Core.eval(@__MODULE__, :(module NoImpl
+                struct S <: $Greeter end
+            end))
+            nothing
+        catch e
+            e
+        end
+        @test err isa ImplementError && occursin("@implement", sprint(showerror, err))
+        m = Core.eval(@__MODULE__, :(module WithImpl
+            using TraitWorld
+            struct S <: $Greeter end
+            @implement $Greeter S
+        end))
+        @test m isa Module && Base.invokelatest(greet, Base.invokelatest(getglobal, m, :S)()) == "hello"
+    end
+end
