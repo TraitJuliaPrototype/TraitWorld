@@ -89,3 +89,24 @@ end
     @test length(uc) == 1 && uc[1][1].name === :useless && uc[1][4] == 1
     @test Casts.useless() == 2 && Casts.useful() === Decay(1.0)
 end
+
+module Bounded
+using TraitWorld, Test
+@trait_module
+@trait Pt begin
+    px(p::Pt)::Float64
+end
+struct P2; x::Float64; end
+px(p::P2) = p.x
+@implement Pt P2
+ok(p::Pt) = px(p) + 1.0                                   # through the contract: accepted
+kept(p::Pt) = keep(p)                                     # keeping it: within every contract
+@open peek(p::Pt) = p.x                                   # open on purpose
+end
+
+@testset "bounded in a trait module" begin
+    @test Bounded.ok(Bounded.P2(1.0)) == 2.0
+    @test Bounded.peek(Bounded.P2(3.0)) == 3.0
+    @test_throws TraitUseError Core.eval(Bounded, :(bad(p::Pt) = p.x))   # open: refused
+    @test !isdefined(Bounded, :bad) || isempty(methods(Bounded.bad))
+end

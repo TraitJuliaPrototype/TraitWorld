@@ -67,6 +67,14 @@ function _in_contract(interp::ClassifyInterp, @nospecialize(f), argtypes::Vector
     atype = CC.argtypes_to_type(argtypes)
     # an operation of the trait or a supertrait, or a declared field: the compiler's rule
     CC.declared_operation_result(interp, argtypes, atype) === nothing || return true
+    # a call with cast arguments (traits §7.6): the call it makes
+    if f === Core.attributed_call && length(argtypes) >= 3 && k >= 4
+        g = CC.singleton_type(CC.widenconst(argtypes[3]))
+        g === nothing && return false
+        return _in_contract(interp, g, argtypes[3:end], k - 2, X)
+    end
+    # keeping it with its attribute (traits §7.8), or a cast's unwrapping of a `Dynamic{X}`
+    (f === Core.keep || f === Core._cast_compiled) && return true
     if f isa Core.Builtin
         # `===` and `isa` against the trait or a supertrait; asserting it to such a type
         f === (===) && return true
@@ -163,6 +171,13 @@ function _trait_arguments(m::Method)
     end
     return false
 end
+# whether `bounded` refuses `m` where it is open: its own `@bounded` or `@open`, else its module's
+# option (`@trait_module`, traits §13)
+function _bounded(m::Method)
+    o = _bounded_option(m)
+    o === nothing || return o
+    return (ccall(:jl_get_module_trait_options, Cint, (Any,), m.module) & 1) != 0
+end
 function _bounded_option(m::Method)
     src = try Base.uncompressed_ast(m) catch; return nothing end
     for st in src.code
@@ -228,7 +243,7 @@ end
 # method is visible, so that inference can follow it).
 function _check_bounded(m::Method)
     _trait_arguments(m) || return nothing
-    _bounded_option(m) === true || return nothing
+    _bounded(m) || return nothing
     uses = classify(m)
     isempty(uses) && return nothing
     Base.delete_method(m)
