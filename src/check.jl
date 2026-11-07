@@ -21,6 +21,7 @@ function check_member(@nospecialize(X), @nospecialize(S); @nospecialize(stated =
     env = _params_at(c, S, stated, how, problems)
     inst = _instance(c, env, stated)
     served_own = _check_contract!(problems, c, env, S, inst, how, defaults)
+    _check_concrete!(problems, c, env, S)
     # the supertraits' contracts, at the parameters the subtrait gives them (traits §4.5)
     if inst isa DataType
         for (sc, senv) in _contracts_of(inst)
@@ -28,10 +29,31 @@ function check_member(@nospecialize(X), @nospecialize(S); @nospecialize(stated =
             sinst = _instance(sc, senv, bare(sc.trait))
             served_own |= _check_contract!(problems, sc, senv, S, sinst, how, defaults)
             _agree!(problems, sc, sinst, S, how)
+            _check_concrete!(problems, sc, senv, S)
         end
     end
     receiver = how.by !== nothing ? :field : served_own ? :self : :none
     return (inst, receiver, problems)
+end
+
+# A trait's concrete parts (traits §14): each named parameter, and Self, concrete at a member; a
+# pattern's members are checked at their first use
+function _check_concrete!(problems, c::Contract, env, @nospecialize(S))
+    isempty(c.concrete) && return
+    (S isa DataType && !Base.has_free_typevars(S)) || return
+    for (n, level) in c.concrete
+        v = n === :Self ? S : get(env, n, nothing)
+        v === nothing && continue
+        is_concrete_part(v) && continue
+        tag = level === :enforce ? "@enforce_concrete_only" : "@warn_on_abstract"
+        msg = "$(n === :Self ? "Self" : "the parameter $n") is $v, which is not concrete ($tag $n in $(bare(c.trait)))"
+        if level === :enforce
+            push!(problems, msg)
+        else
+            key = (c.trait, n, S)
+            key in _CONCRETE_WARNED || (push!(_CONCRETE_WARNED, key); @warn "$S as a member of $(bare(c.trait)): $msg")
+        end
+    end
 end
 
 # the receiver type: the member, or its forwarding field's type (traits §4.4)

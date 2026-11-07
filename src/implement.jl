@@ -86,6 +86,7 @@ function _implement!(mod::Module, traits::Vector{Any}, @nospecialize(member), by
     how = How(by)
     for X in traits
         istrait(X) || throw(ArgumentError("@implement: $X is not a trait"))
+        _check_membership_owner(mod, X, member)
     end
     foreach(X -> _forget_defaults!(X, member), traits)   # a redeclaration fixes them anew (traits §5.11)
     defined = block === nothing ? Method[] : _define_block!(mod, traits, member, block)
@@ -134,6 +135,7 @@ function _implement_one!(mod::Module, @nospecialize(X), @nospecialize(member), h
     _is_pattern(member) && _pending!(member, inst, how)
     _record_defaults!(member, defaults)
     push!(_IMPLEMENTED, (Base.unwrap_unionall(member).name, Base.unwrap_unionall(bare(X)).name))
+    _is_pattern(member) || Base.invokelatest(_compile_ahead!, inst, member)   # compiling ahead (traits §16)
     return added
 end
 
@@ -161,7 +163,12 @@ end
 # The definition hook (compiler §10.1): before a method is visible, one that would take a call
 # that a default serves at a member since its membership is refused (traits §5.11).
 function _definition_hook(m::Method, after::Bool)
-    after && return _check_bounded(m)
+    if after
+        _strict_on_definition(m, true)   # strict mode's check after the definition (traits §12.3)
+        return _check_bounded(m)
+    end
+    _check_pirate(m)                     # a scope that declares `no_pirates` (traits §12.2)
+    _strict_on_definition(m, false)      # strict mode: a pirate that would win at a fact (traits §12.3)
     sig = Base.unwrap_unionall(m.sig)
     (sig isa DataType && !isempty(sig.parameters)) || return nothing
     fT = sig.parameters[1]
@@ -189,6 +196,9 @@ function _image_methods_hook(ms::Vector{Any}, pkg::String)
             @warn "$pkg: a method left inactive" method = m exception = e
             push!(drop, m)
         end
+    end
+    for m in _strict_image_refusals(ms)  # strict mode: winning pirates left inactive (lowering §13)
+        m in drop || push!(drop, m)
     end
     return drop
 end
@@ -272,6 +282,7 @@ function _define_block!(mod::Module, traits::Vector{Any}, @nospecialize(member),
                     push!(newargs, a)
                 end
             end
+            _check_block_owner(mod, op.f, member)
             fref = GlobalRef(parentmodule(op.f), nameof(op.f))
             before = Set{Method}(methods(op.f))
             Core.eval(mod, Expr(:function, Expr(:call, fref, newargs...), body))

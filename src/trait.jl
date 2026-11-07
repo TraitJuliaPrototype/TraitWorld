@@ -84,7 +84,8 @@ function _trait(mod::Module, head, body)
     push!(out.args, :($(lib(:_set_contract!))($name, $(lib(:Contract))($name, $mod,
         Symbol[$(QuoteNode.(params)...)], Any[$(QuoteNode.(bounds)...)], Symbol[$(QuoteNode.(items.inputs)...)],
         Any[$(QuoteNode.(supers)...)], $(lib(:OperationDecl))[$(opdecls...)],
-        $(lib(:FieldDecl))[$(fielddecls...)], Pair{Symbol,Any}[$(eqs...)], $(QuoteNode(items.attribute))))))
+        $(lib(:FieldDecl))[$(fielddecls...)], Pair{Symbol,Any}[$(eqs...)], $(QuoteNode(items.attribute)),
+        Pair{Symbol,Symbol}[$([:($(QuoteNode(n)) => $(QuoteNode(l))) for (n, l) in items.concrete]...)]))))
     # the trait's default attribute (traits §4.6), read by the compiler at a trait argument (§6.3)
     items.attribute === :none ||
         push!(out.args, :(ccall(:jl_set_default_attribute, Cvoid, (Any, Cint), $name,
@@ -135,6 +136,7 @@ function _parse_body(name::Symbol, params::Vector{Symbol}, body)
     equations = Pair{Symbol,Any}[]
     inputs = Symbol[]
     attribute = :none
+    concrete = Pair{Symbol,Symbol}[]
     if body !== nothing
         Meta.isexpr(body, :block) || error("@trait $name: the body is a begin … end block")
         for item in body.args
@@ -151,6 +153,14 @@ function _parse_body(name::Symbol, params::Vector{Symbol}, body)
                     for a in margs
                         a in params || error("@trait $name: @input $a names no parameter")
                         push!(inputs, a)
+                    end
+                elseif m === Symbol("@enforce_concrete_only") || m === Symbol("@warn_on_abstract")
+                    level = m === Symbol("@enforce_concrete_only") ? :enforce : :warn
+                    ns = isempty(margs) ? vcat(params, :Self) : margs
+                    for a in ns
+                        (a isa Symbol && (a in params || a === :Self)) ||
+                            error("@trait $name: $m names the trait's parameters and Self; got $a")
+                        push!(concrete, a => level)
                     end
                 elseif m === Symbol("@default_dynamic")
                     attribute = :dynamic
@@ -181,7 +191,8 @@ function _parse_body(name::Symbol, params::Vector{Symbol}, body)
         # a parameter defined by an equation and by a field is defined twice
         _mentions(f[2], p) && f[2] === p && error("@trait $name: $p is defined by a field and by an equation")
     end
-    return (ops = ops, fields = fields, equations = equations, inputs = inputs, attribute = attribute)
+    return (ops = ops, fields = fields, equations = equations, inputs = inputs, attribute = attribute,
+            concrete = concrete)
 end
 
 function _parse_op(trait::Symbol, sig, body)

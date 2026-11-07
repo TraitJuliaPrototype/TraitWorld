@@ -11,7 +11,12 @@ module's methods `Dynamic` by default. The options are Julia's module options (c
 """
 macro trait_module(opts...)
     given = Dict{Symbol,Bool}()
+    fully_typed = nothing
     for o in opts
+        if Meta.isexpr(o, :(=)) && o.args[1] === :fully_typed && o.args[2] isa QuoteNode
+            fully_typed = o.args[2].value      # from @enforce_fully_typed or @warn_not_fully_typed (traits §14)
+            continue
+        end
         (Meta.isexpr(o, :(=)) && o.args[1] isa Symbol && o.args[2] isa Bool &&
          o.args[1] in (:facts, :bounded, :no_pirates, :dynamic, :first_seen)) ||
             error("@trait_module: an option is facts, bounded, no_pirates, dynamic or first_seen = true or false; got $o")
@@ -19,6 +24,7 @@ macro trait_module(opts...)
     end
     settings = Any[Expr(:(=), k, get(given, k, k !== :dynamic))
                    for k in (:facts, :bounded, :no_pirates, :dynamic, :first_seen)]
+    fully_typed === nothing || push!(settings, Expr(:(=), :fully_typed, fully_typed))
     return esc(Expr(:macrocall, GlobalRef(Base.Experimental, Symbol("@compiler_options")),
                     __source__, settings...))
 end

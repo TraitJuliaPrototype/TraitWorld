@@ -33,6 +33,7 @@ struct Contract
     fields::Vector{FieldDecl}
     equations::Vector{Pair{Symbol,Any}}  # a parameter => an expression of `Self`
     attribute::Symbol             # :none, :dynamic or :compiled (traits §4.6; W-111)
+    concrete::Vector{Pair{Symbol,Symbol}}  # a parameter or :Self => :enforce or :warn (traits §14)
 end
 
 """

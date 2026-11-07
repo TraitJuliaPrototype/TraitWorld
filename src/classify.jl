@@ -167,6 +167,7 @@ function _trait_arguments(m::Method)
     sig = Base.unwrap_unionall(m.sig)
     sig isa DataType || return false
     for p in sig.parameters[2:end]
+        Base.isvarargtype(p) && (p = Base.unwrapva(p))      # a varargs tail: its element type
         _trait_of(p isa TypeVar ? p.ub : p) === nothing || return true
     end
     return false
