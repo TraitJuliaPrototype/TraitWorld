@@ -279,6 +279,7 @@ _is_trait_method(m::Method) = get!(_IS_TRAIT_METHOD, m) do
     any(s -> s isa GlobalRef && s.mod === TraitWorld && s.name === :_fwd, _code_refs(m))
 end
 function _code_refs(m::Method)
+    isdefined(m, :generator) && return Any[]      # a generated method has no lowered code of its own
     src = Base.uncompressed_ast(m)
     out = Any[]
     for st in src.code
