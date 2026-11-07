@@ -61,9 +61,10 @@ function _trait_hints!(lines, @nospecialize(f), args, world::UInt)
         for i in 1:min(n, length(ps) - 1)
             d = ps[i + 1]
             Base.isvarargtype(d) && break
+            v = args[i]
+            _callable_hint!(lines, d, v)
             X = _declared_trait(d)
             X === nothing && continue
-            v = args[i]
             T = typeof(v)
             nm = i + 1 <= length(names) ? names[i + 1] : Symbol("#", i)
             # where variables shared between trait arguments: each argument's value of them
@@ -94,4 +95,23 @@ function _trait_hints!(lines, @nospecialize(f), args, world::UInt)
         end
     end
     return lines
+end
+
+# a function that is not a member of the Callable{A, S} a method takes: its methods (lowering §9)
+function _callable_hint!(lines, @nospecialize(d), @nospecialize(v))
+    dd = Base.unwrap_unionall(d isa TypeVar ? d.ub : d)
+    (dd isa DataType && dd.name === Base.unwrap_unionall(Core.Callable).name) || return
+    v isa (d isa TypeVar ? d.ub : d) && return
+    A = dd.parameters[1]
+    A isa Type || return
+    ms = try collect(methods(v)) catch; Method[] end
+    sigs = String[]
+    for m in first(ms, 3)
+        sig = Base.unwrap_unionall(m.sig)
+        sig isa DataType || continue
+        push!(sigs, "(" * join(("::" * _tstr(t) for t in sig.parameters[2:end]), ", ") * ")")
+    end
+    name = v isa Function ? string(nameof(v)) : _tstr(typeof(v))
+    push!(lines, "`$name` is not a `$(replace(_tstr(d), "Core.Callable" => "Callable"))`: none of its methods takes `$(_tstr(A))`" *
+                 (isempty(sigs) ? "" : "; its methods take " * join(sigs, ", ") * (length(ms) > 3 ? ", …" : "")))
 end
