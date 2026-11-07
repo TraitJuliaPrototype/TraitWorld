@@ -161,7 +161,7 @@ end
 # The definition hook (compiler §10.1): before a method is visible, one that would take a call
 # that a default serves at a member since its membership is refused (traits §5.11).
 function _definition_hook(m::Method, after::Bool)
-    after && return nothing
+    after && return _check_bounded(m)
     sig = Base.unwrap_unionall(m.sig)
     (sig isa DataType && !isempty(sig.parameters)) || return nothing
     fT = sig.parameters[1]

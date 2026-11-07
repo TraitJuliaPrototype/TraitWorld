@@ -358,3 +358,46 @@ scale_all(v::Vector{Scaled}, k::Int) = (s = 0; for x in v; s += scaled(x, k); en
     @eval @implement Scaled S6
     @test Base.invokelatest(scale_all, Scaled[S6(), S5(), S1()], 1) == 12   # declared later
 end
+
+## a declared field read at a value typed by its trait: its declared type (compiler §7.1)
+gu(x::Integrator) = x.u
+gt(x::Integrator) = x.t
+@testset "declared fields" begin
+    @test Base.infer_return_type(gt, (Integrator,)) === Float64
+    @test Base.infer_return_type(gu, (Integrator{Vector{Float64}, Tuple{Int,Int}},)) === Vector{Float64}
+    @test gt(Integ([1.0], (1, 2), 2.5)) == 2.5
+end
+
+## the classification (traits §7.3): fully bounded methods, open ones, @bounded and @open
+module ClassifyCase
+using TraitWorld
+@trait CTable begin
+    ncols(t::CTable)::Int
+    col(t::CTable, i::Int)::Vector{Float64}
+end
+struct CT; data::Vector{Vector{Float64}}; end
+ncols(t::CT) = length(t.data)
+col(t::CT, i::Int) = t.data[i]
+@implement CTable CT
+colmean(t::CTable, i::Int) = sum(col(t, i)) / length(col(t, i))   # fully bounded
+helper(t) = ncols(t) + 1                                          # unannotated, followed
+viahelper(t::CTable) = helper(t)                                  # fully bounded through it
+leak(t::CTable) = typeof(t)                                       # open
+wide(t::CTable) = length(t)                                       # open: `length` is not an operation
+end
+@testset "classification" begin
+    C = ClassifyCase
+    @test isempty(classify(only(methods(C.colmean))))
+    @test isempty(classify(only(methods(C.viahelper))))
+    @test !isempty(classify(only(methods(C.leak))))
+    @test !isempty(classify(only(methods(C.wide))))
+    ps = check_definitions(C)
+    @test length(ps) == 2 && any(p -> occursin("leak", p), ps) && any(p -> occursin("wide", p), ps)
+    e = try Core.eval(C, :(@bounded leak2(t::CTable) = typeof(t))); nothing catch err; err end
+    @test e isa TraitUseError
+    @test !isdefined(C, :leak2) || isempty(methods(getglobal(C, :leak2)))
+    Core.eval(C, :(@open leak3(t::CTable) = typeof(t)))
+    Core.eval(C, :(@bounded ok2(t::CTable) = ncols(t)))
+    @test Base.invokelatest(getglobal(C, :ok2), C.CT([[1.0]])) == 1
+    @test length(check_definitions(C)) == 2                         # @open is skipped
+end

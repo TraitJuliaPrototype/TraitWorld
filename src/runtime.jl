@@ -35,3 +35,23 @@ function _set_declared!(@nospecialize(f), mod::Module, nargs::Int, @nospecialize
     ccall(:jl_method_set_declared_result, Cvoid, (Any, Any, Cint), best, rt, 1)
     return nothing
 end
+
+# A trait's declared fields for inference (compiler §7.1): their types evaluated with the variables
+# of the trait's wrapper; a type that names `Self` is recorded as `Any`.
+function _set_declared_fields!(@nospecialize(X), mod::Module, names::Vector{Symbol}, tyexs::Vector{Any})
+    w = Base.unwrap_unionall(X).name.wrapper
+    vars = TypeVar[]
+    s = w
+    while s isa UnionAll
+        push!(vars, s.var)
+        s = s.body
+    end
+    types = Any[]
+    for ex in tyexs
+        T = ex === nothing || _mentions(ex, :Self) ? Any :
+            Core.eval(mod, Expr(:let, Expr(:block, Any[:($(v.name) = $v) for v in vars]...), ex))
+        push!(types, T isa Type || T isa TypeVar ? T : Any)
+    end
+    ccall(:jl_set_declared_fields, Cvoid, (Any, Any, Any), X, Core.svec(names...), Core.svec(types...))
+    return nothing
+end

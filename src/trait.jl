@@ -85,6 +85,9 @@ function _trait(mod::Module, head, body)
         Symbol[$(QuoteNode.(params)...)], Any[$(QuoteNode.(bounds)...)], Symbol[$(QuoteNode.(items.inputs)...)],
         Any[$(QuoteNode.(supers)...)], $(lib(:OperationDecl))[$(opdecls...)],
         $(lib(:FieldDecl))[$(fielddecls...)], Pair{Symbol,Any}[$(eqs...)], $(QuoteNode(items.attribute))))))
+    # the declared fields' names and types, read by inference (compiler §7.1)
+    isempty(items.fields) || push!(out.args, :($(lib(:_set_declared_fields!))($name, $mod,
+        Symbol[$([QuoteNode(f[1]) for f in items.fields]...)], Any[$([QuoteNode(f[2]) for f in items.fields]...)])))
     # 6. Dynamic{X}'s membership: Dynamic{Z} where {P…, Z <: X{P…}}, forwarding by `object`
     dynpat = foldr((p, acc) -> :(Core.UnionAll($p, $acc)), params;
                    init = :(Core.UnionAll($Z, $(lib(:Dynamic)){$Z})))
