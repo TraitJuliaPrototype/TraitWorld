@@ -335,6 +335,8 @@ function check_first_use(@nospecialize(T), @nospecialize(X))
             rethrow()
         end
         _CHECKED[key] = r
+        # a checked member of a pattern joins its trait's candidates for the split (compiler §7.2)
+        r === nothing && isconcretetype(T) && ccall(:jl_register_candidate, Cvoid, (Any, Any), X, T)
     elseif r === _IN_PROGRESS
         throw(ImplementError(X, T, "the check of $T as a member of $(bare(X)) reaches $T again"))
     end

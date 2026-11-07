@@ -68,6 +68,10 @@ function _trait(mod::Module, head, body)
     end
     for op in items.ops
         push!(out.args, _trait_method(name, params, bounds, op, arities[(op.fname, length(op.args))] > 1))
+        # its declared result, covering every member (compiler §6.8), unless it names Self
+        _mentions(op.result, :Self) && continue
+        push!(out.args, Expr(:latestworld),
+              :($(lib(:_set_declared!))($(op.fname), $mod, $(length(op.args) + 1), $(QuoteNode(op.result)))))
     end
     push!(out.args, Expr(:latestworld))
     # 5. the contract on the TypeName

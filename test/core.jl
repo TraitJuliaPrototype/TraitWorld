@@ -292,3 +292,69 @@ if isdefined(Core, :All)
         @test m isa Module && Base.invokelatest(greet, Base.invokelatest(getglobal, m, :S)()) == "hello"
     end
 end
+
+## an operation at a receiver typed by its trait is inferred as its declared result (compiler §7.1)
+@trait Measured begin
+    msize(x::Measured)::Int
+    mname(x::Measured)::String = "m"
+end
+struct M1 end
+struct M2 end
+struct M3 end
+struct M4 end
+msize(::M1) = 1
+msize(::M2) = 2
+msize(::M3) = 3
+msize(::M4) = 4
+@implement Measured M1
+@implement Measured M2
+@implement Measured M3
+@implement Measured M4
+@trait Holds{T} begin
+    T = eltype(Self)
+    hget(x::Holds{T}, i::Int)::T
+end
+hget(v::Vector{Float64}, i::Int) = v[i]
+@implement Holds Vector{Float64}
+mtotal(v::Vector{Measured}) = (s = 0; for x in v; s += msize(x); end; s)
+@testset "operation results" begin
+    @test Base.infer_return_type(x -> msize(x), (Measured,)) === Int        # four members
+    @test Base.infer_return_type(x -> mname(x), (Measured,)) === String     # a default
+    @test Base.infer_return_type(mtotal, (Vector{Measured},)) === Int
+    @test mtotal(Measured[M1(), M4()]) == 5
+    @test Base.infer_return_type(x -> hget(x, 1), (Holds{Float64},)) === Float64
+    @test Base.infer_return_type(x -> msize(x), (Any,)) !== Int             # an untyped receiver: Julia's rule
+    @test Base.infer_return_type(x -> msize(x), (M2,)) === Int              # a concrete member: its method
+end
+
+## the split over a trait's first members, and the fallback past them (compiler §7.2)
+struct M5 end
+msize(::M5) = 5
+@implement Measured M5
+mfirst(x::Measured) = msize(x)
+@testset "split" begin
+    @test mtotal(Measured[M1(), M2(), M3(), M4(), M5()]) == 15
+    @test mfirst(M5()) == 5                                   # the fifth member: the fallback
+    src = sprint(show, first(Base.code_typed(mtotal, (Vector{Measured},)))[1])
+    @test occursin("isa", src)                               # branches on the first members
+end
+
+## the table of a call's targets past the split (compiler §7.3)
+@trait Scaled begin
+    scaled(x::Scaled, k::Int)::Int
+end
+for (i, n) in enumerate((:S1, :S2, :S3, :S4, :S5))
+    @eval struct $n end
+    @eval scaled(::$n, k::Int) = $i * k
+    @eval @implement Scaled $n
+end
+scale_all(v::Vector{Scaled}, k::Int) = (s = 0; for x in v; s += scaled(x, k); end; s)
+@testset "table" begin
+    src = sprint(show, first(Base.code_typed(scale_all, (Vector{Scaled}, Int)))[1])
+    @test occursin("jl_split_table_ptr", src)
+    @test scale_all(Scaled[S1(), S5()], 2) == 12                # the fifth member through the table
+    @eval struct S6 end
+    @eval scaled(::S6, k::Int) = 6 * k
+    @eval @implement Scaled S6
+    @test Base.invokelatest(scale_all, Scaled[S6(), S5(), S1()], 1) == 12   # declared later
+end

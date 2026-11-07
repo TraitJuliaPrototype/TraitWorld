@@ -12,3 +12,26 @@ end
 
 "whether `X` is a trait: an open set"
 istrait(@nospecialize(X)) = (dt = Base.unwrap_unionall(X); dt isa DataType && ccall(:jl_is_open_set, Cint, (Any,), dt) != 0)
+
+# The trait's method for an operation carries the operation's declared result, with the flag that
+# it covers every member: each member's serving method is checked to infer within it (compiler
+# §6.8; traits §5.10). The method is the trait's method of `f` defined last in `mod` at this arity;
+# the result is evaluated with the method's own type variables.
+function _set_declared!(@nospecialize(f), mod::Module, nargs::Int, @nospecialize(resultex))
+    best = nothing
+    for m in methods(f)
+        (m.module === mod && Int(m.nargs) == nargs && _is_trait_method(m)) || continue
+        (best === nothing || m.primary_world > best.primary_world) && (best = m)
+    end
+    best === nothing && return nothing
+    vars = TypeVar[]
+    s = best.sig
+    while s isa UnionAll
+        push!(vars, s.var)
+        s = s.body
+    end
+    rt = Core.eval(mod, Expr(:let, Expr(:block, Any[:($(v.name) = $v) for v in vars]...), resultex))
+    (rt isa Type || rt isa TypeVar) || return nothing
+    ccall(:jl_method_set_declared_result, Cvoid, (Any, Any, Cint), best, rt, 1)
+    return nothing
+end
