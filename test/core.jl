@@ -222,3 +222,36 @@ btext(x::Integer) = string(x)
     @test Int8(1) isa BoundedText && Int16(1) isa BoundedText && !(Int32(1) isa BoundedText)
     @test length(Int8.name.memberships) == 1 && length(Int16.name.memberships) == 1
 end
+
+## intersections All{X, Y} (traits §3.6), where the build has them (W-107)
+if isdefined(Core, :All)
+    @trait IShape begin
+        iarea(s::IShape)::Float64
+    end
+    @trait IPlaced begin
+        iorigin(p::IPlaced)::Tuple{Float64, Float64}
+    end
+    struct IDisc
+        r::Float64
+    end
+    iarea(d::IDisc) = pi * d.r^2
+    iorigin(::IDisc) = (0.0, 0.0)
+    struct IDot end
+    iorigin(::IDot) = (1.0, 1.0)
+    @implement (IShape, IPlaced) IDisc
+    @implement IPlaced IDot
+    const ShapeAt = All{IShape, IPlaced}                    # a bundle: a name for the intersection
+    idescribe(x::ShapeAt) = (iarea(x), iorigin(x))
+    idescribe(x::IPlaced) = iorigin(x)
+    @testset "intersections" begin
+        @test All === Core.All
+        @test IDisc <: ShapeAt && !(IDot <: ShapeAt)
+        @test ShapeAt === All{IPlaced, IShape}
+        @test idescribe(IDisc(1.0)) == (float(pi), (0.0, 0.0))
+        @test idescribe(IDot()) == (1.0, 1.0)
+        d = Dynamic{ShapeAt}(IDisc(2.0))
+        @test d isa IShape && d isa IPlaced && d isa ShapeAt
+        @test Base.invokelatest(idescribe, d)[1] ≈ 4pi
+        @test_throws TypeError Dynamic{ShapeAt}(IDot())
+    end
+end

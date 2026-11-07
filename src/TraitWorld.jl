@@ -13,6 +13,13 @@ isdefined(Core, :MembershipEntry) ||
 
 export @trait, @implement, Dynamic, unwrap, like, withfields, ImplementError, TraitUseError
 
+# Intersections All{X, Y, …} (traits §3.6): Core does not export the name, and the library does,
+# so a module that also uses DataAPI's `All` qualifies one of them (open issue 148)
+@static if isdefined(Core, :All)
+    const All = Core.All
+    export All
+end
+
 include("contract.jl")
 include("runtime.jl")
 include("errors.jl")

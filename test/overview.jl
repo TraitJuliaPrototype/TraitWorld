@@ -22,5 +22,5 @@ perimeter(c::Circle) = 2π * c.r
     @test area(d) ≈ π
     @test describe(d) == "a shape of area 3.141592653589793"
     @test unwrap(d) === Circle(1.0)
-    @test sprint(show, d) == "Dynamic{Shape}(Circle(1.0))"
+    @test sprint(show, d; context = :module => @__MODULE__) == "Dynamic{Shape}(Circle(1.0))"
 end
