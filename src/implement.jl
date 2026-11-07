@@ -53,16 +53,34 @@ function _implement_expr(mod::Module, args)
             error("@implement: a where variable is T or T <: B; got $v")
         end
     end
-    m = gensym(:member)
-    wrapped = foldr((p, acc) -> :(Core.UnionAll($p, $acc)), names; init = memberex)
-    call = :($(GlobalRef(@__MODULE__, :_implement!))($mod, Any[$(traits...)], $wrapped,
-             $(QuoteNode(by)), $(QuoteNode(block))))
+    call = :($(GlobalRef(@__MODULE__, :_implement_vars!))($mod, Any[$(traits...)], $memberex,
+             Any[$(names...)], $(QuoteNode(by)), $(QuoteNode(block))))
     out = Expr(:block, Expr(:let, Expr(:block, tvdefs...), call), Expr(:latestworld), nothing)
     return esc(out)
 end
 
 "the field each type forwards a trait to, by type name (for `like`, traits §6.5)"
 const _FORWARD_FIELD = IdDict{Core.TypeName,Symbol}()
+
+# The member's pattern from its body and its `where` variables. A variable bounded by a `Union`
+# declares one membership per type of the union (lowering §3):
+# `@implement BoundedText I where {I <: Base.BitInteger}`.
+function _implement_vars!(mod::Module, traits::Vector{Any}, @nospecialize(body), tvs::Vector{Any},
+                          by::Union{Nothing,Symbol}, block)
+    k = findfirst(tv -> (tv::TypeVar).ub isa Union, tvs)
+    if k !== nothing
+        tv = tvs[k]::TypeVar
+        rest = Any[tvs[i] for i in eachindex(tvs) if i != k]
+        for t in Base.uniontypes(tv.ub)
+            b = body === tv ? t : _subst_tv(body, tv, t)
+            _implement_vars!(mod, Any[_subst_tv(X, tv, t) for X in traits], b, rest, by, block)
+        end
+        return nothing
+    end
+    body isa TypeVar && throw(ArgumentError("@implement: the member is a type or a family of types; got $body"))
+    member = foldr((tv, acc) -> UnionAll(tv, acc), tvs; init = body)
+    return _implement!(mod, traits, member, by, block)
+end
 
 function _implement!(mod::Module, traits::Vector{Any}, @nospecialize(member), by::Union{Nothing,Symbol}, block)
     how = How(by)

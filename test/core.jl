@@ -211,3 +211,14 @@ sz(w::W2{Int}) = 1
     e2 = try Base.invokelatest(sz, W2(2.0)); nothing catch err; err end
     @test e2 === e                                 # the kept failure, raised at every use
 end
+
+## a family variable bounded by a Union: one membership per type (lowering §3)
+@trait BoundedText begin
+    btext(x::BoundedText)::String
+end
+btext(x::Integer) = string(x)
+@implement BoundedText I where {I <: Union{Int8, Int16}}
+@testset "Union-bounded family" begin
+    @test Int8(1) isa BoundedText && Int16(1) isa BoundedText && !(Int32(1) isa BoundedText)
+    @test length(Int8.name.memberships) == 1 && length(Int16.name.memberships) == 1
+end
