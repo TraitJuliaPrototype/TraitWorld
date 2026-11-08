@@ -32,8 +32,9 @@ end
     r isa S || throw(TypeError(:Callable, S === Nothing ? "end the function with `nothing`" : "", S, r))
     return r::S
 end
-# the signatures of an intersection of `Callable`s, as (A, S) pairs
-_signatures(@nospecialize(Z)) = _signatures_of(Base.unwrap_unionall(Z))
+# the signatures of an intersection of `Callable`s, as (A, S) pairs: a constant of the type, so a call of a
+# `Dynamic{All{Callable…}}` at its second signature builds nothing (E-307)
+@generated _signatures(::Type{Z}) where {Z} = _signatures_of(Base.unwrap_unionall(Z))
 function _signatures_of(@nospecialize(u))
     u isa DataType || return ()
     if u.name === Base.unwrap_unionall(Core.All).name

@@ -108,7 +108,7 @@ ft_abstract(@nospecialize(rt)) = CC.ft_abstract_result(CC.widenconst(rt))
 # the blocks on a normal path: those from which a return with a value is reachable
 function _normal_blocks(ir)
     cfg = ir.cfg
-    n = length(cfg.blocks)
+    n = length(cfg.blocks)::Int    # `ir` is untyped: a range of an untyped length reaches Base's promotion (E-307)
     ok = falses(n)
     work = Int[]
     for b in 1:n
@@ -131,7 +131,7 @@ end
 
 function _scan!(sites, queue, extra, ir, mi, interp, world)
     normal = _normal_blocks(ir)
-    for i in 1:length(ir.stmts)
+    for i in 1:(length(ir.stmts)::Int)
         normal[CC.block_for_inst(ir.cfg, i)] || continue
         inst = ir.stmts[i]
         stmt = inst[:stmt]
@@ -182,7 +182,7 @@ end
 function _operation_targets!(extra, queue, @nospecialize(info), ir, stmt, @nospecialize(f))
     (info isa CC.DeclaredResultInfo || info isa CC.SplitCallInfo) || return
     f === nothing && return
-    argtypes = Any[CC.widenconst(CC.argextype(a, ir)) for a in stmt.args[2:end]]
+    argtypes = Any[CC.widenconst(CC.argextype(a, ir)) for a in (stmt::Expr).args[2:end]]
     k = findfirst(_is_trait_arg, argtypes)
     k === nothing && return
     X = argtypes[k]
@@ -269,7 +269,7 @@ end
 
 function _site(kind::Symbol, ir, mi, i, stmt, interp, world)
     file, line = _lineof(ir, mi, i)
-    args = stmt.args
+    args = (stmt::Expr).args
     types = Any[CC.widenconst(CC.argextype(a, ir)) for a in args]
     fname = let f = CC.singleton_type(CC.argextype(args[1], ir))
         f === nothing ? "(::" * _tstr(types[1]) * ")" : sprint(show, f)
@@ -359,7 +359,7 @@ end
 
 # the root cause of an abstract result: the first returned value of an abstract type
 function _return_cause(ir, mi, interp, world, depth::Int)
-    for i in 1:length(ir.stmts)
+    for i in 1:(length(ir.stmts)::Int)
         st = ir.stmts[i][:stmt]
         st isa Core.ReturnNode && isdefined(st, :val) || continue
         ft_abstract(CC.argextype(st.val, ir)) || continue

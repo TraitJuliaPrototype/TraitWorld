@@ -39,7 +39,7 @@ end
 function Base.showerror(io::IO, e::PirateError)
     m = e.method
     print(io, "PirateError: strict mode refuses `", m.name, "(",
-          join((_short(t, 40) for t in Base.unwrap_unionall(m.sig).parameters[2:end]), ", "),
+          join((_short(t, 40) for t in (Base.unwrap_unionall(m.sig)::DataType).parameters[2:end]), ", "),
           ")`, defined by ", _owner_name(e.definer), ".\n  It would win at the call `", _short(e.sig),
           "`, which code compiled by facts makes (in `", _code_name(e.caller), "`).\n  ",
           _owner_name(e.definer), " owns neither the function nor a type in that signature (a pirate). ",
@@ -110,7 +110,7 @@ function _winning_fact(m::Method, accept)
         ft = body.parameters[1]
         tn = ft isa DataType ? ft.name : nothing
         be = getfield(Core.methodtable, :backedges)
-        for i in 1:2:length(be)-1
+        for i in 1:2:(length(be)::Int)-1
             isassigned(be, i) && be[i] === tn && isassigned(be, i + 1) || continue
             v = be[i+1]
             v isa Vector{Any} || continue
@@ -260,7 +260,7 @@ struct PirateAtLoadError <: Exception
 end
 function Base.showerror(io::IO, e::PirateAtLoadError)
     print(io, "PirateError: `", e.method.name, "(",
-          join((_short(t, 40) for t in Base.unwrap_unionall(e.method.sig).parameters[2:end]), ", "),
+          join((_short(t, 40) for t in (Base.unwrap_unionall(e.method.sig)::DataType).parameters[2:end]), ", "),
           ")`, defined by ", _owner_name(e.definer), " before a package image was loaded, wins at its fact `",
           _short(e.sig), "` in `", _code_name(e.code), "`.\n  It came first, so strict mode cannot refuse it: ",
           "the image's code is compiled again with it. Load the package before the pirate.")
