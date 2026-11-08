@@ -118,6 +118,21 @@ sz3(w::Fam3{Int}) = 1
     @test Fam3(1.0) isa Sized3                        # memberships only grow
 end
 
+@trait Sized4 begin
+    sz4(x::Sized4)::Int
+    nm4(x::Sized4)::Int
+end
+struct Fam4{P}; x::P; end
+sz4(w::Fam4{Int}) = 1
+nm4(w::Fam4{Int}) = 2
+nm4(x) = 0                                            # takes any receiver: not a serving method
+@implement Sized4 Fam4{P} where {P}
+@testset "F10b (compiler C-71): a failed member's other operations raise its failure" begin
+    @test_throws ImplementError Base.invokelatest(sz4, Fam4(1.0))
+    @test_throws ImplementError Base.invokelatest(nm4, Fam4(1.0))
+    @test_throws ImplementError Base.invokelatest(sz4, Fam4(1.0))
+end
+
 @trait Indexable{T} begin
     T = eltype(Self)
     ilen(x::Indexable)::Int

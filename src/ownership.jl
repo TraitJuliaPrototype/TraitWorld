@@ -64,7 +64,18 @@ function _note_extension!(r::Module, f::AbstractString)
     end
     parent === nothing && return false
     _EXT_PARENTS[r] = parent
-    _EXT_TRIGGERS[r] = trig isa String ? [trig] : String[t for t in trig]
+    # the triggers as strings, checked one by one: a TOML value is untyped, and a store built from it
+    # needed `convert(Vector{String}, ::Any)`, which any package's new `print` method for its strings
+    # invalidated, and with it the load hooks that reach this function (E-295)
+    names = String[]
+    if trig isa String
+        push!(names, trig)
+    elseif trig isa AbstractVector
+        for t in trig
+            t isa String && push!(names, t)
+        end
+    end
+    _EXT_TRIGGERS[r] = names
     return true
 end
 
