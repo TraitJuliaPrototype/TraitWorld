@@ -289,7 +289,17 @@ function _define_block!(mod::Module, traits::Vector{Any}, @nospecialize(member),
             _check_block_owner(mod, op.f, member)
             fref = GlobalRef(parentmodule(op.f), nameof(op.f))
             before = Set{Method}(methods(op.f))
-            Core.eval(mod, Expr(:function, Expr(:call, fref, newargs...), body))
+            sig = Expr(:call, fref, newargs...)
+            # a family's variables are the method's static parameters: in scope in its body (`T` in
+            # `@implement CoreIntegrator{Vector{T}, Float64} Tsit5Integrator{T, M} where {T, M}`)
+            if member isa UnionAll && (wh = _where_exprs(member)) !== nothing
+                k = findfirst(a -> Meta.isexpr(a, :(::)) && a.args[2] === member, newargs)
+                if k !== nothing
+                    newargs[k] = Expr(:(::), newargs[k].args[1], _type_expr(Base.unwrap_unionall(member)))
+                    sig = Expr(:where, Expr(:call, fref, newargs...), wh...)
+                end
+            end
+            Core.eval(mod, Expr(:function, sig, body))
             for m in methods(op.f)
                 m in before || push!(defined, m)
             end
@@ -299,6 +309,35 @@ function _define_block!(mod::Module, traits::Vector{Any}, @nospecialize(member),
         rethrow()
     end
     return defined
+end
+
+# A pattern's variables as a `where` clause's expressions, `T` or `T <: ub` (nothing where a variable has a
+# lower bound, which a method's `where` would have to state too)
+function _where_exprs(@nospecialize(member))
+    out = Any[]
+    u = member
+    while u isa UnionAll
+        v = u.var
+        v.lb === Union{} || return nothing
+        push!(out, v.ub === Any ? v.name : Expr(:<:, v.name, _type_expr(v.ub)))
+        u = u.body
+    end
+    return out
+end
+# A type as an expression, its free variables by their names (for a method's signature)
+function _type_expr(@nospecialize(t))
+    t isa TypeVar && return t.name
+    t isa Symbol && return QuoteNode(t)
+    t isa Union && return Expr(:curly, GlobalRef(Core, :Union), Any[_type_expr(x) for x in Base.uniontypes(t)]...)
+    if t isa UnionAll
+        return Expr(:where, _type_expr(Base.unwrap_unionall(t)), (_where_exprs(t)::Vector{Any})...)
+    end
+    t isa Core.TypeofVararg && return isdefined(t, :N) ? Expr(:curly, GlobalRef(Core, :Vararg), _type_expr(t.T), _type_expr(t.N)) :
+                                       isdefined(t, :T) ? Expr(:curly, GlobalRef(Core, :Vararg), _type_expr(t.T)) : GlobalRef(Core, :Vararg)
+    t isa DataType || return t
+    Base.has_free_typevars(t) || return t
+    ref = GlobalRef(t.name.module, t.name.name)
+    return Expr(:curly, ref, Any[_type_expr(p) for p in t.parameters]...)
 end
 
 function _find_op(traits::Vector{Any}, fname, n::Int)

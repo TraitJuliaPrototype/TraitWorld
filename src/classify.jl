@@ -29,10 +29,13 @@ struct ClassifyInterp <: CC.AbstractInterpreter
     code_cache::ClassifyCache
     uses::Vector{TraitUse}
     mod::Module
+    method::Union{Nothing,Method}    # the method classified: its own uses always count
+    traits::Vector{Any}              # the traits of its trait arguments: a value of another trait is not tracked
 end
-ClassifyInterp(mod::Module; world::UInt = Base.get_world_counter()) =
+ClassifyInterp(mod::Module; world::UInt = Base.get_world_counter(), method::Union{Nothing,Method} = nothing) =
     ClassifyInterp(world, CC.InferenceParams(), CC.OptimizationParams(), CC.InferenceResult[],
-                   ClassifyCache(IdDict{Core.MethodInstance,Core.CodeInstance}()), TraitUse[], mod)
+                   ClassifyCache(IdDict{Core.MethodInstance,Core.CodeInstance}()), TraitUse[], mod, method,
+                   method === nothing ? Any[] : _argument_traits(method))
 CC.InferenceParams(i::ClassifyInterp) = i.inf_params
 CC.OptimizationParams(i::ClassifyInterp) = i.opt_params
 CC.get_inference_world(i::ClassifyInterp) = i.world
@@ -82,6 +85,17 @@ function _stores_in_slot(@nospecialize(f), argtypes::Vector{Any}, k::Int, @nospe
     return false
 end
 
+# the type an argument of type `Type{…}` names, or its upper bound where it is `Type{<:Y}`; else nothing
+function _type_bound(@nospecialize(t))
+    t isa CC.Const && return t.val isa Type ? t.val : nothing
+    w = CC.widenconst(t)
+    u = Base.unwrap_unionall(w)
+    (u isa DataType && u.name === Type.body.name) || return nothing
+    a = u.parameters[1]
+    a isa TypeVar && return a.ub
+    return a isa Type ? a : nothing
+end
+
 # whether `f` is a function of `Self` that an equation of the trait `X` or a supertrait names,
 # `P = f(Self)`
 function _equation_function(@nospecialize(X), @nospecialize(f))
@@ -110,6 +124,23 @@ function _in_contract(interp::ClassifyInterp, @nospecialize(f), argtypes::Vector
         g === nothing && return false
         return _in_contract(interp, g, argtypes[3:end], k - 2, X)
     end
+    # a struct's constructor storing it in a field typed by the trait or a supertype (traits §7.3): its `convert`
+    # and `isa` against the field's type, which the struct's parameters make `Type{<:Y}` here
+    if (f === convert && k == 3) || (f === isa && k == 2)
+        Y = _type_bound(argtypes[f === convert ? 2 : 3])
+        Y !== nothing && istrait(Base.unwrap_unionall(Y)) && X <: Y && return true
+    end
+    # writing a declared field (traits §7.3): `t.name = v` at a field the trait or a supertrait declares writable
+    if f === setproperty! && k == 2 && length(argtypes) == 4
+        name = argtypes[3]
+        if name isa CC.Const && name.val isa Symbol
+            for (c, _) in _contracts_of(X), fd in c.fields
+                fd.name === name.val && !fd.isconst && return true
+            end
+        end
+    end
+    # a keyword method's sorter reporting an unknown keyword (lowering's `kwerr`): an error, no use
+    f === Base.kwerr && return true
     # keeping it with its attribute (traits §7.8), or a cast's unwrapping of a `Dynamic{X}`
     (f === Core.keep || f === Core._cast_compiled) && return true
     # storing it in a slot typed by the trait or a supertype (traits §7.3): a field, or an element of a
@@ -143,7 +174,8 @@ function _in_contract(interp::ClassifyInterp, @nospecialize(f), argtypes::Vector
         p isa Core.TypeofVararg && (p = p.T)
         p isa TypeVar && (p = p.ub)
         pu = Base.unwrap_unionall(p)
-        if pu isa DataType && istrait(pu) && X <: p
+        # the parameter with the callee's own variables bound (`getter(ip::IndexProvider{I}, …) where {I}`)
+        if pu isa DataType && istrait(pu) && X <: Base.rewrap_unionall(p, m.sig)
             continue
         end
         p === Any && m.module === interp.mod && continue
@@ -158,9 +190,14 @@ function _record_use!(interp::ClassifyInterp, @nospecialize(f), argtypes::Vector
     # another module is judged where it is made (traits §7.3)
     d = sv.linfo.def
     (d isa Method && d.module === interp.mod) || return nothing
+    # a function marked `@open` is open on purpose: its uses are its own, not its callers' (traits §7.3)
+    d !== interp.method && _bounded_option(d) === false && return nothing
     for k in 2:length(argtypes)
         X = _trait_of(argtypes[k])
         X === nothing && continue
+        # the classification is per trait argument (traits §7.3): a value typed by an unrelated trait (a
+        # field of a plain struct, another operation's result) is not one of them
+        _related(interp, X) || continue
         _in_contract(interp, f, argtypes, k, X) && continue
         m = sv.linfo.def
         m isa Method || return nothing
@@ -195,7 +232,7 @@ functions of its module it passes them to: empty where `m` is fully bounded at i
 arguments (traits §7.3).
 """
 function classify(m::Method; world::UInt = Base.get_world_counter())
-    interp = ClassifyInterp(m.module; world)
+    interp = ClassifyInterp(m.module; world, method = m)
     sig = m.sig
     tv = Any[]
     s = sig
@@ -205,6 +242,33 @@ function classify(m::Method; world::UInt = Base.get_world_counter())
     end
     CC.typeinf_frame(interp, m, sig, Core.svec(tv...), false)
     return interp.uses
+end
+
+# the bare traits of a method's trait arguments (each component of an intersection)
+function _argument_traits(m::Method)
+    out = Any[]
+    sig = Base.unwrap_unionall(m.sig)
+    sig isa DataType || return out
+    for p in sig.parameters[2:end]
+        Base.isvarargtype(p) && (p = Base.unwrapva(p))
+        X = _trait_of(p isa TypeVar ? p.ub : p)
+        X === nothing && continue
+        for c in _components(X)
+            push!(out, bare(c))
+        end
+    end
+    return out
+end
+_components(@nospecialize(X)) = (u = Base.unwrap_unionall(X); u isa DataType && u.name === Base.unwrap_unionall(Core.All).name ?
+    Any[c for c in (u.parameters[1]::DataType).parameters] : Any[X])
+# whether a value known by the trait `X` may be one of the classified method's trait arguments
+function _related(interp::ClassifyInterp, @nospecialize(X))
+    interp.method === nothing && return true
+    for c in _components(X), A in interp.traits
+        b = bare(c)
+        (b <: A || A <: b) && return true
+    end
+    return false
 end
 
 # whether a method is at a trait argument, and the option its body states (`@bounded`, `@open`). A

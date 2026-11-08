@@ -401,3 +401,60 @@ end
     @test Base.invokelatest(getglobal(C, :ok2), C.CT([[1.0]])) == 1
     @test length(check_definitions(C)) == 2                         # @open is skipped
 end
+
+## the classification's further rules (traits §7.3), found by W-104's third slice: a declared field written,
+## a constructor storing the argument in a field typed by the trait, a callee's own variables, an `@open`
+## function's uses its own, a value of an unrelated trait not tracked
+module ClassifyMore
+using TraitWorld
+@trait VWin{U} begin
+    @const u::U
+    flag::Bool
+    winop(w::VWin{U})::Nothing
+end
+mutable struct WinS; u::Vector{Float64}; flag::Bool; end
+winop(w::WinS) = nothing
+@implement VWin{Vector{Float64}} WinS
+@trait Other begin
+    otherop(o::Other)::Int
+end
+struct Holder{U}; w::VWin{U}; end
+setflag!(w::VWin{U}) where {U} = (w.flag = true; nothing)                # a writable declared field
+hold(w::VWin{U}) where {U} = Holder{U}(w)                                 # stored in a field typed by the trait
+pass(w::VWin{U}) where {U} = setflag!(w)                                  # the callee's own `U`
+@open peek(w::VWin{U}) where {U} = typeof(w)                              # open on purpose
+viapeek(w::VWin{U}) where {U} = (peek(w); nothing)                        # its use is peek's
+struct Box; o::Other; end
+reads(w::VWin{U}, b::Box) where {U} = (string(b.o); nothing)              # `b.o` is no argument of VWin's
+end
+@testset "classification: further rules" begin
+    C = ClassifyMore
+    for f in (C.setflag!, C.hold, C.pass, C.viapeek)
+        @test isempty(classify(only(methods(f))))
+    end
+    @test isempty(classify(only(methods(C.reads))))
+    @test !isempty(classify(only(methods(C.peek))))
+end
+
+## a family's variables are in scope in its block's methods (traits §5.4, §5.8)
+module FamilyScope
+using TraitWorld
+@trait Holds{T} begin
+    elt(h::Holds{T})::Type
+end
+struct Box2{T}; x::T; end
+@implement Holds{T} Box2{T} where {T} begin
+    elt(h) = T
+end
+end
+@testset "a family's variables in its block" begin
+    @test FamilyScope.elt(FamilyScope.Box2(1.5)) === Float64
+    @test FamilyScope.elt(FamilyScope.Box2("a")) === String
+end
+
+## a `Dynamic` callable kept at two signatures takes the one its arguments match (traits §7.7)
+@testset "Dynamic{All{Callable…}} at either signature" begin
+    d = Dynamic{All{Callable{Tuple{Int}, Int}, Callable{Tuple{Float64}, Float64}}}(x -> 2x)
+    @test d(3) === 6 && d(1.5) === 3.0
+    @test_throws MethodError d("a")
+end
