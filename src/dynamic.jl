@@ -56,24 +56,27 @@ function _dynamic_field_type(@nospecialize(X), s::Symbol)
     return get!(_DYNAMIC_FIELDS, key) do
         for (c, env) in _contracts_of(X)
             for f in c.fields
-                f.name === s && return _eval_in(c, f.type, env, nothing)
+                _field_name(c, f, env) === s && return _eval_in(c, f.type, env, nothing)
             end
         end
         return nothing
     end
 end
+# a declared field's name at the instance: a field named by an input is named by its value (`HasProperty{:ps, R}`)
+_field_name(c::Contract, f::FieldDecl, env) = f.name in c.inputs ? get(env, f.name, nothing) : f.name
 
 function _field_isconst(@nospecialize(X), s::Symbol)
-    for (c, _) in _contracts_of(X), f in c.fields
-        f.name === s && return f.isconst
+    for (c, env) in _contracts_of(X), f in c.fields
+        _field_name(c, f, env) === s && return f.isconst
     end
     return false
 end
 
 function _declared_field_names(@nospecialize(X))
     names = Symbol[]
-    for (c, _) in _contracts_of(X), f in c.fields
-        f.name in names || push!(names, f.name)
+    for (c, env) in _contracts_of(X), f in c.fields
+        n = _field_name(c, f, env)
+        n isa Symbol && !(n in names) && push!(names, n)
     end
     return names
 end
