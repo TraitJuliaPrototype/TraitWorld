@@ -121,8 +121,7 @@ function _implement_one!(mod::Module, @nospecialize(X), @nospecialize(member), h
     end
     receiver = how.by === nothing ? :self : :field
     if how.by !== nothing
-        m = _define_fwd!(mod, member, bare(X), how.by)
-        push!(added, m)
+        append!(added, _define_fwd!(mod, member, bare(X), how.by))
     end
     # `struct S <: X` needs no entry: X is S's declared supertype (traits §5.2)
     if !(member isa DataType && _declared_subtype(member, inst))
@@ -250,13 +249,40 @@ function _pattern_instance(@nospecialize(X), @nospecialize(member))
     return X
 end
 
-# the forwarding method of a member (lowering §2): _fwd(t::S, ::Type{X}) = t.f
+# A member's forwarding (traits §5.5; lowering §2): _fwd(t::S, ::Type{X}) = t.f, and for each of X's
+# required operations a method at the member that calls the operation on the field, so that the
+# trait's method for a required operation serves no type that joins later (compiler §5.6). The
+# methods are the membership's, as its declaration is: no block's owner rule. Returns the methods.
 function _define_fwd!(mod::Module, @nospecialize(member), @nospecialize(Xb), by::Symbol)
     f = GlobalRef(@__MODULE__, :_fwd)
     Core.eval(mod, :($f(t::$member, ::Type{$Xb}) = getfield(t, $(QuoteNode(by)))))
     m = which(_fwd, Tuple{member isa UnionAll ? Base.unwrap_unionall(member) : member, Type{Xb}})
     _FWD_FIELDS[m] = by
-    return m
+    defined = Method[m]
+    c = contract(Xb)
+    c === nothing && return defined
+    done = Set{Tuple{Any,Int,Bool}}()
+    for op in c.operations
+        op.hasdefault && continue
+        key = (op.f, length(op.args), op.vararg)
+        key in done && continue
+        push!(done, key)
+        fref = GlobalRef(parentmodule(op.f), nameof(op.f))
+        names = Symbol[nm for (nm, _) in op.args]
+        rname = names[op.receiver]
+        sigargs = Any[i == op.receiver ? Expr(:(::), nm, member) : nm for (i, nm) in enumerate(names)]
+        callargs = Any[i == op.receiver ? :(getfield($rname, $(QuoteNode(by)))) : nm for (i, nm) in enumerate(names)]
+        if op.vararg
+            sigargs[end] = Expr(:..., sigargs[end])
+            callargs[end] = Expr(:..., callargs[end])
+        end
+        before = Set{Method}(methods(op.f))
+        Core.eval(mod, Expr(:function, Expr(:call, fref, sigargs...), Expr(:call, fref, callargs...)))
+        for m2 in methods(op.f)
+            m2 in before || push!(defined, m2)
+        end
+    end
+    return defined
 end
 
 # The block's methods (traits §5.4): each a method of an operation of the traits, the

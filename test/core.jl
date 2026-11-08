@@ -122,6 +122,20 @@ colmean(t::ColTable, i::Int) = (c = col(t, i); sum(c) / length(c))
     @test e isa ImplementError && occursin("chain", sprint(showerror, e))
 end
 
+# open issue 158 (a) (compiler §5.6, traits §5.5): the trait's method for a required operation serves no
+# type that joins later (marked), a forwarding member has methods of its own for the required operations,
+# and an operation with a default stays the trait's
+@testset "forwarding at the member; required operations' methods marked" begin
+    tm(f, T) = only(m for m in methods(f, (T, Vararg{Any})) if m.sig isa Type && TraitWorld._is_trait_method(m))
+    @test (tm(ncols, ColTable).declared_covers & 0x02) != 0
+    @test (tm(firstcol, ColTable).declared_covers & 0x02) == 0
+    @test which(ncols, (Halves,)).sig == Tuple{typeof(ncols), Halves}
+    @test which(col, (Halves, Int)).sig.parameters[2] === Halves
+    @test which(firstcol, (Halves,)) === tm(firstcol, ColTable)
+    d = Dynamic{ColTable}(Halves("d", [[2.0]]))
+    @test ncols(d) == 1 && col(d, 1) == [2.0]
+end
+
 ## supertraits (traits §4.5)
 @trait DCol begin
     dlen(c::DCol)::Int

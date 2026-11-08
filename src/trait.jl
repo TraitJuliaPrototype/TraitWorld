@@ -269,8 +269,9 @@ _mentions(ex, s::Symbol) = ex === s || (ex isa Expr && any(a -> _mentions(a, s),
 _subst(ex, s::Symbol, by) = ex === s ? by : ex isa Expr ? Expr(ex.head, Any[_subst(a, s, by) for a in ex.args]...) : ex
 
 # The trait's method for an operation (lowering §2): a method at the trait with the declared
-# signature and result. A member that forwards gets the operation called on its field; one
-# that a default serves, the default's body; any other member was refused at its check.
+# signature and result. `Dynamic{X}` gets the operation called on its object, as a member that
+# forwards does for an operation with a default (a required operation's forwarding is a method at
+# the member); one that a default serves, the default's body; any other member was refused at its check.
 #
 # Its further arguments are untyped, so that a member's own method, written at the member's type,
 # is more specific and wins (traits §4.2) however it types them. An argument keeps its declared
@@ -334,5 +335,9 @@ function _trait_method(trait::Symbol, params::Vector{Symbol}, bounds::Vector{Any
             $fwdcall
         end
     end
+    # a required operation's method serves only `Dynamic{X}`, a member from the trait's declaration:
+    # a forwarding member has methods of its own (`_define_fwd!`), so at a type that joins later the
+    # method raises and is no shadow (compiler §5.6; open issue 158 (a)), marked before its insertion
+    op.body === nothing && pushfirst!(body.args, Expr(:meta, :serves_no_member))
     return Expr(:function, sig, body)
 end
