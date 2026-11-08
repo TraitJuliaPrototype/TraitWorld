@@ -1,9 +1,8 @@
 # The classification of methods at traits (traits §7.3; compiler §6.7). A method is fully bounded
 # at an argument typed by a trait when its body reaches the argument only through the contract;
-# any other use makes it open there. The library infers the method at its own signature with an
-# interpreter of its own, which records each call that takes a value typed by a trait outside the
-# contract, with its line; inference continues past it (compiler C-40: the reference puts this in
-# the native interpreter, under a check flag).
+# any other use makes it open there. The library infers the method at its own signature with the
+# compiler's check interpreter, whose hook records each call that takes a value typed by a trait
+# outside the contract, with its line; inference continues past it (compiler §6.7, C-40).
 
 const CC = Core.Compiler
 
@@ -15,45 +14,27 @@ struct TraitUse
     trait::Any
 end
 
-struct ClassifyCache
-    dict::IdDict{Core.MethodInstance,Core.CodeInstance}
-end
-
-# An interpreter of the classification: Julia's inference, with an ephemeral cache, so that every
-# function the method reaches is inferred again and its uses recorded.
-struct ClassifyInterp <: CC.AbstractInterpreter
-    world::UInt
-    inf_params::CC.InferenceParams
-    opt_params::CC.OptimizationParams
-    inf_cache::Vector{CC.InferenceResult}
-    code_cache::ClassifyCache
+# The record of one check: the uses found, the module whose functions are followed, the method
+# classified (its own uses always count), the traits of its trait arguments (a value of another
+# trait is not tracked).
+struct ClassifyState
     uses::Vector{TraitUse}
     mod::Module
-    method::Union{Nothing,Method}    # the method classified: its own uses always count
-    traits::Vector{Any}              # the traits of its trait arguments: a value of another trait is not tracked
+    method::Union{Nothing,Method}
+    traits::Vector{Any}
 end
-ClassifyInterp(mod::Module; world::UInt = Base.get_world_counter(), method::Union{Nothing,Method} = nothing) =
-    ClassifyInterp(world, CC.InferenceParams(), CC.OptimizationParams(), CC.InferenceResult[],
-                   ClassifyCache(IdDict{Core.MethodInstance,Core.CodeInstance}()), TraitUse[], mod, method,
-                   method === nothing ? Any[] : _argument_traits(method))
-CC.InferenceParams(i::ClassifyInterp) = i.inf_params
-CC.OptimizationParams(i::ClassifyInterp) = i.opt_params
-CC.get_inference_world(i::ClassifyInterp) = i.world
-CC.get_inference_cache(i::ClassifyInterp) = i.inf_cache
-CC.cache_owner(::ClassifyInterp) = :TraitWorldClassify
-CC.code_cache(i::ClassifyInterp) = CC.WorldView(i.code_cache, CC.WorldRange(i.world))
-CC.get(wvc::CC.WorldView{ClassifyCache}, mi::Core.MethodInstance, default) = get(wvc.cache.dict, mi, default)
-CC.getindex(wvc::CC.WorldView{ClassifyCache}, mi::Core.MethodInstance) = getindex(wvc.cache.dict, mi)
-CC.haskey(wvc::CC.WorldView{ClassifyCache}, mi::Core.MethodInstance) = haskey(wvc.cache.dict, mi)
-CC.setindex!(wvc::CC.WorldView{ClassifyCache}, ci::Core.CodeInstance, mi::Core.MethodInstance) = setindex!(wvc.cache.dict, ci, mi)
 
-function CC.abstract_call_known(interp::ClassifyInterp, @nospecialize(f), arginfo::CC.ArgInfo,
-                                si::CC.StmtInfo, sv::CC.AbsIntState,
-                                max_methods::Int = CC.get_max_methods(interp, f, sv))
-    _record_use!(interp, f, arginfo.argtypes, sv)
-    return @invoke CC.abstract_call_known(interp::CC.AbstractInterpreter, f::Any, arginfo::CC.ArgInfo,
-                                          si::CC.StmtInfo, sv::CC.AbsIntState, max_methods::Int)
-end
+# The compiler's interpreter of the definition-time check (compiler §6.7): Julia's inference with an
+# ephemeral cache, so that every function the method reaches is inferred again, calling `_check_hook`
+# at each known call. The library defines no method of the compiler's functions, so loading it
+# invalidates none of the compiler's code (C-40, E-281).
+const ClassifyInterp = CC.DefinitionCheckInterpreter
+_state(interp::ClassifyInterp) = interp.state::ClassifyState
+_check_hook(interp::ClassifyInterp, @nospecialize(f), argtypes::Vector{Any}, sv::CC.AbsIntState) =
+    (_record_use!(interp, f, argtypes, sv); nothing)
+_classify_interp(mod::Module; world::UInt = Base.get_world_counter(), method::Union{Nothing,Method} = nothing) =
+    CC.DefinitionCheckInterpreter(world, _check_hook,
+                                  ClassifyState(TraitUse[], mod, method, method === nothing ? Any[] : _argument_traits(method)))
 
 # the trait a value of type T is known by: a trait instance or an intersection, not a concrete member
 function _trait_of(@nospecialize(T))
@@ -178,7 +159,7 @@ function _in_contract(interp::ClassifyInterp, @nospecialize(f), argtypes::Vector
         if pu isa DataType && istrait(pu) && X <: Base.rewrap_unionall(p, m.sig)
             continue
         end
-        p === Any && m.module === interp.mod && continue
+        p === Any && m.module === _state(interp).mod && continue
         return false
     end
     return true
@@ -189,9 +170,9 @@ function _record_use!(interp::ClassifyInterp, @nospecialize(f), argtypes::Vector
     # uses count in the method and the functions of its module it is followed into; a call into
     # another module is judged where it is made (traits §7.3)
     d = sv.linfo.def
-    (d isa Method && d.module === interp.mod) || return nothing
+    (d isa Method && d.module === _state(interp).mod) || return nothing
     # a function marked `@open` is open on purpose: its uses are its own, not its callers' (traits §7.3)
-    d !== interp.method && _bounded_option(d) === false && return nothing
+    d !== _state(interp).method && _bounded_option(d) === false && return nothing
     for k in 2:length(argtypes)
         X = _trait_of(argtypes[k])
         X === nothing && continue
@@ -203,8 +184,8 @@ function _record_use!(interp::ClassifyInterp, @nospecialize(f), argtypes::Vector
         m isa Method || return nothing
         u = TraitUse(_describe(f, argtypes), m, _line(sv, m), X)
         # constant propagation infers a call again: each use once
-        any(v -> v.what == u.what && v.method === u.method && v.line == u.line, interp.uses) ||
-            push!(interp.uses, u)
+        any(v -> v.what == u.what && v.method === u.method && v.line == u.line, _state(interp).uses) ||
+            push!(_state(interp).uses, u)
         return nothing
     end
     return nothing
@@ -232,7 +213,7 @@ functions of its module it passes them to: empty where `m` is fully bounded at i
 arguments (traits §7.3).
 """
 function classify(m::Method; world::UInt = Base.get_world_counter())
-    interp = ClassifyInterp(m.module; world, method = m)
+    interp = _classify_interp(m.module; world, method = m)
     sig = m.sig
     tv = Any[]
     s = sig
@@ -241,7 +222,7 @@ function classify(m::Method; world::UInt = Base.get_world_counter())
         s = s.body
     end
     CC.typeinf_frame(interp, m, sig, Core.svec(tv...), false)
-    return interp.uses
+    return _state(interp).uses
 end
 
 # the bare traits of a method's trait arguments (each component of an intersection)
@@ -263,8 +244,8 @@ _components(@nospecialize(X)) = (u = Base.unwrap_unionall(X); u isa DataType && 
     Any[c for c in (u.parameters[1]::DataType).parameters] : Any[X])
 # whether a value known by the trait `X` may be one of the classified method's trait arguments
 function _related(interp::ClassifyInterp, @nospecialize(X))
-    interp.method === nothing && return true
-    for c in _components(X), A in interp.traits
+    _state(interp).method === nothing && return true
+    for c in _components(X), A in _state(interp).traits
         b = bare(c)
         (b <: A || A <: b) && return true
     end
