@@ -61,6 +61,7 @@ precompile(_image_methods_hook, (Vector{Any}, String))
 precompile(_module_end_hook, (Module,))
 precompile(_deletion_hook, (Method,))
 precompile(_fully_typed_hook, (Core.SimpleVector,))
+precompile(_sig_alternatives, (Any,))           # the image hook's, at each package load
 
 function __init__()
     # the member hook (compiler §10.4): a member of a pattern is checked at its first use

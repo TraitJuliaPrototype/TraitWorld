@@ -164,12 +164,32 @@ function _sig_alternatives(@nospecialize(sig), limit::Int = 256)
             push!(alts, Any[p])
         end
     end
-    prod(length, alts; init = 1) <= limit || return Any[sig]
+    # plain loops, so that the hooks' precompiled code holds all of it (no `collect` of a closure's
+    # generator compiled at a session's loads)
+    n = 1
+    for a in alts
+        n *= length(a::Vector{Any})
+    end
+    n <= limit || return Any[sig]
     combos = Vector{Any}[Any[]]
     for a in alts
-        combos = Vector{Any}[Any[c..., x] for c in combos for x in a]
+        next = Vector{Any}[]
+        for c in combos, x in a::Vector{Any}
+            c2 = copy(c)
+            push!(c2, x)
+            push!(next, c2)
+        end
+        combos = next
     end
-    return Any[Tuple{filter(x -> x !== _NO_ARG, c)...} for c in combos]
+    out = Any[]
+    for c in combos
+        ps = Any[]
+        for x in c
+            x === _NO_ARG || push!(ps, x)
+        end
+        push!(out, Tuple{ps...})
+    end
+    return out
 end
 
 """
