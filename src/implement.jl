@@ -325,9 +325,37 @@ end
 
 ## Members of a pattern, checked at their first use (lowering §4)
 
-"the patterns whose members are checked at their first use: (pattern, trait instance, how)"
+"the patterns declared in this session whose members are checked at their first use: (pattern, trait instance, how)"
 const _PATTERNS = Any[]
 _pending!(@nospecialize(member), @nospecialize(inst), how::How) = push!(_PATTERNS, (member, inst, how))
+
+# The patterns of `X` that may hold `T`: those declared in this session, and those on the runtime's
+# entries of `T`'s TypeName and its supertypes', which a package image keeps (the library's table is
+# this session's only: another package's additions to it are not in that package's image).
+function _patterns_for(@nospecialize(T), @nospecialize(X))
+    out = Any[]
+    for p in _PATTERNS
+        bare(p[2]) === bare(X) && push!(out, p)
+    end
+    Xname = (Base.unwrap_unionall(bare(X))::DataType).name
+    d = Base.unwrap_unionall(T)
+    while d isa DataType && d !== Any
+        for en in getfield(d.name, :memberships, :acquire)
+            getfield(en, :set) === Xname || continue
+            getfield(en, :max_world, :acquire) == typemax(UInt64) || continue
+            pat, inst = getfield(en, :member), getfield(en, :instance)
+            _is_pattern(pat) || continue
+            # not a pattern `@implement` declared: `Dynamic{X}`'s membership, a trait's supertraits
+            core = Base.unwrap_unionall(pat)
+            (core isa DataType && (core.name === Base.unwrap_unionall(Dynamic).name || istrait(core))) && continue
+            any(p -> p[1] == pat && p[2] == inst, out) && continue
+            by = getfield(en, :by)
+            push!(out, (pat, inst, How(by isa Symbol ? by : nothing)))
+        end
+        d = d.super
+    end
+    return out
+end
 
 "the kept answers per (member type, trait): `nothing` for a member that passed, else the error"
 const _CHECKED = IdDict{Any,Any}()
@@ -366,8 +394,7 @@ const _IN_PROGRESS = InProgress()
 _member_hook(@nospecialize(T), @nospecialize(X)) = (check_first_use(T, X); nothing)
 
 function _check_pattern_member(@nospecialize(T), @nospecialize(X))
-    for (pat, inst, how) in _PATTERNS
-        bare(inst) === bare(X) || continue
+    for (pat, inst, how) in _patterns_for(T, X)
         T <: pat || continue
         # the trait's instance at T: the pattern's variables matched against T
         Tinst = inst
