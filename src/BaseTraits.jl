@@ -15,7 +15,7 @@ import Dates
 @trait_module
 
 export HasLength, Iterable, Indexable, MutableIndexable, Resizable, Keyed, Solvable,
-       LinearOp, apply!, BoundedText, textbound, asvector, IndexableVector, retain!
+       LinearOp, apply!, BoundedText, textbound, HasProperty, asvector, IndexableVector, retain!
 
 # --- the traits ----------------------------------------------------------------------------------
 
@@ -145,6 +145,19 @@ end
 A value whose printed form has a known upper bound in bytes: `textbound(x)::Int`; `textbound(T)`
 for a type with a fixed bound.
 """ BoundedText
+
+@trait HasProperty{N, R} begin
+    @input N
+    @const N::R
+end
+@doc """
+    HasProperty{N, R}
+
+A property by name: `x.N` is an `R` (`getproperty` at the constant name `N`), served by a stored
+field or by the member's own `getproperty`. `N` is an input: a type joins at each name,
+`@implement HasProperty{:ps, PView} Integ`. On a value known only by its trait, `x.N` has the
+declared type, as a declared field's read.
+""" HasProperty
 
 # --- Base's types, by Base's abstract types and Base's own methods (lowering §10) ---------------
 

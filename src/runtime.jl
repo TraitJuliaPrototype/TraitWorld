@@ -2,6 +2,8 @@
 
 _open_set!(@nospecialize(T)) = ccall(:jl_set_open_set, Cvoid, (Any,), T)
 _set_contract!(@nospecialize(T), @nospecialize(c)) = ccall(:jl_set_contract, Cvoid, (Any, Any), T, c)
+"Mark a set's input parameters (compiler §4.6): bit i for parameter i, the first eight only."
+_set_inputs!(@nospecialize(T), mask::UInt8) = ccall(:jl_set_input_params, Cvoid, (Any, UInt8), T, mask)
 
 "Declare `member` a member of `instance` (compiler §4.2). The caller continues with `Expr(:latestworld)`."
 function _declare!(@nospecialize(member), @nospecialize(instance), mod::Module,
@@ -37,8 +39,10 @@ function _set_declared!(@nospecialize(f), mod::Module, nargs::Int, @nospecialize
 end
 
 # A trait's declared fields for inference (compiler §7.1): their types evaluated with the variables
-# of the trait's wrapper; a type that names `Self` is recorded as `Any`.
-function _set_declared_fields!(@nospecialize(X), mod::Module, names::Vector{Symbol}, tyexs::Vector{Any})
+# of the trait's wrapper; a type that names `Self` is recorded as `Any`. A field named by an input
+# parameter (`HasProperty{N, R}`'s `N`) is recorded under that parameter's variable.
+function _set_declared_fields!(@nospecialize(X), mod::Module, names::Vector{Symbol}, tyexs::Vector{Any},
+                               inputs::Vector{Symbol} = Symbol[])
     w = Base.unwrap_unionall(X).name.wrapper
     vars = TypeVar[]
     s = w
@@ -52,6 +56,7 @@ function _set_declared_fields!(@nospecialize(X), mod::Module, names::Vector{Symb
             Core.eval(mod, Expr(:let, Expr(:block, Any[:($(v.name) = $v) for v in vars]...), ex))
         push!(types, T isa Type || T isa TypeVar ? T : Any)
     end
-    ccall(:jl_set_declared_fields, Cvoid, (Any, Any, Any), X, Core.svec(names...), Core.svec(types...))
+    keys = Any[n in inputs ? vars[findfirst(v -> v.name === n, vars)::Int] : n for n in names]
+    ccall(:jl_set_declared_fields, Cvoid, (Any, Any, Any), X, Core.svec(keys...), Core.svec(types...))
     return nothing
 end

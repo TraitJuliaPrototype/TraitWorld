@@ -47,6 +47,7 @@ function _trait(mod::Module, head, body)
     push!(out.args, Expr(:let, Expr(:block, tvdefs...), quote
         local $t = Core._abstracttype($mod, $(QuoteNode(name)), Core.svec($(params...)))
         $(lib(:_open_set!))($t)
+        $(isempty(items.inputs) ? nothing : :($(lib(:_set_inputs!))($t, $(_input_mask(name, params, items.inputs)))))
         Core._setsuper!($t, Any)
         Core._typebody!(false, $t)
         Core.declare_const($mod, $(QuoteNode(name)), $t)
@@ -92,7 +93,8 @@ function _trait(mod::Module, head, body)
                                 $(items.attribute === :dynamic ? 2 : 1))))
     # the declared fields' names and types, read by inference (compiler §7.1)
     isempty(items.fields) || push!(out.args, :($(lib(:_set_declared_fields!))($name, $mod,
-        Symbol[$([QuoteNode(f[1]) for f in items.fields]...)], Any[$([QuoteNode(f[2]) for f in items.fields]...)])))
+        Symbol[$([QuoteNode(f[1]) for f in items.fields]...)], Any[$([QuoteNode(f[2]) for f in items.fields]...)],
+        Symbol[$(QuoteNode.(items.inputs)...)])))
     # 6. Dynamic{X}'s membership: Dynamic{Z} where {P…, Z <: X{P…}}, forwarding by `object`
     dynpat = foldr((p, acc) -> :(Core.UnionAll($p, $acc)), params;
                    init = :(Core.UnionAll($Z, $(lib(:Dynamic)){$Z})))
@@ -102,6 +104,17 @@ function _trait(mod::Module, head, body)
     push!(out.args, :(Core.@__doc__ $name))
     push!(out.args, nothing)
     return esc(out)
+end
+
+"the mask of a trait's input parameters for the runtime (compiler §4.6): bit i for parameter i"
+function _input_mask(name::Symbol, params::Vector{Symbol}, inputs::Vector{Symbol})
+    m = 0x00
+    for a in inputs
+        i = findfirst(==(a), params)::Int
+        i <= 8 || error("@trait $name: @input $a: only the first eight parameters can be inputs")
+        m |= 0x01 << (i - 1)
+    end
+    return m
 end
 
 _opname(f) = f isa Symbol ? f : (f::Expr).args[end] isa QuoteNode ? (f.args[end]::QuoteNode).value : f.args[end]
@@ -188,6 +201,11 @@ function _parse_body(name::Symbol, params::Vector{Symbol}, body)
                 error("@trait $name: cannot read $item")
             end
         end
+    end
+    for f in fields
+        # a field named by a parameter is a property named by an input (`HasProperty{N, R}`: `N::R`)
+        f[1] in params && !(f[1] in inputs) &&
+            error("@trait $name: the field $(f[1]) is named by a parameter that is not an input: mark it @input $(f[1])")
     end
     for (p, _) in equations, f in fields
         # a parameter defined by an equation and by a field is defined twice

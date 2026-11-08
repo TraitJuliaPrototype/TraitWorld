@@ -88,7 +88,6 @@ end
 function _contracts_of!(out, @nospecialize(X))
     c = contract(X)
     c === nothing && return out
-    any(p -> p[1] === c, out) && return out
     env = Dict{Symbol,Any}()
     dt = Base.unwrap_unionall(X)::DataType
     if X isa DataType
@@ -96,6 +95,8 @@ function _contracts_of!(out, @nospecialize(X))
             env[p] = dt.parameters[i]
         end
     end
+    # a trait at other values of its inputs is a trait of its own (traits §3.2)
+    any(q -> q[1] === c && all(p -> get(q[2], p, nothing) == get(env, p, nothing), c.inputs), out) && return out
     push!(out, (c, env))
     if length(env) == length(c.params)
         for s in c.supers

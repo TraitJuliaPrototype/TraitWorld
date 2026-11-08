@@ -50,7 +50,7 @@ include("ahead.jl")
 include("BaseTraits.jl")
 using .BaseTraits
 export HasLength, Iterable, Indexable, MutableIndexable, Resizable, Keyed, Solvable,
-       LinearOp, apply!, BoundedText, textbound, asvector, IndexableVector, retain!
+       LinearOp, apply!, BoundedText, textbound, HasProperty, asvector, IndexableVector, retain!
 
 function __init__()
     # the member hook (compiler §10.4): a member of a pattern is checked at its first use

@@ -75,6 +75,7 @@ function _params_at(c::Contract, @nospecialize(S), @nospecialize(stated), how::H
     if S isa DataType
         for f in c.fields
             any(p -> _mentions(f.type, p) && !haskey(env, p), c.params) || continue
+            f.name in c.inputs && continue           # a property named by an input: stated
             hasfield(S, f.name) || continue          # reported by the field check
             stored = fieldtype(S, f.name)
             tvs = Dict{Symbol,TypeVar}(p => TypeVar(p) for p in c.params if _mentions(f.type, p))
@@ -311,27 +312,33 @@ function _check_fields!(problems, c::Contract, env, S::DataType)
     for f in c.fields
         declared = try _eval_in(c, f.type, env, S) catch; nothing end
         declared isa Type || continue
+        # a field named by an input is the property at the input's value (`HasProperty{:ps, R}`: `x.ps`)
+        name = f.name in c.inputs ? get(env, f.name, nothing) : f.name
+        name isa Symbol || continue
         if _has_own_getproperty(S)
-            rt = Base.infer_return_type(_getprop_at(f.name), (S,))
-            rt <: declared || push!(problems, "getproperty(::$S, :$(f.name)) infers $rt, not the declared $(f.type) = $declared")
+            rt = Base.infer_return_type(_getprop_at(name), (S,))
+            rt <: declared || push!(problems, "getproperty(::$S, :$(name)) infers $rt, not the declared $(f.type) = $declared")
             continue
         end
-        if !hasfield(S, f.name)
-            push!(problems, "the field $(f.name)::$(f.type) is missing: $S stores $(join(fieldnames(S), ", "))")
+        if !hasfield(S, name)
+            push!(problems, "the field $(name)::$(f.type) is missing: $S stores $(join(fieldnames(S), ", "))")
             continue
         end
-        stored = fieldtype(S, f.name)
+        stored = fieldtype(S, name)
         if f.isconst
-            stored <: declared || push!(problems, "the field $(f.name) is stored as $stored, not as the declared $declared")
+            stored <: declared || push!(problems, "the field $(name) is stored as $stored, not as the declared $declared")
         else
-            ismutabletype(S) || (push!(problems, "the field $(f.name) is writable through the trait, but $S is immutable: declare it @const"); continue)
-            isconst(S, f.name) && (push!(problems, "the field $(f.name) is const in $S, but writable through the trait: declare it @const"); continue)
-            stored == declared || push!(problems, "the writable field $(f.name) is stored as $stored; the trait declares $declared")
+            ismutabletype(S) || (push!(problems, "the field $(name) is writable through the trait, but $S is immutable: declare it @const"); continue)
+            isconst(S, name) && (push!(problems, "the field $(name) is const in $S, but writable through the trait: declare it @const"); continue)
+            stored == declared || push!(problems, "the writable field $(name) is stored as $stored; the trait declares $declared")
         end
     end
 end
 
-_getprop_at(name::Symbol) = x -> getproperty(x, name)
+"`getproperty` at the constant name `n`, as a call `x.n` infers it"
+struct _GetPropAt{n} end
+(::_GetPropAt{n})(x) where {n} = getproperty(x, n)
+_getprop_at(name::Symbol) = _GetPropAt{name}()
 _has_own_getproperty(@nospecialize(S)) = which(getproperty, Tuple{S, Symbol}).module !== Base
 
 # A member that joins a supertrait by a membership of its own serves it the same way (traits §4.5).

@@ -108,3 +108,55 @@ struct Plain1 end
     e = try @eval(@implement Showy Plain1); nothing catch err; err end
     @test e isa ImplementError && occursin("takes any receiver", sprint(showerror, e))
 end
+
+# HasProperty{N, R}: a type joins at each name (traits §3.2, §10.1; compiler §4.6, §7.1; C-32, T-103)
+struct Props1
+    a::Int
+    b::String
+end
+struct Props2
+    store::Vector{Float64}
+end
+Base.getproperty(p::Props2, s::Symbol) = s === :ps ? getfield(p, :store) : getfield(p, s)
+struct Props3; x::Int; end
+Base.getproperty(p::Props3, s::Symbol) = s === :q ? "q" : getfield(p, s)
+@implement HasProperty{:a, Int} Props1
+@implement HasProperty{:b, String} Props1
+@implement HasProperty{:ps, Vector{Float64}} Props2
+propkind(x::HasProperty{:a}) = :a
+propkind(x::HasProperty{:ps}) = :ps
+readps(@nospecialize(x::HasProperty{:ps, Vector{Float64}})) = x.ps
+@trait PView{P} <: HasProperty{:ps, Vector{P}} begin
+    tag(v::PView)::Symbol
+end
+tag(::Props2) = :p2
+@implement PView{Float64} Props2
+readview(@nospecialize(v::PView{Float64})) = v.ps
+@testset "BaseTraits: HasProperty at several names" begin
+    @test Props1 <: HasProperty{:a, Int} && Props1 <: HasProperty{:b, String}
+    @test !(Props1 <: HasProperty{:ps}) && !(Props1 <: HasProperty{:a, String})
+    @test Props1 <: All{HasProperty{:a, Int}, HasProperty{:b, String}}
+    # a second instance at a name already held is refused
+    e = try @eval(@implement HasProperty{:a, Float64} Props1); nothing catch err; err end
+    @test e !== nothing
+    @test Props1 <: HasProperty{:a, Int} && !(Props1 <: HasProperty{:a, Float64})
+    # the same instance again is a redeclaration, and keeps the other name
+    @eval @implement HasProperty{:a, Int} Props1
+    @test Props1 <: HasProperty{:a, Int} && Props1 <: HasProperty{:b, String}
+    # dispatch picks by the name
+    @test propkind(Props1(1, "x")) === :a && propkind(Props2([1.0])) === :ps
+    # x.N on a value known by its trait has the declared type; through a supertrait too
+    @test Base.infer_return_type(readps, (HasProperty{:ps, Vector{Float64}},)) == Vector{Float64}
+    @test readps(Props2([2.0])) == [2.0]
+    @test Base.infer_return_type(readview, (PView{Float64},)) == Vector{Float64}
+    @test readview(Props2([3.0])) == [3.0]
+    # the member's own getproperty is checked at the constant name
+    e = try @eval(@implement HasProperty{:q, Int} Props3); nothing catch err; err end
+    @test e isa ImplementError && occursin("infers String", sprint(showerror, e))
+    @eval @implement HasProperty{:q, String} Props3
+    @test Props3 <: HasProperty{:q, String}
+    # only an input names a field
+    @test_throws Exception @eval @trait BadField{N, R} begin
+        @const N::R
+    end
+end
