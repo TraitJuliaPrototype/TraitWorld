@@ -52,6 +52,16 @@ using .BaseTraits
 export HasLength, Iterable, Indexable, MutableIndexable, Resizable, Keyed, Solvable,
        LinearOp, apply!, BoundedText, textbound, HasProperty, asvector, IndexableVector, retain!
 
+# The hooks the runtime and Base call through `invokelatest` or `jl_apply`: precompiled, so that no session
+# compiles them at its first package load (W-121, E-286: `_strict_at_load!` took half of TraitWorld's load)
+precompile(_strict_at_load!, (Base.PkgId,))
+precompile(_member_hook, (Any, Any))
+precompile(_definition_hook, (Method, Bool))
+precompile(_image_methods_hook, (Vector{Any}, String))
+precompile(_module_end_hook, (Module,))
+precompile(_deletion_hook, (Method,))
+precompile(_fully_typed_hook, (Core.SimpleVector,))
+
 function __init__()
     # the member hook (compiler §10.4): a member of a pattern is checked at its first use
     ccall(:jl_set_member_hook, Cvoid, (Any,), _member_hook)
