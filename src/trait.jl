@@ -98,6 +98,8 @@ function _trait(mod::Module, head, body)
     items.attribute === :none ||
         push!(out.args, :(ccall(:jl_set_default_attribute, Cvoid, (Any, Cint), $name,
                                 $(items.attribute === :dynamic ? 2 : 1))))
+    # closed after load (traits §3.4): the compiler treats a negative as final once its declarers have loaded
+    items.closed && push!(out.args, :(ccall(:jl_set_closed_after_load, Cvoid, (Any,), $name)))
     # the declared fields' names and types, read by inference (compiler §7.1)
     isempty(items.fields) || push!(out.args, :($(lib(:_set_declared_fields!))($name, $mod,
         Symbol[$([QuoteNode(f[1]) for f in items.fields]...)], Any[$([QuoteNode(f[2]) for f in items.fields]...)],
@@ -158,6 +160,7 @@ function _parse_body(name::Symbol, params::Vector{Symbol}, body)
     equations = Pair{Symbol,Any}[]
     inputs = Symbol[]
     attribute = :none
+    closed = false
     concrete = Pair{Symbol,Symbol}[]
     if body !== nothing
         Meta.isexpr(body, :block) || error("@trait $name: the body is a begin … end block")
@@ -188,6 +191,10 @@ function _parse_body(name::Symbol, params::Vector{Symbol}, body)
                     attribute = :dynamic
                 elseif m === Symbol("@default_compiled")
                     attribute = :compiled
+                elseif m === Symbol("@closed_after_load")
+                    # traits §3.4: a negative is final once its declarers have loaded
+                    isempty(margs) || error("@trait $name: @closed_after_load takes no arguments")
+                    closed = true
                 else
                     error("@trait $name: $m is not an item of a trait's body")
                 end
@@ -218,7 +225,7 @@ function _parse_body(name::Symbol, params::Vector{Symbol}, body)
         # a parameter defined by an equation and by a field is defined twice
         _mentions(f[2], p) && f[2] === p && error("@trait $name: $p is defined by a field and by an equation")
     end
-    return (ops = ops, fields = fields, equations = equations, inputs = inputs, attribute = attribute,
+    return (ops = ops, fields = fields, equations = equations, inputs = inputs, attribute = attribute, closed = closed,
             concrete = concrete)
 end
 
