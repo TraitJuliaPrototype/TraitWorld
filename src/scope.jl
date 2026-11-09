@@ -70,6 +70,7 @@ does not type by a trait (traits §7.6): they have no effect. A package's tests 
 function detect_unused_casts(mod::Module)
     out = Tuple{Method,Int,Any,Int}[]
     for m in _module_methods(mod)
+        _has_attributed_call(m) || continue      # only a method whose own code casts is inferred
         for (src, _) in (try Base.code_typed_by_type(m.sig; optimize = false) catch; [] end)
             src isa Core.CodeInfo || continue
             for st in src.code
@@ -97,6 +98,17 @@ end
 
 _is_attributed_call(@nospecialize(f)) =
     f === Core.attributed_call || (f isa GlobalRef && f.mod === Core && f.name === :attributed_call)
+
+# Whether a method's lowered code holds a cast's call: inference keeps the statements it does not
+# optimize, so only such a method can hold one in its typed code.
+function _has_attributed_call(m::Method)
+    isdefined(m, :source) && m.source !== nothing || return false
+    src = try Base.uncompressed_ir(m) catch; return false end
+    for st in src.code
+        Meta.isexpr(st, :call) && !isempty(st.args) && _is_attributed_call(st.args[1]) && return true
+    end
+    return false
+end
 
 # A package's own methods: those defined in `mod` or a module defined inside it, at any depth, its
 # methods of other modules' functions included (`Base.show(io, ::T)`), so that a package's tests
