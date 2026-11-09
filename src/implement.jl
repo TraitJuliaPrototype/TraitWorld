@@ -223,6 +223,9 @@ function _module_end_hook(m::Module)
             X = supertype(X)
         end
         X === Any && continue
+        # a set whose contract no `@trait` declared (Base's `IO`, traits §9b): a declared subtype is a
+        # member, as in Julia
+        contract(X) === nothing && continue
         (S.name, X.name) in _IMPLEMENTED && continue
         kind = isabstracttype(S) ? "abstract type" : "struct"
         throw(ImplementError(X.name.wrapper, S.name.wrapper,
