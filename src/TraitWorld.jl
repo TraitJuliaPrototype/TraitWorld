@@ -11,6 +11,9 @@ module TraitWorld
 isdefined(Core, :MembershipEntry) ||
     error("TraitWorld needs Julia's unified build, whose type system has memberships")
 
+# E-312: the library's own code compiled by facts (the other options off)
+Base.Experimental.@compiler_options facts = true
+
 export @trait, @implement, Dynamic, unwrap, like, withfields, ImplementError, TraitUseError,
        @bounded, @open, check_definitions, classify, @trait_module, compiled_for, with_dynamic, keep,
        detect_dynamic_fallbacks, detect_unused_casts, Callable,
