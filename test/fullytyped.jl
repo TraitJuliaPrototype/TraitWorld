@@ -84,6 +84,13 @@ end
     @test_throws ImplementError @eval @implement KVec Vector{Any}
     @eval @implement KVec Vector{Float64}
     @test klen([1.0]) == 1
+    # Self is the forwarding field's type where the member forwards (traits §4.4)
+    @eval struct LooseBox; data::AbstractVector{Float64}; end
+    @eval struct TightBox; data::Vector{Float64}; end
+    e = try @eval(@implement KVec LooseBox by data); nothing catch err; err end
+    @test e isa ImplementError && occursin("Self is AbstractVector{Float64}", sprint(showerror, e))
+    @eval @implement KVec TightBox by data
+    @test klen(TightBox([1.0, 2.0])) == 2
     @test_logs (:warn, r"not concrete") @eval @implement Soft Vector{Any}
     @test firstof([1.0]) == 1.0
     @test_throws TraitUseError firstof(Any[1])

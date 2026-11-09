@@ -206,9 +206,11 @@ function _image_methods_hook(ms::Vector{Any}, pkg::String)
     return drop
 end
 
-# The module-end hook (compiler §10.1): a type the module defines with a trait as its declared
-# supertype, and no `@implement` for it, is refused at the module's end (traits §5.2).
+# The module-end hook (compiler §10.1): the methods that waited for later definitions are classified
+# (compiler §6.7), and a type the module defines with a trait as its declared supertype, and no
+# `@implement` for it, is refused at the module's end (traits §5.2).
 function _module_end_hook(m::Module)
+    _end_pending_bounded(m)
     for name in names(m; all = true)
         isdefined(m, name) || continue
         T = try getglobal(m, name) catch; continue end

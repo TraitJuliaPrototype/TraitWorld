@@ -21,7 +21,7 @@ function check_member(@nospecialize(X), @nospecialize(S); @nospecialize(stated =
     env = _params_at(c, S, stated, how, problems)
     inst = _instance(c, env, stated)
     served_own = _check_contract!(problems, c, env, S, inst, how, defaults)
-    _check_concrete!(problems, c, env, S)
+    _check_concrete!(problems, c, env, S, how)
     # the supertraits' contracts, at the parameters the subtrait gives them (traits §4.5)
     if inst isa DataType
         for (sc, senv) in _contracts_of(inst)
@@ -29,7 +29,7 @@ function check_member(@nospecialize(X), @nospecialize(S); @nospecialize(stated =
             sinst = _instance(sc, senv, bare(sc.trait))
             served_own |= _check_contract!(problems, sc, senv, S, sinst, how, defaults)
             _agree!(problems, sc, sinst, S, how)
-            _check_concrete!(problems, sc, senv, S)
+            _check_concrete!(problems, sc, senv, S, how)
         end
     end
     receiver = how.by !== nothing ? :field : served_own ? :self : :none
@@ -37,12 +37,13 @@ function check_member(@nospecialize(X), @nospecialize(S); @nospecialize(stated =
 end
 
 # A trait's concrete parts (traits §14): each named parameter, and Self, concrete at a member; a
-# pattern's members are checked at their first use
-function _check_concrete!(problems, c::Contract, env, @nospecialize(S))
+# pattern's members are checked at their first use. Self is the receiver type: the forwarding
+# field's where the member forwards (traits §4.4)
+function _check_concrete!(problems, c::Contract, env, @nospecialize(S), how::How = How(nothing))
     isempty(c.concrete) && return
     (S isa DataType && !Base.has_free_typevars(S)) || return
     for (n, level) in c.concrete
-        v = n === :Self ? S : get(env, n, nothing)
+        v = n === :Self ? _receiver_type(S, how) : get(env, n, nothing)
         v === nothing && continue
         is_concrete_part(v) && continue
         tag = level === :enforce ? "@enforce_concrete_only" : "@warn_on_abstract"
@@ -195,8 +196,10 @@ function _check_contract!(problems, c::Contract, env, @nospecialize(S), @nospeci
             # the method's existence is checked, and each call through the trait asserts the result (§7.9)
             _open_further(op, tt) && continue
             rt = Base.infer_return_type(op.f, tt)
+            # the declared result as written, and what it is at S where that differs (`T` = `Float64`)
+            dstr = string(op.result) == string(declared) ? "$declared" : "$(op.result) = $declared"
             rt <: declared ||
-                push!(problems, "$(op.name)'s method at $S infers its result as $rt, wider than the declared $(op.result) = $declared")
+                push!(problems, "$(op.name)'s method at $S infers its result as $rt, wider than the declared $dstr")
         end
     end
     complete_env && S isa DataType && _check_fields!(problems, c, env, S)

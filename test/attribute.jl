@@ -108,6 +108,9 @@ px(p::P2) = p.x
 ok(p::Pt) = px(p) + 1.0                                   # through the contract: accepted
 kept(p::Pt) = keep(p)                                     # keeping it: within every contract
 @open peek(p::Pt) = p.x                                   # open on purpose
+scaled(p::Pt, k::Float64 = 2.0) = k * px(p)               # a default: its method calls one defined after it
+later(p::Pt) = helper(p, 1.0)                             # a call that reaches no method yet
+helper(p::Pt, k::Float64) = k + px(p)
 end
 
 @testset "bounded in a trait module" begin
@@ -115,4 +118,24 @@ end
     @test Bounded.peek(Bounded.P2(3.0)) == 3.0
     @test_throws TraitUseError Core.eval(Bounded, :(bad(p::Pt) = p.x))   # open: refused
     @test !isdefined(Bounded, :bad) || isempty(methods(Bounded.bad))
+    # a call that reaches no method yet waits for the next definition in the module (compiler §6.7)
+    @test Bounded.scaled(Bounded.P2(1.5)) == 3.0
+    @test Bounded.later(Bounded.P2(1.0)) == 2.0
+    @test isempty(check_definitions(Bounded))
+    Core.eval(Bounded, :(waits(p::Pt) = missing_yet(p)))                 # waits: no method yet
+    @test_throws TraitUseError Core.eval(Bounded, :(missing_yet(x) = x.x))  # opens it: refused here
+    @test isempty(methods(Bounded.waits))
+    # at the module's end, a call that still reaches no method is outside the contract
+    e = try
+        Core.eval(@__MODULE__, :(module Unfinished
+            using TraitWorld
+            @trait_module
+            using ..Bounded: Pt, px
+            g(p::Pt) = never(p, 1)
+            never(p::Pt) = px(p)
+        end)); nothing
+    catch err
+        err
+    end
+    @test e isa TraitUseError && occursin("never", sprint(showerror, e))
 end

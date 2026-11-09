@@ -14,11 +14,13 @@ struct TraitUse
     trait::Any
 end
 
-# The record of one check: the uses found, the module whose functions are followed, the method
-# classified (its own uses always count), the traits of its trait arguments (a value of another
-# trait is not tracked).
+# The record of one check: the uses found, the calls that reach no method yet (decided once one is
+# defined, compiler §6.7), the module whose functions are followed, the method classified (its own
+# uses always count), the traits of its trait arguments (a value of another trait is not tracked).
 struct ClassifyState
     uses::Vector{TraitUse}
+    pending::Vector{TraitUse}
+    waits_for::Vector{Symbol}        # the names whose definition decides the pending calls
     mod::Module
     method::Union{Nothing,Method}
     traits::Vector{Any}
@@ -34,7 +36,7 @@ _check_hook(interp::ClassifyInterp, @nospecialize(f), argtypes::Vector{Any}, sv:
     (_record_use!(interp, f, argtypes, sv); nothing)
 _classify_interp(mod::Module; world::UInt = Base.get_world_counter(), method::Union{Nothing,Method} = nothing) =
     CC.DefinitionCheckInterpreter(world, _check_hook,
-                                  ClassifyState(TraitUse[], mod, method, method === nothing ? Any[] : _argument_traits(method)))
+                                  ClassifyState(TraitUse[], TraitUse[], Symbol[], mod, method, method === nothing ? Any[] : _argument_traits(method)))
 
 # the trait a value of type T is known by: a trait instance or an intersection, not a concrete member
 function _trait_of(@nospecialize(T))
@@ -173,6 +175,8 @@ function _record_use!(interp::ClassifyInterp, @nospecialize(f), argtypes::Vector
     (d isa Method && d.module === _state(interp).mod) || return nothing
     # a function marked `@open` is open on purpose: its uses are its own, not its callers' (traits §7.3)
     d !== _state(interp).method && _bounded_option(d) === false && return nothing
+    # a trait's own method for an operation is the contract itself (its forwarding, its default)
+    _is_trait_method(d) && return nothing
     for k in 2:length(argtypes)
         X = _trait_of(argtypes[k])
         X === nothing && continue
@@ -183,18 +187,59 @@ function _record_use!(interp::ClassifyInterp, @nospecialize(f), argtypes::Vector
         m = sv.linfo.def
         m isa Method || return nothing
         u = TraitUse(_describe(f, argtypes), m, _line(sv, m), X)
+        # a call that reaches no method yet is decided once one is defined (compiler §6.7): a default
+        # argument's method, which Julia defines before the method it calls
+        pending = _reaches_no_method(interp, f, argtypes)
+        pending && push!(_state(interp).waits_for, _name_of(f))
+        list = pending ? _state(interp).pending : _state(interp).uses
         # constant propagation infers a call again: each use once
-        any(v -> v.what == u.what && v.method === u.method && v.line == u.line, _state(interp).uses) ||
-            push!(_state(interp).uses, u)
+        _has_use(list, u) || push!(list, u)
         return nothing
     end
     return nothing
 end
 
-function _describe(@nospecialize(f), argtypes::Vector{Any})
-    fs = f isa Function ? string(nameof(f)) : string(f)
-    return string(fs, "(", join([string(CC.widenconst(a)) for a in argtypes[2:end]], ", "), ")")
+# the name a definition of `f`'s methods carries; `:*` where it has none (any definition decides)
+function _name_of(@nospecialize(f))
+    f isa Function && return nameof(f)
+    f isa Type && Base.unwrap_unionall(f) isa DataType && return nameof(Base.unwrap_unionall(f))
+    return :*
 end
+
+function _has_use(list::Vector{TraitUse}, u::TraitUse)
+    for v in list
+        v.what == u.what && v.method === u.method && v.line == u.line && return true
+    end
+    return false
+end
+
+# whether a call of a generic function reaches no method in the check's world
+function _reaches_no_method(interp::ClassifyInterp, @nospecialize(f), argtypes::Vector{Any})
+    f isa Core.Builtin && return false
+    for a in argtypes
+        a isa Core.TypeofVararg && return false
+    end
+    ms = Base._methods_by_ftype(CC.argtypes_to_type(argtypes), -1, interp.world)
+    return ms isa Vector && isempty(ms)
+end
+
+function _describe(@nospecialize(f), argtypes::Vector{Any})
+    # lowering's capture of a variable in a closure (a generator, a comprehension, `x -> …`)
+    f === Core._typeof_captured_variable && length(argtypes) == 2 &&
+        return string("a closure capturing a ", CC.widenconst(argtypes[2]))
+    # a call with keywords as written, `g(args…; name::T, …)`, not lowering's `kwcall`
+    if f === Core.kwcall && length(argtypes) >= 3
+        g = CC.singleton_type(CC.widenconst(argtypes[3]))
+        NT = CC.widenconst(argtypes[2])
+        if g !== nothing && NT <: NamedTuple && isconcretetype(NT)
+            kws = join(["$n::$T" for (n, T) in zip(fieldnames(NT), fieldtypes(NT))], ", ")
+            pos = join([string(CC.widenconst(a)) for a in argtypes[4:end]], ", ")
+            return string(_describe_name(g), "(", pos, "; ", kws, ")")
+        end
+    end
+    return string(_describe_name(f), "(", join([string(CC.widenconst(a)) for a in argtypes[2:end]], ", "), ")")
+end
+_describe_name(@nospecialize(f)) = f isa Function ? string(nameof(f)) : string(f)
 
 function _line(sv::CC.InferenceState, m::Method)
     try
@@ -210,10 +255,17 @@ end
 
 The uses outside the contract of the values typed by a trait in `m`'s body and the unannotated
 functions of its module it passes them to: empty where `m` is fully bounded at its trait
-arguments (traits §7.3).
+arguments (traits §7.3). A call that reaches no method counts, as at the end of `m`'s module.
 """
 function classify(m::Method; world::UInt = Base.get_world_counter())
+    st = _classify(m; world)
+    return vcat(st.uses, st.pending)
+end
+
+# the check's record: the uses decided now, and the calls that reach no method yet
+function _classify(m::Method; world::UInt = Base.get_world_counter())
     interp = _classify_interp(m.module; world, method = m)
+    st = _state(interp)
     sig = m.sig
     tv = Any[]
     s = sig
@@ -222,7 +274,28 @@ function classify(m::Method; world::UInt = Base.get_world_counter())
         s = s.body
     end
     CC.typeinf_frame(interp, m, sig, Core.svec(tv...), false)
-    return _state(interp).uses
+    _names_undefined!(st.waits_for, m)
+    return (uses = st.uses, pending = st.pending, waits_for = st.waits_for)
+end
+
+# the globals of its module that `m`'s body names and that are not yet defined: functions defined
+# later, which inference cannot follow now (compiler §6.7)
+function _names_undefined!(out::Vector{Symbol}, m::Method)
+    src = try Base.uncompressed_ast(m) catch; return out end
+    for stmt in src.code
+        _names_undefined!(out, m.module, stmt)
+    end
+    return out
+end
+function _names_undefined!(out::Vector{Symbol}, M::Module, @nospecialize(x))
+    if x isa GlobalRef
+        x.mod === M && !isdefined(M, x.name) && !(x.name in out) && push!(out, x.name)
+    elseif x isa Expr
+        for a in x.args
+            _names_undefined!(out, M, a)
+        end
+    end
+    return out
 end
 
 # the bare traits of a method's trait arguments (each component of an intersection)
@@ -333,15 +406,62 @@ function _mark_bounded(ex, on::Bool)
 end
 
 # Under `@bounded`, an open method is refused where it is defined (the definition hook, once the
-# method is visible, so that inference can follow it).
+# method is visible, so that inference can follow it). A method whose only questionable calls reach
+# no method yet waits: a definition of a name it waits for classifies it again, and its module's end
+# a last time (compiler §6.7).
+const _PENDING_BOUNDED = Tuple{Method, Vector{Symbol}}[]
+
 function _check_bounded(m::Method)
+    _check_pending_bounded(m.module, m.name)
     _trait_arguments(m) || return nothing
     _bounded(m) || return nothing
-    uses = classify(m)
-    isempty(uses) && return nothing
+    return _decide_bounded(m)
+end
+
+# classifies `m` now: refuses it where a use is outside the contract, keeps it waiting where a call
+# reaches no method yet. At its module's end (`final`) a call that still reaches no method counts.
+function _decide_bounded(m::Method; final::Bool = false)
+    st = _classify(m)
+    uses = final ? vcat(st.uses, st.pending) : st.uses
+    if isempty(uses)
+        final || isempty(st.waits_for) || push!(_PENDING_BOUNDED, (m, st.waits_for))
+        return nothing
+    end
     # the refused method goes; while an image is built a method cannot be deleted, and the error
     # fails the build
     ccall(:jl_generating_output, Cint, ()) == 0 && Base.delete_method(m)
     lines = ["$(u.what) at line $(u.line) is not in the contract of $(u.trait)" for u in uses]
     throw(TraitUseError("$(m.name) is declared bounded, and is open:\n  " * join(lines, "\n  ")))
+end
+
+# the module's end (the module-end hook): its waiting methods are classified a last time
+function _end_pending_bounded(M::Module)
+    isempty(_PENDING_BOUNDED) && return nothing
+    waiting = Method[w for (w, _) in _PENDING_BOUNDED if w.module === M]
+    isempty(waiting) && return nothing
+    filter!(e -> e[1].module !== M, _PENDING_BOUNDED)
+    for w in waiting
+        _decide_bounded(w; final = true)
+    end
+    return nothing
+end
+
+# the waiting methods of the module `M` that wait for `name`, classified again at its definition
+function _check_pending_bounded(M::Module, name::Symbol)
+    isempty(_PENDING_BOUNDED) && return nothing
+    waiting = Method[]
+    i = 1
+    while i <= length(_PENDING_BOUNDED)
+        (w, names) = _PENDING_BOUNDED[i]
+        if w.module === M && (name in names || :* in names)
+            push!(waiting, w)
+            deleteat!(_PENDING_BOUNDED, i)
+        else
+            i += 1
+        end
+    end
+    for w in waiting
+        _decide_bounded(w)
+    end
+    return nothing
 end

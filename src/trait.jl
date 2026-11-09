@@ -69,10 +69,17 @@ function _trait(mod::Module, head, body)
     end
     for op in items.ops
         push!(out.args, _trait_method(name, params, bounds, op, arities[(op.fname, length(op.args))] > 1, items.inputs))
-        # its declared result, covering every member (compiler §6.8), unless it names Self
-        _mentions(op.result, :Self) && continue
+        # its declared result, covering every member (compiler §6.8). A bare `Self` at a receiver typed
+        # by the trait is a member of the trait at the receiver's parameters: each member's method is
+        # checked to return its own type (traits §5.10). Another result that names Self records none.
+        rt = op.result
+        if _mentions(rt, :Self)
+            rty = op.args[op.receiver][2]
+            (rt === :Self && (rty === nothing || rty === :Self || rty === name)) || continue
+            rt = isempty(params) ? name : Expr(:curly, name, params...)
+        end
         push!(out.args, Expr(:latestworld),
-              :($(lib(:_set_declared!))($(op.fname), $mod, $(length(op.args) + 1), $(QuoteNode(op.result)))))
+              :($(lib(:_set_declared!))($(op.fname), $mod, $(length(op.args) + 1), $(QuoteNode(rt)))))
     end
     push!(out.args, Expr(:latestworld))
     # 5. the contract on the TypeName

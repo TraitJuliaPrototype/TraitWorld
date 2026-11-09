@@ -11,7 +11,8 @@ module TraitWorld
 isdefined(Core, :MembershipEntry) ||
     error("TraitWorld needs Julia's unified build, whose type system has memberships")
 
-# E-312: the library's own code compiled by facts (the other options off)
+# The library's own code is compiled by facts, as trait modules are (the other options off). Its
+# image holds the code its run-time sites reach whatever the values (compiler §9; E-326).
 Base.Experimental.@compiler_options facts = true
 
 export @trait, @implement, Dynamic, unwrap, like, withfields, ImplementError, TraitUseError,
