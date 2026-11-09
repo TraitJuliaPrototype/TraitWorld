@@ -202,9 +202,18 @@ types. A `Union` with an own type, or a lower-bounded type variable, is no way a
 function owned_method(m::Method)
     definer = owner(m.module)
     for s in _sig_alternatives(m.sig)
-        any(o -> owns(definer, o), sig_owners(s)) || return false
+        _owns_any(definer, sig_owners(s)::Base.IdSet{Any}) || return false
     end
     return true
+end
+
+# loops rather than `any` with a closure: a closure over an untyped value is compiled per the value's
+# type where a run-time site reaches it, in every session (E-322)
+function _owns_any(@nospecialize(definer), owners::Base.IdSet{Any})
+    for o in owners
+        owns(definer, o) && return true
+    end
+    return false
 end
 
 _owner_name(@nospecialize(o)) = o === :Julia ? "Julia" : string(o)

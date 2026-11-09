@@ -193,7 +193,7 @@ function _check_contract!(problems, c::Contract, env, @nospecialize(S), @nospeci
             declared isa Type || continue
             # at a further argument declared abstract (an iteration state, say), inference says little:
             # the method's existence is checked, and each call through the trait asserts the result (§7.9)
-            any(i -> i != op.receiver && !isconcretetype(tt.parameters[i]), 1:length(tt.parameters::Core.SimpleVector)) && continue
+            _open_further(op, tt) && continue
             rt = Base.infer_return_type(op.f, tt)
             rt <: declared ||
                 push!(problems, "$(op.name)'s method at $S infers its result as $rt, wider than the declared $(op.result) = $declared")
@@ -242,8 +242,17 @@ end
 # argument declared abstract (an iteration state), a method that meets the declared signature serves:
 # the member's own state is narrower (traits §5.10)
 function _serving_method(op::OperationDecl, @nospecialize(tt))
-    open = any(i -> i != op.receiver && !isconcretetype(tt.parameters[i]), 1:length(tt.parameters::Core.SimpleVector))
+    open = _open_further(op, tt)
     return _first_serving(Tuple{Core.Typeof(op.f), tt.parameters...}, Base.get_world_counter(), !open)
+end
+# whether an argument other than the receiver is declared abstract (a loop: a closure over `tt` would be
+# compiled per call type, E-322)
+function _open_further(op::OperationDecl, @nospecialize(tt))
+    ps = tt.parameters::Core.SimpleVector
+    for i in 1:length(ps)
+        i != op.receiver && !isconcretetype(ps[i]) && return true
+    end
+    return false
 end
 # whether a serving method's argument at the receiver's position is untyped (`Any`)
 function _untyped_receiver(m::Method, op::OperationDecl)

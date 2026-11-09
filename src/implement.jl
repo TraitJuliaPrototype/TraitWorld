@@ -394,6 +394,14 @@ end
 const _PATTERNS = Any[]
 _pending!(@nospecialize(member), @nospecialize(inst), how::How) = push!(_PATTERNS, (member, inst, how))
 
+# a loop: a closure over the pattern would be compiled per pattern type (E-322)
+function _has_pattern(out::Vector{Any}, @nospecialize(pat), @nospecialize(inst))
+    for p in out
+        p[1] == pat && p[2] == inst && return true
+    end
+    return false
+end
+
 # The patterns of `X` that may hold `T`: those declared in this session, and those on the runtime's
 # entries of `T`'s TypeName and its supertypes', which a package image keeps (the library's table is
 # this session's only: another package's additions to it are not in that package's image).
@@ -413,7 +421,7 @@ function _patterns_for(@nospecialize(T), @nospecialize(X))
             # not a pattern `@implement` declared: `Dynamic{X}`'s membership, a trait's supertraits
             core = Base.unwrap_unionall(pat)
             (core isa DataType && (core.name === Base.unwrap_unionall(Dynamic).name || istrait(core))) && continue
-            any(p -> p[1] == pat && p[2] == inst, out) && continue
+            _has_pattern(out, pat, inst) && continue
             by = getfield(en, :by)
             push!(out, (pat, inst, How(by isa Symbol ? by : nothing)))
         end
