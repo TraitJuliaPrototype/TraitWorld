@@ -35,13 +35,14 @@ end
 _fwd(d::Dynamic, @nospecialize(X::Type)) = getfield(d, :object)
 
 # The declared fields are read and written on the held object, asserted to the declared type
-# (lowering §7). Other names are not the trait's: `unwrap` reaches the object itself.
-function Base.getproperty(d::Dynamic{X}, s::Symbol) where {X}
+# (lowering §7). Other names are not the trait's: `unwrap` reaches the object itself. The declared
+# type folds where the name is a constant (`d.u`), so a read costs the held object's own read.
+Base.@constprop :aggressive function Base.getproperty(d::Dynamic{X}, s::Symbol) where {X}
     T = _dynamic_field_type(X, s)
     T === nothing && throw(ArgumentError("$s is not a declared field of $X; unwrap(d) is the object"))
     return getproperty(getfield(d, :object), s)::T
 end
-function Base.setproperty!(d::Dynamic{X}, s::Symbol, v) where {X}
+Base.@constprop :aggressive function Base.setproperty!(d::Dynamic{X}, s::Symbol, v) where {X}
     T = _dynamic_field_type(X, s)
     T === nothing && throw(ArgumentError("$s is not a declared field of $X; unwrap(d) is the object"))
     _field_isconst(X, s) && throw(ArgumentError("$s is declared @const by $X"))
@@ -49,19 +50,12 @@ function Base.setproperty!(d::Dynamic{X}, s::Symbol, v) where {X}
 end
 Base.propertynames(d::Dynamic{X}) where {X} = Tuple(_declared_field_names(X))
 
-const _DYNAMIC_FIELDS = IdDict{Any,Any}()   # (X, name) => the declared type, or nothing
-
-function _dynamic_field_type(@nospecialize(X), s::Symbol)
-    key = (X, s)
-    return get!(_DYNAMIC_FIELDS, key) do
-        for (c, env) in _contracts_of(X)
-            for f in c.fields
-                _field_name(c, f, env) === s && return _eval_in(c, f.type, env, nothing)
-            end
-        end
-        return nothing
-    end
-end
+# The declared type of the field `s` at the trait instance `X`, or `nothing`: what inference reads
+# (compiler §7.1), from the declared fields the library writes on the trait's `TypeName` at its
+# declaration (`jl_set_declared_fields`) and its supertraits'. Fixed once `X` is declared, hence
+# foldable.
+Base.@assume_effects :foldable _dynamic_field_type(@nospecialize(X), s::Symbol) =
+    Base.Compiler.declared_field_type(X, s)
 # a declared field's name at the instance: a field named by an input is named by its value (`HasProperty{:ps, R}`)
 _field_name(c::Contract, f::FieldDecl, env) = f.name in c.inputs ? get(env, f.name, nothing) : f.name
 
