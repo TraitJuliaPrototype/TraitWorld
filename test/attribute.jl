@@ -79,6 +79,11 @@ plain(x::Int) = x + 1
 traited(m::Model) = m
 useless() = plain(compiled_for(1))                        # the method does not type it by a trait
 useful() = traited(with_dynamic(Decay(1.0)))
+module Inner                                              # a submodule's casts are the package's too
+import ..plain
+inner_useless() = plain(compiled_for(2))
+end
+Base.identity(::Val{:casts}) = plain(compiled_for(3))     # a method of another module's function
 end
 
 @testset "reports" begin
@@ -86,7 +91,8 @@ end
     @test any(t -> t[1].name === :kind && t[2] == 1, fb)
     @test isempty(detect_dynamic_fallbacks(Models))       # not a trait module
     uc = detect_unused_casts(Casts)
-    @test length(uc) == 1 && uc[1][1].name === :useless && uc[1][4] == 1
+    @test sort([t[1].name for t in uc]) == [:identity, :inner_useless, :useless] && all(t -> t[4] == 1, uc)
+    @test isempty(detect_unused_casts(Casts.Inner)) == false
     @test Casts.useless() == 2 && Casts.useful() === Decay(1.0)
 end
 

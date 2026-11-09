@@ -63,8 +63,8 @@ end
 """
     detect_unused_casts(mod::Module)
 
-The casts in `mod`'s methods at an argument that the method the call selects does not type by a trait
-(traits §7.6): they have no effect. Listed where inference knows the method a call selects, as
+The casts in the methods of `mod` and its submodules at an argument that the method the call selects
+does not type by a trait (traits §7.6): they have no effect. A package's tests check that it is empty. Listed where inference knows the method a call selects, as
 `(method, the method's line, called function's type, argument index)`.
 """
 function detect_unused_casts(mod::Module)
@@ -98,15 +98,31 @@ end
 _is_attributed_call(@nospecialize(f)) =
     f === Core.attributed_call || (f isa GlobalRef && f.mod === Core && f.name === :attributed_call)
 
+# A package's own methods: those defined in `mod` or a module defined inside it, at any depth, its
+# methods of other modules' functions included (`Base.show(io, ::T)`), so that a package's tests
+# check the whole package (traits §7.6; open issue 162).
 function _module_methods(mod::Module)
+    mods = _own_modules(mod)
     ms = Method[]
-    for name in names(mod; all = true)
-        isdefined(mod, name) || continue
-        f = getfield(mod, name)
-        (f isa Function || f isa Type) || continue
-        for m in methods(f)
-            m.module === mod && push!(ms, m)
-        end
+    mt = isdefined(Core, :methodtable) ? Core.methodtable : Core.GlobalMethods
+    Base.visit(mt) do m
+        m isa Method && m.module in mods && push!(ms, m)
     end
     return ms
+end
+
+"`mod` and the modules defined inside it, recursively."
+function _own_modules(mod::Module)
+    out = Module[mod]
+    i = 1
+    while i <= length(out)
+        m = out[i]
+        for name in names(m; all = true)
+            isdefined(m, name) || continue
+            v = getfield(m, name)
+            v isa Module && v !== m && parentmodule(v) === m && !(v in out) && push!(out, v)
+        end
+        i += 1
+    end
+    return out
 end
