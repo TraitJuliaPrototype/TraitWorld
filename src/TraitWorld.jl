@@ -20,7 +20,7 @@ export @trait, @implement, Dynamic, unwrap, like, withfields, ImplementError, Tr
        detect_dynamic_fallbacks, detect_unused_casts, Callable,
        @enforce_fully_typed, @warn_not_fully_typed, fully_typed, isfullytyped, FullyTypedReport,
        NotFullyTypedError, AbstractTypeError, @enforce_concrete_only, @warn_on_abstract,
-       OwnershipError, @joint_owners, PirateError, verify_main, VerifyReport
+       OwnershipError, @joint_owners, PirateError, verify_main, VerifyReport, add_entrypoints
 
 # the casts and `keep` (traits §7.6, §7.8): Julia's own, re-exported; the casts' names are reserved,
 # so they are imported, never assigned

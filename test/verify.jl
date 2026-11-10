@@ -30,3 +30,26 @@ sloppy(v::Vector{Any}) = sum(v)
     r2 = verify_main(sloppy, (Vector{Any},))
     @test !isempty(r2.holes)
 end
+
+# a call with `compiled_for` on a value known only by its trait: the callee at each declared member
+scaled2(s::Shape2, k::Float64) = k * area2(s)
+castsum(xs::Vector{Shape2}) = (s = 0.0; for x in xs; s += scaled2(compiled_for(x), 2.0)::Float64; end; s)
+
+@testset "verify_main: a cast's members" begin
+    r = verify_main(castsum, (Vector{Shape2},))
+    @test Tuple{typeof(scaled2), Circ, Float64} in r.targets && Tuple{typeof(scaled2), Sq, Float64} in r.targets
+    @test isempty(r.holes)
+    # the instance the cast runs at each member is an entry point
+    mis = [e for e in r.entrypoints if e isa Core.MethodInstance]
+    @test Set(mi.specTypes for mi in mis) == Set([Tuple{typeof(scaled2), Circ, Float64}, Tuple{typeof(scaled2), Sq, Float64}])
+    @test add_entrypoints(r) === nothing
+    @test castsum(Shape2[Circ(1.0), Sq(2.0)]) == 2.0 * (3.0 + 4.0)
+end
+
+@testset "verify_main: entry points and the bound" begin
+    r = verify_main(main1, (Int,))
+    @test r.complete
+    @test Tuple{typeof(area2), Circ} in r.entrypoints && Tuple{typeof(double), Float64} in r.entrypoints
+    @test !(Tuple{typeof(total2), Vector{Shape2}} in r.entrypoints)      # a call in the code names it
+    @test !verify_main(main1, (Int,); bound = 2).complete
+end

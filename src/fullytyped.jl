@@ -47,6 +47,8 @@ fully_typed(@nospecialize(f), @nospecialize(argtypes::Tuple)) =
 fully_typed(@nospecialize(f), @nospecialize(argtypes::Type{<:Tuple})) = fully_typed(f, Tuple(argtypes.parameters))
 
 const _WALK_BOUND = 400
+# `verify_main` walks a whole program
+const _VERIFY_BOUND = 100_000
 
 function fully_typed_by_type(@nospecialize(sig); world::UInt = Base.get_world_counter())
     w = _walk(sig, world)
@@ -55,7 +57,7 @@ end
 
 # the walk shared by `fully_typed` and `verify_main`: every signature the code reaches on normal
 # paths, inferred by facts, its run-time sites, and the targets beyond the calls it resolves
-function _walk(@nospecialize(sig), world::UInt)
+function _walk(@nospecialize(sig), world::UInt; bound::Int = _WALK_BOUND)
     interp = CC.NativeInterpreter(world; facts = true)
     sites = RuntimeSite[]
     seen = Any[]
@@ -68,7 +70,7 @@ function _walk(@nospecialize(sig), world::UInt)
         T = popfirst!(queue)
         T in seen && continue
         push!(seen, T)
-        if length(seen) > _WALK_BOUND
+        if length(seen) > bound
             complete = false
             break
         end
@@ -147,10 +149,67 @@ function _scan!(sites, queue, extra, ir, mi, interp, world)
             _callable_targets!(extra, queue, info, ir, stmt)
         elseif kind === :none
             _operation_targets!(extra, queue, info, ir, stmt, f)
+        elseif kind === :dispatch && _cast_targets!(extra, queue, ir, stmt, f)
+            # a cast on a value known only by its trait: the declared members are its targets
         else
             push!(sites, _site(kind, ir, mi, i, stmt, interp, world))
         end
     end
+end
+
+# the trait a `compiled_for` cast's operand is known by, where `a` is such a cast's result
+function _cast_trait(ir, @nospecialize(a))
+    a isa Core.SSAValue || return nothing
+    stmt = ir.stmts[a.id][:stmt]
+    (Meta.isexpr(stmt, :call) && length(stmt.args) == 2) || return nothing
+    CC.singleton_type(CC.argextype(stmt.args[1], ir)) === Core._cast_compiled || return nothing
+    X = CC.widenconst(CC.argextype(stmt.args[2], ir))
+    return _is_trait_arg(X) ? X : nothing
+end
+
+# a call with `compiled_for` on a value known only by its trait: the callee at each declared member
+# (traits §16). True where the statement is such a call, or the cast itself, with its targets listed.
+function _cast_targets!(extra, queue, ir, stmt, @nospecialize(f))
+    args = (stmt::Expr).args
+    if f === Core._cast_compiled
+        (length(args) == 2 && _is_trait_arg(CC.widenconst(CC.argextype(args[2], ir)))) || return false
+        T = Tuple{typeof(Core._cast_compiled), Any}
+        T in extra || (push!(extra, T); push!(queue, T))
+        return true
+    end
+    (f === Core.attributed_call && length(args) >= 3) || return false
+    g = CC.singleton_type(CC.argextype(args[3], ir))
+    g === nothing && return false
+    choices = Vector{Any}[]
+    cast = false
+    for a in args[4:end]
+        X = _cast_trait(ir, a)
+        if X === nothing
+            t = CC.widenconst(CC.argextype(a, ir))
+            ft_abstract(t) && return false
+            push!(choices, Any[t])
+        else
+            ms = Any[M for M in members_of(X) if M isa DataType && isconcretetype(M)]
+            isempty(ms) && return false
+            push!(choices, ms)
+            cast = true
+        end
+    end
+    cast || return false
+    attr = CC.argextype(args[2], ir)
+    bits = attr isa CC.Const && attr.val isa Int ? reinterpret(UInt64, attr.val) : UInt64(0)
+    mask = bits % UInt32
+    dyn = (bits >> 32) % UInt32 & mask
+    world = Base.get_world_counter()
+    for ts in Iterators.product(choices...)
+        T = Tuple{Core.Typeof(g), ts...}
+        T in extra || (push!(extra, T); push!(queue, T))
+        # the instance the cast runs: compiled with the call's attributes (compiler §6.3)
+        mask == 0 && continue
+        mi = ccall(:jl_attributed_mi, Any, (Any, UInt32, UInt32, UInt), T, mask, dyn, world)
+        mi isa Core.MethodInstance && !(mi in extra) && push!(extra, mi)
+    end
+    return true
 end
 
 # a function passed at a `Callable{A, S}` argument: one target at its signature (traits §16)
@@ -629,30 +688,53 @@ binary cannot resolve (run-time sites).
 struct VerifyReport
     entry::Any
     targets::Vector{Any}
+    entrypoints::Vector{Any}    # the targets that no call in the code names: a build is told these;
+                                # a signature, or the method instance a cast runs
     holes::Vector{RuntimeSite}
-    complete::Bool
+    complete::Bool              # false where the walk stopped at its bound
 end
 function Base.show(io::IO, ::MIME"text/plain", r::VerifyReport)
-    print(io, "verify_main: ", r.entry, "\n  ", length(r.targets), " targets, ", length(r.holes), " run-time sites")
+    print(io, "verify_main: ", r.entry, "\n  ", length(r.targets), " targets, ", length(r.entrypoints), " of them entry points, ", length(r.holes), " run-time sites")
     for h in first(r.holes, 12)
         print(io, "\n  ", h.file, ":", h.line, "  ", h.call, "\n      ", first(h.cause))
     end
-    r.complete || print(io, "\n  (the walk stopped after $(_WALK_BOUND) signatures)")
+    r.complete || print(io, "\n  (the walk stopped at its bound, after $(length(r.targets)) signatures: the list is not complete)")
 end
 
 """
-    verify_main(main, argtypes; entrypoints = true) -> VerifyReport
+    verify_main(main, argtypes; entrypoints = true, bound = 100_000) -> VerifyReport
 
 Every target a program reaches from `main` at `argtypes`, for `juliac --trim` (traits §16): the calls
 its code resolves, a function passed at a `Callable` at its signature, every declared member as a
 target of an operation on a value known by its trait; and the calls left to run time. With
-`entrypoints = true`, the targets are the signatures to list as the binary's entry points.
+`entrypoints = true`, the targets are signatures a build can compile. The report's `entrypoints` are
+the targets that no call in the code names (the members', the casts' and the `Callable`s'): the
+signatures to give the build as entry points, and for a cast's member the method instance the cast
+runs; `add_entrypoints(report)` gives them to a build. The walk stops after `bound` signatures; the report's
+`complete` is then false.
 """
 function verify_main(@nospecialize(main), @nospecialize(argtypes::Tuple); entrypoints::Bool = true,
-                     world::UInt = Base.get_world_counter())
+                     bound::Int = _VERIFY_BOUND, world::UInt = Base.get_world_counter())
     sig = Base.signature_type(main, argtypes)
-    w = _walk(sig, world)
+    w = _walk(sig, world; bound)
     # an instance compiled at a set (a `Dynamic` argument) is a target too
     targets = entrypoints ? Any[T for T in w.seen if T isa DataType && !Base.has_free_typevars(T)] : Any[w.seen...]
-    return VerifyReport(sig, targets, w.sites, w.complete)
+    return VerifyReport(sig, targets, Any[T for T in w.extra if T isa Core.MethodInstance || T in w.seen], w.sites, w.complete)
+end
+
+"""
+    add_entrypoints(report::VerifyReport)
+
+Give a `juliac --trim` build the report's entry points (traits §16). Outside a build it does nothing.
+"""
+function add_entrypoints(r::VerifyReport)
+    ccall(:jl_generating_output, Cint, ()) != 0 || return nothing
+    for T in r.entrypoints
+        if T isa Core.MethodInstance
+            T in Base.Compiler._entrypoint_mis || push!(Base.Compiler._entrypoint_mis, T)
+        else
+            Base.Experimental.entrypoint(T)
+        end
+    end
+    return nothing
 end
