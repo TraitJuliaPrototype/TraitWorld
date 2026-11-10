@@ -160,3 +160,14 @@ readview(@nospecialize(v::PView{Float64})) = v.ps
         @const N::R
     end
 end
+
+# Two traits' operations of one function tie at a common member with no method of its own (traits §6.3).
+# The library's pairs, each with its reason; a new pair fails here.
+@testset "the traits' operations: pairs with no joint method" begin
+    amb = Test.detect_ambiguities(TraitWorld; recursive = true)
+    recv(m) = string(nameof(Base.unwrap_unionall(Base.unwrap_unionall(m.sig).parameters[2])))
+    pairs = unique!(sort!([string(a.name, ": ", join(sort!([recv(a), recv(b)]), ", ")) for (a, b) in amb]))
+    # `getindex` by position and by key: no one answer is right for every type in both, so each
+    # common member defines its own (as `Dict` does)
+    @test pairs == ["getindex: Indexable, Keyed"]
+end

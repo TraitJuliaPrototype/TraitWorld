@@ -103,14 +103,19 @@ eop(::E1) = 1
 abstract type AE <: Early end
 struct E2 <: AE end
 eop(::E2) = 2
+evia_compiled(x) = evia(x)                                  # a caller compiled with the member's type known
 @testset "used before its @implement" begin
     @test latest(eop, E1()) == 1                            # its own method: no use through the trait
+    e = try evia_compiled(E1()); nothing catch err; err end # in compiled code (compiler §10.4)
+    @test e isa ImplementError && occursin("used before its `@implement Early E1`", sprint(showerror, e))
     e = try latest(evia, E1()); nothing catch err; err end
     @test e isa ImplementError && occursin("used before its `@implement Early E1`", sprint(showerror, e))
     e = try latest(evia, E1()); nothing catch err; err end
     @test e isa ImplementError                              # at each use
     @eval @implement Early E1
     @test latest(evia, E1()) == 1
+    @test latest(evia_compiled, E1()) == 1                  # the caller is compiled again
+    @test Base.return_types(evia_compiled, (E1,)) == Any[Int]
     e = try latest(evia, E2()); nothing catch err; err end
     @test e isa ImplementError && occursin("used before its `@implement Early AE`", sprint(showerror, e))
     @eval @implement Early AE

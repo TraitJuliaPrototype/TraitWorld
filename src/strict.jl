@@ -313,11 +313,63 @@ function _report_load_ambiguities!()
     return nothing
 end
 
+"The checked calls of images' memberships that a method already in the session breaks, as reported (traits §12.3)."
+const _LOAD_MEMBERSHIPS = String[]
+const _STRICT_ENTRY_CURSOR = Ref(0)
+
+# Each checked call (traits §5.10) of each membership the images activated since the last load is
+# inferred in the session's world. The image's check passed where it was built; a method the session
+# held before the load can serve the call here with a result outside the declared one. The method came
+# first, so it is reported, not refused.
+function _report_load_memberships!()
+    n = Int(ccall(:jl_activated_memberships_count, Csize_t, ()))
+    from = _STRICT_ENTRY_CURSOR[] + 1
+    n < from && return nothing
+    list = ccall(:jl_activated_memberships, Any, ())::Core.SimpleVector
+    _STRICT_ENTRY_CURSOR[] = length(list)
+    _sync_image_records!()
+    new = Base.IdSet{Any}()                       # the members with a membership activated since
+    for i in from:length(list)
+        en = list[i]
+        getfield(en, :max_world, :acquire) == typemax(UInt64) || continue
+        S = getfield(en, :member)
+        isconcretetype(S) && push!(new, S)
+    end
+    isempty(new) && return nothing
+    world = Base.get_world_counter()
+    msgs = String[]
+    for recs in values(_CHECKED_RESULTS), r in recs
+        r = r::_CheckedResult
+        r.member in new || continue
+        declared = _declared_result(r)
+        declared === nothing && continue
+        sig = r.sig::DataType
+        rt = try Base.infer_return_type(r.op.f, Tuple{sig.parameters[2:end]...}; world) catch; Any end
+        rt <: declared && continue
+        cur = _current_method(sig, world)
+        by = cur === nothing ? "no one method serves the call" :
+             "the call is served by $(cur), defined by $(_owner_name(owner(cur.module)))"
+        push!(msgs, "`$(nameof(r.op.f))` at $(r.member), a member of $(r.trait) by a package image, infers its result as " *
+                    "$rt, outside the declared $declared ($by).")
+    end
+    isempty(msgs) && return nothing
+    @error "strict mode: a package image's membership fails its check in this session:\n  " * join(msgs, "\n  ") *
+           "\n  A method the session held before the image's load decides the result. It came first, so strict " *
+           "mode cannot refuse it: load the package before it."
+    append!(_LOAD_MEMBERSHIPS, msgs)
+    return nothing
+end
+
 "After a package load, in strict mode: the report of the edges that failed validation, with the winning method."
 function _strict_at_load!(_pkg = nothing)
     STRICT[] || return nothing
     ccall(:jl_generating_output, Cint, ()) == 0 || return nothing
     _report_load_ambiguities!()
+    try
+        _report_load_memberships!()
+    catch err
+        @warn "TraitWorld: strict mode's inference of an image's memberships failed" exception = err
+    end
     log = _VAL_LOG[]
     if log isa Vector{Any} && _validation_log_ref()[] === log
         isempty(log) && return nothing

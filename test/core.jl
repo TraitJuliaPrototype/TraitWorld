@@ -216,14 +216,26 @@ end
 struct W2{P}; x::P; end
 sz(w::W2{Int}) = 1
 @implement Sized2 W2{P} where {P}
+sz_twice(x::Sized2) = 2 * sz(x)                    # a method at the trait
+sz_compiled(w) = sz_twice(w)                       # a caller compiled with the member's type known
+sz_branch(w, b::Bool) = b ? sz_twice(w) : 0
 @testset "first use" begin
     @test W2(1.0) isa Sized2                       # memberships only grow: isa stays true
     @test sz(W2(1)) == 1                           # its own method: no use through the trait
-    # at dispatch (the hook's half in the compile queue is not built: lowering L-52)
+    # at dispatch
     e = try Base.invokelatest(sz, W2(1.0)); nothing catch err; err end
     @test e isa ImplementError && occursin("sz", sprint(showerror, e))
     e2 = try Base.invokelatest(sz, W2(2.0)); nothing catch err; err end
     @test e2 === e                                 # the kept failure, raised at every use
+    # in compiled code: checked before the code runs (compiler §10.4)
+    e3 = try sz_compiled(W2(0x01)); nothing catch err; err end
+    @test e3 isa ImplementError && occursin("sz", sprint(showerror, e3))
+    @test (try sz_compiled(W2(0x01)); nothing catch err; err end) === e3
+    @test sz_branch(W2("a"), false) == 0           # a use in a branch not taken raises nothing
+    @test haskey(TraitWorld._CHECKED, (W2{String}, Sized2))   # checked, before the code ran
+    @test_throws ImplementError sz_branch(W2("a"), true)
+    @test sz_compiled(W2(1)) == 2                  # a member that passes
+    @test Base.return_types(sz_compiled, (W2{Int},)) == Any[Int]
 end
 
 ## a family variable bounded by a Union: one membership per type (lowering §3)
