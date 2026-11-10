@@ -215,15 +215,28 @@ function _fwd_sigs(@nospecialize(member), @nospecialize(Xb))
     return out
 end
 
-# a membership redeclared, or a pattern member's answer dropped, fixes its calls and results anew
+# a membership redeclared, or made again from an image's entry, fixes its calls and results anew
 function _forget_records!(@nospecialize(X), @nospecialize(member))
     Xb = bare(X)
     for recs in values(_FIXED_CALLS)
-        filter!(r -> !(r.member === member && r.trait === Xb), recs)
+        _forget_in!(recs, member, Xb)
     end
     for recs in values(_CHECKED_RESULTS)
-        filter!(r -> !(r.member === member && r.trait === Xb), recs)
+        _forget_in!(recs, member, Xb)
     end
+    return nothing
+end
+
+# a loop, not `filter!` with a closure: a closure over the trait would be compiled per trait (E-322)
+function _forget_in!(recs::Vector{Any}, @nospecialize(member), @nospecialize(Xb))
+    j = 0
+    for i in eachindex(recs)
+        r = recs[i]
+        (getfield(r, :member) === member && getfield(r, :trait) === Xb) && continue
+        j += 1
+        recs[j] = r
+    end
+    resize!(recs, j)
     return nothing
 end
 
