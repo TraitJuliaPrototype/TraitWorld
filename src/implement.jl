@@ -88,13 +88,19 @@ function _implement!(mod::Module, traits::Vector{Any}, @nospecialize(member), by
         istrait(X) || throw(ArgumentError("@implement: $X is not a trait"))
         _check_membership_owner(mod, X, member)
     end
-    foreach(X -> _forget_defaults!(X, member), traits)   # a redeclaration fixes them anew (traits §5.11)
+    foreach(X -> _forget_records!(X, member), traits)   # a redeclaration fixes them anew (traits §5.10, §5.11)
     defined = block === nothing ? Method[] : _define_block!(mod, traits, member, block)
     added = Method[]
     try
+        fwds = Any[]
         for X in traits
-            push!(added, Base.invokelatest(_implement_one!, mod, X, member, how)...)
+            ms = Base.invokelatest(_implement_one!, mod, X, member, how)
+            append!(added, ms)
+            push!(fwds, (X, ms))
         end
+        # the forwarding's methods fix their calls once every trait's are defined: two traits forwarded
+        # by one field may share an operation's method
+        how.by === nothing || foreach(((X, ms),) -> _record_forwarders!(X, member, ms, how.by), fwds)
     catch
         # a refused membership takes its block's methods away; while an image is built a method cannot
         # be deleted, and the error fails the build
@@ -113,10 +119,11 @@ _is_pattern(@nospecialize(T)) = !(T isa DataType) || isabstracttype(T) || Base.h
 function _implement_one!(mod::Module, @nospecialize(X), @nospecialize(member), how::How)
     added = Method[]
     defaults = Any[]
+    results = Any[]
     if _is_pattern(member)
         inst = _pattern_instance(X, member)
     else
-        inst, receiver, problems = check_member(bare(X), member; stated = X, how, defaults)
+        inst, receiver, problems = check_member(bare(X), member; stated = X, how, defaults, results)
         isempty(problems) || throw(ImplementError(X, member, problems))
     end
     receiver = how.by === nothing ? :self : :field
@@ -136,35 +143,81 @@ function _implement_one!(mod::Module, @nospecialize(X), @nospecialize(member), h
         how.by === nothing || (_FORWARD_FIELD[(Base.unwrap_unionall(member)::DataType).name] = how.by)
     end
     _is_pattern(member) && _pending!(member, inst, how)
-    _record_defaults!(member, defaults)
+    _record_checks!(X, member, defaults, results)
     push!(_IMPLEMENTED, (Base.unwrap_unionall(member).name, Base.unwrap_unionall(bare(X)).name))
     _is_pattern(member) || Base.invokelatest(_compile_ahead!, inst, member)   # compiling ahead (traits §16)
     return added
 end
 
-## What the hooks read (traits §5.2, §5.11; lowering §11)
+## What the hooks read (traits §5.2, §5.10, §5.11; lowering §11)
 
 # every `@implement X S` of this session, as (S's TypeName, X's TypeName): the module-end hook
 const _IMPLEMENTED = Set{Any}()
 
-# the operations a default serves at a member, fixed at its membership: function => [(trait, member,
-# call types), …]. A later method that would take such a call is refused (the definition hook).
-const _DEFAULT_SERVED = IdDict{Any,Vector{Any}}()
-
-function _record_defaults!(@nospecialize(member), defaults::Vector{Any})
-    for (X, f, tt) in defaults
-        push!(get!(Vector{Any}, _DEFAULT_SERVED, f), (X, member, tt))
-    end
+# The calls a membership fixed (traits §5.11): those a default serves at a member, and those its
+# forwarding's methods serve. A later method that would take one is refused (the definition hook).
+struct _FixedCall
+    trait::Any       # the membership's trait
+    source::Any      # the trait whose default serves the call, or the forwarding field (a Symbol)
+    member::Any
+    sig::Any         # Tuple{typeof(f), argument types…}
 end
 
-function _forget_defaults!(@nospecialize(X), @nospecialize(member))
-    for recs in values(_DEFAULT_SERVED)
-        filter!(r -> !(r[2] === member && bare(r[1]) === bare(X)), recs)
-    end
+# The results a membership's check inferred within the declared result (traits §5.10). A later method
+# that would serve the call is inferred at it, and refused where its result leaves the declared one.
+struct _CheckedResult
+    trait::Any       # the membership's trait
+    contract::Any    # the contract the check read: a redeclared trait's operation is looked up anew
+    op::Any          # the operation (an OperationDecl)
+    member::Any
+    sig::Any         # Tuple{typeof(f), argument types…}, the call the check inferred
+    env::Any         # the trait's parameters at the member
+    receiver::Any    # the receiver type
 end
 
-# The definition hook (compiler §10.1): before a method is visible, one that would take a call
-# that a default serves at a member since its membership is refused (traits §5.11).
+# function => the records under it. Per session, as the checks are (lowering L-55): a concrete
+# membership loaded from a package's image has none.
+const _FIXED_CALLS = IdDict{Any,Vector{Any}}()
+const _CHECKED_RESULTS = IdDict{Any,Vector{Any}}()
+
+function _record_checks!(@nospecialize(X), @nospecialize(member), defaults::Vector{Any}, results::Vector{Any})
+    Xb = bare(X)
+    for (src, f, sig) in defaults
+        push!(get!(Vector{Any}, _FIXED_CALLS, f), _FixedCall(Xb, src, member, sig))
+    end
+    for (c, op, sig, env, R) in results
+        push!(get!(Vector{Any}, _CHECKED_RESULTS, op.f), _CheckedResult(Xb, c, op, member, sig, env, R))
+    end
+    return nothing
+end
+
+# the forwarding's methods (`_define_fwd!`), each a call the membership fixes
+function _record_forwarders!(@nospecialize(X), @nospecialize(member), ms::Vector{Method}, by::Symbol)
+    Xb = bare(X)
+    for m in ms
+        m.module === (@__MODULE__) && m.name === :_fwd && continue
+        sig = Base.unwrap_unionall(m.sig)::DataType
+        fT = sig.parameters[1]
+        (fT isa DataType && isdefined(fT, :instance)) || continue
+        push!(get!(Vector{Any}, _FIXED_CALLS, fT.instance), _FixedCall(Xb, by, member, m.sig))
+    end
+    return nothing
+end
+
+# a membership redeclared, or a pattern member's answer dropped, fixes its calls and results anew
+function _forget_records!(@nospecialize(X), @nospecialize(member))
+    Xb = bare(X)
+    for recs in values(_FIXED_CALLS)
+        filter!(r -> !(r.member === member && r.trait === Xb), recs)
+    end
+    for recs in values(_CHECKED_RESULTS)
+        filter!(r -> !(r.member === member && r.trait === Xb), recs)
+    end
+    return nothing
+end
+
+# The definition hook (compiler §10.1). Before a method is visible: the scope's pirates, strict
+# mode's walk, then the membership's own checks. After: strict mode's log, the bounded check.
 function _definition_hook(m::Method, after::Bool)
     if after
         _strict_on_definition(m, true)   # strict mode's check after the definition (traits §12.3)
@@ -172,35 +225,119 @@ function _definition_hook(m::Method, after::Bool)
     end
     _check_pirate(m)                     # a scope that declares `no_pirates` (traits §12.2)
     _strict_on_definition(m, false)      # strict mode: a pirate that would win at a fact (traits §12.3)
-    sig = Base.unwrap_unionall(m.sig)
-    (sig isa DataType && !isempty(sig.parameters)) || return nothing
-    fT = sig.parameters[1]
-    (fT isa DataType && isdefined(fT, :instance)) || return nothing
-    recs = get(_DEFAULT_SERVED, fT.instance, nothing)
-    recs === nothing && return nothing
-    for (X, S, tt) in recs
-        Tuple{fT, tt.parameters...} <: m.sig || continue
-        throw(ImplementError(X, S, "a default of $(bare(X)) serves $(nameof(fT.instance)) at $S since its membership: " *
-                                   "define the method before `@implement`, or in its block"))
+    try
+        _check_membership_calls(m)
+    catch
+        STRICT[] && _strict_log_stop!()  # the after branch, which stops strict mode's log, will not run
+        rethrow()
     end
     return nothing
 end
 
-# The image hook (compiler §10.1): an image's method that would take a call a default serves at a
-# member since its membership stays inactive, with a warning (traits §5.11).
+# A method about to be defined, or an image's method about to be activated, that would take a call a
+# membership fixed (traits §5.11), make it ambiguous at the member, or serve a checked call with a result
+# outside the declared one (traits §5.10), is refused: an ImplementError.
+function _check_membership_calls(m::Method)
+    sig = Base.unwrap_unionall(m.sig)
+    (sig isa DataType && !isempty(sig.parameters)) || return nothing
+    fT = sig.parameters[1]
+    (fT isa DataType && isdefined(fT, :instance)) || return nothing
+    fixed = get(_FIXED_CALLS, fT.instance, nothing)
+    checked = get(_CHECKED_RESULTS, fT.instance, nothing)
+    fixed === nothing && checked === nothing && return nothing
+    world = Base.get_world_counter()
+    if fixed !== nothing
+        for r in fixed
+            r = r::_FixedCall
+            s = typeintersect(r.sig, m.sig)      # the record's calls the method applies to
+            (s === Union{} || !_would_win(m, s, world)) && continue
+            how = r.source isa Symbol ? "the forwarding of $(r.trait) by the field $(r.source)" : "a default of $(bare(r.source))"
+            throw(ImplementError(r.trait, r.member, "$how serves $(nameof(fT.instance)) at $(r.member) since its membership: " *
+                                                   "define the method before `@implement`, or in its block"))
+        end
+    end
+    checked === nothing && return nothing
+    for r in checked
+        r = r::_CheckedResult
+        s = typeintersect(r.sig, m.sig)
+        (s === Union{} || !_would_win(m, s, world)) && continue
+        declared = _declared_result(r)
+        declared === nothing && continue           # the trait no longer declares the operation
+        f = nameof(fT.instance)
+        cur = _current_method(s, world)
+        if cur !== nothing && cur !== m && !(cur.sig == m.sig) &&
+           ccall(:jl_type_morespecific, Cint, (Any, Any), m.sig, cur.sig) == 0
+            throw(ImplementError(r.trait, r.member,
+                "the method $m would make $f ambiguous with $cur at $s, the member $(r.member)'s call of " *
+                "$(bare(r.trait))'s $(_declared(r.op, r.contract)): define it more specific than $cur, or not at this member"))
+        end
+        rt = _infer_new_method(m, s, world)
+        rt <: declared && continue
+        throw(ImplementError(r.trait, r.member,
+            "the method $m would serve $s, the member $(r.member)'s call of $(bare(r.trait))'s " *
+            "$(_declared(r.op, r.contract)), and infers its result as $rt, outside the declared $declared: " *
+            "return within $declared, or do not define the method at this member"))
+    end
+    return nothing
+end
+
+# the declared result at the record's call, from the trait's contract now: a redeclared contract's
+# operation of the same name and arguments, or nothing where it has none. A trait whose name now
+# holds another type (a redeclaration that made a new type) has no members of its own any more.
+function _declared_result(r::_CheckedResult)
+    tn = (Base.unwrap_unionall(r.trait)::DataType).name
+    Base.invokelatest(isdefinedglobal, tn.module, tn.name) &&
+        Base.invokelatest(getglobal, tn.module, tn.name) === tn.wrapper || return nothing
+    c = contract(r.trait)
+    c === nothing && return nothing
+    op = r.op
+    if c !== r.contract
+        k = findfirst(o -> o.name === op.name && length(o.args) == length(op.args) && o.receiver == op.receiver &&
+                           o.vararg == op.vararg && !o.hasdefault, c.operations)
+        k === nothing && return nothing
+        op = c.operations[k]
+    end
+    d = try _eval_in(c, op.result, r.env, r.receiver) catch; nothing end
+    return d isa Type ? d : nothing
+end
+
+# the one method dispatch selects at `s` now, or nothing (no method, or ambiguous)
+function _current_method(@nospecialize(s), world::UInt)
+    ms = Base._methods_by_ftype(s, nothing, 1, world, false, Ref{UInt}(typemin(UInt)), Ref{UInt}(typemax(UInt)), Ptr{Int32}(C_NULL))
+    (ms isa Vector && length(ms) == 1) || return nothing
+    return (ms[1]::Core.MethodMatch).method
+end
+
+# The result of the method `m`, not yet in the table, at the call `s`: `m` itself inferred, without
+# caching (the method may be refused). A call `m` makes to its own function sees the methods in force,
+# so a self-recursive method's recursion is inferred at the method it replaces. Any on a failure.
+function _infer_new_method(m::Method, @nospecialize(s), world::UInt)
+    try
+        _, sparams = ccall(:jl_type_intersection_with_env, Any, (Any, Any), s, m.sig)::Core.SimpleVector
+        mi = Base.specialize_method(m, s, sparams)
+        frame = CC.typeinf_frame(CC.NativeInterpreter(world), mi, false)
+        frame === nothing && return Any
+        return CC.widenconst(CC.ignorelimited(frame.result.result))
+    catch
+        return Any
+    end
+end
+
+# The image hook (compiler §10.1): an image's method that the membership checks refuse stays inactive,
+# with a warning (traits §5.10, §5.11); strict mode's winning pirates too (lowering §13).
 function _image_methods_hook(ms::Vector{Any}, pkg::String)
     drop = Any[]
     for m in ms
         m isa Method || continue
         try
-            _definition_hook(m, false)
+            _check_membership_calls(m)
         catch e
             e isa ImplementError || rethrow()
             @warn "$pkg: a method left inactive" method = m exception = e
             push!(drop, m)
         end
     end
-    for m in _strict_image_refusals(ms)  # strict mode: winning pirates left inactive (lowering §13)
+    for m in _strict_image_refusals(ms)
         m in drop || push!(drop, m)
     end
     return drop
@@ -489,8 +626,11 @@ function _check_pattern_member(@nospecialize(T), @nospecialize(X))
                 Tinst = _subst_tv(Tinst, tv, vals[k])
             end
         end
-        _, _, problems = check_member(bare(X), T; stated = Tinst, how)
+        defaults, results = Any[], Any[]
+        _, _, problems = check_member(bare(X), T; stated = Tinst, how, defaults, results)
         isempty(problems) || return ImplementError(Tinst, T, problems)
+        # a member checked at its first use keeps its check while it is a member (traits §5.10, §5.11)
+        _record_checks!(X, T, defaults, results)
         return nothing
     end
     return nothing
