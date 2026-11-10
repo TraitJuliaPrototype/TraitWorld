@@ -672,6 +672,10 @@ function check_first_use(@nospecialize(T), @nospecialize(X))
     key = (T, bare(X))
     r = get(_CHECKED, key, missing)
     if r === missing
+        # a member by its definition used before its `@implement` (traits §5.2): raised at each use,
+        # and not kept, since the declaration may follow
+        u = _undeclared_by_definition(T)
+        u === nothing || throw(u)
         _CHECKED[key] = _IN_PROGRESS
         r = try
             _check_pattern_member(T, X)
@@ -686,6 +690,27 @@ function check_first_use(@nospecialize(T), @nospecialize(X))
         throw(ImplementError(X, T, "the check of $T as a member of $(bare(X)) reaches $T again"))
     end
     r === nothing || throw(r)
+    return nothing
+end
+
+# The type on `T`'s chain of declared supertypes whose supertype is a trait with a contract, where no
+# membership entry in force declares it (traits §5.2): the error for a use before its `@implement`.
+function _undeclared_by_definition(@nospecialize(T))
+    d = Base.unwrap_unionall(T)
+    while d isa DataType && d !== Any
+        s = d.super
+        if istrait(s)
+            contract(s) === nothing && return nothing    # a set no `@trait` declared (traits §9b)
+            for en in getfield(d.name, :memberships, :acquire)
+                getfield(en, :set) === s.name && getfield(en, :max_world, :acquire) == typemax(UInt64) &&
+                    return nothing
+            end
+            kind = isabstracttype(d) ? "abstract type" : "struct"
+            return ImplementError(s.name.wrapper, d.name.wrapper,
+                "$kind $(d.name.name) <: $(s.name.name) is used before its `@implement $(s.name.name) $(d.name.name)`")
+        end
+        d = s
+    end
     return nothing
 end
 

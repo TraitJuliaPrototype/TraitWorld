@@ -296,10 +296,28 @@ end
 
 const _LOAD_PIRATES = PirateAtLoadError[]
 
+"The ambiguities that images' memberships met at their activation under strict mode, as reported (traits §12.3)."
+const _LOAD_AMBIGUITIES = String[]
+
+# The runtime collects them at activation in place of its warning; the report is strict mode's.
+function _report_load_ambiguities!()
+    msgs = ccall(:jl_take_activation_ambiguities, Any, ())
+    msgs isa Vector{Any} || return nothing
+    n = length(_LOAD_AMBIGUITIES)
+    for m in msgs
+        m isa String && push!(_LOAD_AMBIGUITIES, m)
+    end
+    length(_LOAD_AMBIGUITIES) > n || return nothing
+    @error "strict mode: a package image's membership makes methods ambiguous with code loaded earlier:\n  " *
+           join(_LOAD_AMBIGUITIES[n+1:end], "\n  ")
+    return nothing
+end
+
 "After a package load, in strict mode: the report of the edges that failed validation, with the winning method."
 function _strict_at_load!(_pkg = nothing)
     STRICT[] || return nothing
     ccall(:jl_generating_output, Cint, ()) == 0 || return nothing
+    _report_load_ambiguities!()
     log = _VAL_LOG[]
     if log isa Vector{Any} && _validation_log_ref()[] === log
         isempty(log) && return nothing

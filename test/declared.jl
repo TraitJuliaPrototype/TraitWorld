@@ -93,6 +93,30 @@ struct W2 <: Shp; s::Inner2; end
     @test latest(sarea, W2(Inner2(2.0))) == 2.0
 end
 
+## a use through the trait before the declaration raises, at each use (lowering §3)
+@trait Early begin
+    eop(x::Early)::Int
+end
+evia(x::Early) = eop(x)
+struct E1 <: Early end
+eop(::E1) = 1
+abstract type AE <: Early end
+struct E2 <: AE end
+eop(::E2) = 2
+@testset "used before its @implement" begin
+    @test latest(eop, E1()) == 1                            # its own method: no use through the trait
+    e = try latest(evia, E1()); nothing catch err; err end
+    @test e isa ImplementError && occursin("used before its `@implement Early E1`", sprint(showerror, e))
+    e = try latest(evia, E1()); nothing catch err; err end
+    @test e isa ImplementError                              # at each use
+    @eval @implement Early E1
+    @test latest(evia, E1()) == 1
+    e = try latest(evia, E2()); nothing catch err; err end
+    @test e isa ImplementError && occursin("used before its `@implement Early AE`", sprint(showerror, e))
+    @eval @implement Early AE
+    @test latest(evia, E2()) == 2
+end
+
 ## strict mode at the form: the membership that creates the ambiguity is refused, in either order
 @trait XF
 @trait YF
