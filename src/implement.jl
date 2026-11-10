@@ -277,26 +277,12 @@ function _records_from_entry!(@nospecialize(en))
     inst = getfield(en, :instance)
     X = bare(inst)
     (istrait(X) && contract(X) !== nothing) || return nothing
-    # two images may leave two entries in force for one member and set (compiler C-84): the latest holds
-    _latest_entry(S, getfield(en, :set)::Core.TypeName) === en || return nothing
     by = getfield(en, :by)
     how = How(by isa Symbol ? by : nothing)
     _forget_records!(X, S)
     _record_checks!(X, S, _records_at(X, S, inst, how)...)
     how.by === nothing || _record_forwarders!(X, S, how.by)
     return nothing
-end
-
-# the entry in force for the concrete member S in the set named `setname` that began last
-function _latest_entry(@nospecialize(S), setname::Core.TypeName)
-    best = nothing
-    for e in getfield((Base.unwrap_unionall(S)::DataType).name, :memberships, :acquire)
-        getfield(e, :set) === setname || continue
-        getfield(e, :max_world, :acquire) == typemax(UInt64) || continue
-        getfield(e, :member) == S || continue
-        (best === nothing || getfield(e, :min_world) > getfield(best, :min_world)) && (best = e)
-    end
-    return best
 end
 
 # The definition hook (compiler §10.1). Before a method is visible: the scope's pirates, strict

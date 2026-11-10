@@ -67,7 +67,6 @@ precompile(_deletion_hook, (Method,))
 precompile(_fully_typed_hook, (Core.SimpleVector,))
 precompile(_sig_alternatives, (Any,))           # the image hook's, at each package load
 precompile(_records_from_entry!, (Any,))       # the records of each membership an image activates
-precompile(_latest_entry, (Any, Core.TypeName))
 precompile(_records_at, (Any, Any, Any, How))
 precompile(_record_checks!, (Any, Any, Vector{Any}, Vector{Any}))
 precompile(_forget_records!, (Any, Any))
