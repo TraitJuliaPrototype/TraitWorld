@@ -9,7 +9,12 @@ const STRICT = Ref(false)
 
 Turn strict mode on or off for this session (traits §12.3); `JULIA_TW_STRICT=1` turns it on at start.
 """
-strict!(on::Bool = true) = (STRICT[] = on; on ? _validation_log_on!() : _validation_log_off!(); nothing)
+function strict!(on::Bool = true)
+    STRICT[] = on
+    on ? _validation_log_on!() : _validation_log_off!()
+    ccall(:jl_set_strict_memberships, Cint, (Cint,), on)  # an ambiguity at a membership refused (§12.3)
+    return nothing
+end
 
 """
     PirateError
@@ -333,6 +338,7 @@ end
 function _strict_init!()
     STRICT[] = get(ENV, "JULIA_TW_STRICT", "0") == "1"
     STRICT[] && _validation_log_on!()
+    STRICT[] && ccall(:jl_set_strict_memberships, Cint, (Cint,), 1)
     push!(Base.package_callbacks, _strict_at_load!)
     return nothing
 end

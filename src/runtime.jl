@@ -12,6 +12,17 @@ function _declare!(@nospecialize(member), @nospecialize(instance), mod::Module,
                  member, instance, mod, by, receiver)
 end
 
+"`_declare!` where a refusal (a cycle, another instance, strict mode's ambiguity) is an `ImplementError`."
+function _declare_checked!(@nospecialize(member), @nospecialize(instance), mod::Module,
+                           @nospecialize(by), receiver::Symbol)
+    try
+        return _declare!(member, instance, mod, by, receiver)
+    catch err
+        err isa ErrorException || rethrow()
+        throw(ImplementError(instance, member, err.msg))
+    end
+end
+
 "whether `X` is a trait: an open set"
 istrait(@nospecialize(X)) = (dt = Base.unwrap_unionall(X); dt isa DataType && ccall(:jl_is_open_set, Cint, (Any,), dt) != 0)
 

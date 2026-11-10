@@ -55,7 +55,7 @@ function _trait(mod::Module, head, body)
     # 2. the supertraits' memberships: X{P…} where {P…} in A{q…}
     for s in supers
         push!(out.args, Expr(:let, Expr(:block, tvdefs...),
-            :($(lib(:_declare!))($wrapped, $s, $mod, nothing, :self))), Expr(:latestworld))
+            :($(lib(:_declare_checked!))($wrapped, $s, $mod, nothing, :self))), Expr(:latestworld))
     end
     # 3. the operations' functions: a plain name makes a function of the module
     for op in items.ops
@@ -108,7 +108,7 @@ function _trait(mod::Module, head, body)
     dynpat = foldr((p, acc) -> :(Core.UnionAll($p, $acc)), params;
                    init = :(Core.UnionAll($Z, $(lib(:Dynamic)){$Z})))
     push!(out.args, Expr(:let, Expr(:block, tvdefs..., :($Z = Core.TypeVar($(QuoteNode(:Z)), $T))),
-        :($(lib(:_declare!))($dynpat, $T, $mod, :object, :field))), Expr(:latestworld))
+        :($(lib(:_declare_checked!))($dynpat, $T, $mod, :object, :field))), Expr(:latestworld))
     # a docstring written before `@trait` documents the trait's binding
     push!(out.args, :(Core.@__doc__ $name))
     push!(out.args, nothing)
