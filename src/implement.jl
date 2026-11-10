@@ -278,7 +278,7 @@ function _records_from_entry!(@nospecialize(en))
     X = bare(inst)
     (istrait(X) && contract(X) !== nothing) || return nothing
     # two images may leave two entries in force for one member and set (compiler C-84): the latest holds
-    _latest_entry(S, getfield(en, :set)) === en || return nothing
+    _latest_entry(S, getfield(en, :set)::Core.TypeName) === en || return nothing
     by = getfield(en, :by)
     how = How(by isa Symbol ? by : nothing)
     _forget_records!(X, S)
