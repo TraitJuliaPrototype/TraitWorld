@@ -1,6 +1,7 @@
 # Strict mode refuses a membership that makes methods ambiguous (traits §6.3, §12.3; compiler §4.3): the
 # membership raises ImplementError and does not exist; the counter does not advance; with a joint method
-# the same membership is declared. Without strict mode it is declared with the report's warning.
+# the same membership is declared. Without strict mode it is declared with the report's warning. A later
+# membership that creates no ambiguity, a redeclaration among them, is accepted under strict mode.
 using TraitWorld, Test
 
 function thrown(ex)
@@ -68,13 +69,13 @@ struct FamP{T}; x::T; end
     end
 end
 
-@testset "a redeclaration refused keeps the membership" begin
+@testset "strict mode refuses the membership that creates an ambiguity, not a later one" begin
     @test thrown(:(@implement XR SR)) === nothing           # without strict mode: declared, with the report's warning
     @test member(SR, XR)
     TraitWorld.strict!(true)
     try
-        @test thrown(:(@implement XR SR)) isa ImplementError
-        @test member(SR, XR) && member(SR, YR)              # the old entry still in force
+        @test thrown(:(@implement XR SR)) === nothing       # a redeclaration creates no ambiguity (compiler §5.4)
+        @test member(SR, XR) && member(SR, YR)
     finally
         TraitWorld.strict!(false)
     end
