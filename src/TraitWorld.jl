@@ -74,6 +74,7 @@ function __init__()
     ccall(:jl_set_method_definition_hook, Cvoid, (Any,), _definition_hook)
     ccall(:jl_set_module_end_hook, Cvoid, (Any,), _module_end_hook)
     ccall(:jl_set_image_methods_hook, Cvoid, (Any,), _image_methods_hook)
+    _ENTRY_CURSOR[] = 0                  # the image's records are made again from the runtime's list
     # fully typed mode's hook (compiler §2.7): code that fails it reports through the library
     ccall(:jl_set_fully_typed_hook, Cvoid, (Any,), _fully_typed_hook)
     # the hints on MethodError where a trait is involved (traits §11.4)

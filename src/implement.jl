@@ -92,15 +92,12 @@ function _implement!(mod::Module, traits::Vector{Any}, @nospecialize(member), by
     defined = block === nothing ? Method[] : _define_block!(mod, traits, member, block)
     added = Method[]
     try
-        fwds = Any[]
         for X in traits
-            ms = Base.invokelatest(_implement_one!, mod, X, member, how)
-            append!(added, ms)
-            push!(fwds, (X, ms))
+            append!(added, Base.invokelatest(_implement_one!, mod, X, member, how))
         end
         # the forwarding's methods fix their calls once every trait's are defined: two traits forwarded
         # by one field may share an operation's method
-        how.by === nothing || foreach(((X, ms),) -> _record_forwarders!(X, member, ms, how.by), fwds)
+        how.by === nothing || foreach(X -> _record_forwarders!(X, member, how.by), traits)
     catch
         # a refused membership takes its block's methods away; while an image is built a method cannot
         # be deleted, and the error fails the build
@@ -118,12 +115,10 @@ _is_pattern(@nospecialize(T)) = !(T isa DataType) || isabstracttype(T) || Base.h
 
 function _implement_one!(mod::Module, @nospecialize(X), @nospecialize(member), how::How)
     added = Method[]
-    defaults = Any[]
-    results = Any[]
     if _is_pattern(member)
         inst = _pattern_instance(X, member)
     else
-        inst, receiver, problems = check_member(bare(X), member; stated = X, how, defaults, results)
+        inst, receiver, problems = check_member(bare(X), member; stated = X, how)
         isempty(problems) || throw(ImplementError(X, member, problems))
     end
     receiver = how.by === nothing ? :self : :field
@@ -143,7 +138,7 @@ function _implement_one!(mod::Module, @nospecialize(X), @nospecialize(member), h
         how.by === nothing || (_FORWARD_FIELD[(Base.unwrap_unionall(member)::DataType).name] = how.by)
     end
     _is_pattern(member) && _pending!(member, inst, how)
-    _record_checks!(X, member, defaults, results)
+    _is_pattern(member) || _record_checks!(X, member, _records_at(X, member, X, how)...)
     push!(_IMPLEMENTED, (Base.unwrap_unionall(member).name, Base.unwrap_unionall(bare(X)).name))
     _is_pattern(member) || Base.invokelatest(_compile_ahead!, inst, member)   # compiling ahead (traits §16)
     return added
@@ -175,8 +170,8 @@ struct _CheckedResult
     receiver::Any    # the receiver type
 end
 
-# function => the records under it. Per session, as the checks are (lowering L-55): a concrete
-# membership loaded from a package's image has none.
+# function => the records under it: made where a check passes in the session, and rebuilt for each
+# membership an image activates (`_sync_image_records!`).
 const _FIXED_CALLS = IdDict{Any,Vector{Any}}()
 const _CHECKED_RESULTS = IdDict{Any,Vector{Any}}()
 
@@ -191,17 +186,33 @@ function _record_checks!(@nospecialize(X), @nospecialize(member), defaults::Vect
     return nothing
 end
 
-# the forwarding's methods (`_define_fwd!`), each a call the membership fixes
-function _record_forwarders!(@nospecialize(X), @nospecialize(member), ms::Vector{Method}, by::Symbol)
+# the forwarding's methods, each a call the membership fixes
+function _record_forwarders!(@nospecialize(X), @nospecialize(member), by::Symbol)
     Xb = bare(X)
-    for m in ms
-        m.module === (@__MODULE__) && m.name === :_fwd && continue
-        sig = Base.unwrap_unionall(m.sig)::DataType
-        fT = sig.parameters[1]
-        (fT isa DataType && isdefined(fT, :instance)) || continue
-        push!(get!(Vector{Any}, _FIXED_CALLS, fT.instance), _FixedCall(Xb, by, member, m.sig))
+    for (f, sig) in _fwd_sigs(member, Xb)
+        push!(get!(Vector{Any}, _FIXED_CALLS, f), _FixedCall(Xb, by, member, sig))
     end
     return nothing
+end
+
+# The signatures of the forwarding's methods `_define_fwd!` defines at `member` for `Xb`: for each
+# required operation and arity, the receiver typed by the member, the further arguments untyped.
+function _fwd_sigs(@nospecialize(member), @nospecialize(Xb))
+    out = Tuple{Any,Any}[]
+    c = contract(Xb)
+    c === nothing && return out
+    core = Base.unwrap_unionall(member)
+    done = Set{Tuple{Any,Int,Bool}}()
+    for op in c.operations
+        op.hasdefault && continue
+        key = (op.f, length(op.args), op.vararg)
+        key in done && continue
+        push!(done, key)
+        ps = Any[i == op.receiver ? core : Any for i in 1:length(op.args)]
+        op.vararg && (ps[end] = Vararg{ps[end]})
+        push!(out, (op.f, Base.rewrap_unionall(Tuple{Core.Typeof(op.f), ps...}, member)))
+    end
+    return out
 end
 
 # a membership redeclared, or a pattern member's answer dropped, fixes its calls and results anew
@@ -214,6 +225,60 @@ function _forget_records!(@nospecialize(X), @nospecialize(member))
         filter!(r -> !(r.member === member && r.trait === Xb), recs)
     end
     return nothing
+end
+
+# The memberships images activated (compiler §9), read from the runtime's list up to the library's
+# cursor: for each in force, at a concrete member and a set with a contract, its records are made again,
+# without inference (`_records_at`), the member's old ones forgotten first, so that a membership's
+# records come back however often it is met. The membership and the contract are the record; the
+# dictionaries are a cache of them (traits §5.10). Run before a definition or an image's methods are
+# checked. A failure here warns and refuses nothing.
+const _ENTRY_CURSOR = Ref(0)
+
+function _sync_image_records!()
+    n = Int(ccall(:jl_activated_memberships_count, Csize_t, ()))
+    n <= _ENTRY_CURSOR[] && return nothing
+    list = ccall(:jl_activated_memberships, Any, ())::Core.SimpleVector
+    from = _ENTRY_CURSOR[] + 1
+    _ENTRY_CURSOR[] = length(list)
+    for i in from:length(list)
+        en = list[i]
+        try
+            _records_from_entry!(en)
+        catch err
+            @warn "TraitWorld: the records of an image's membership were not made" entry = en exception = err
+        end
+    end
+    return nothing
+end
+
+function _records_from_entry!(@nospecialize(en))
+    getfield(en, :max_world, :acquire) == typemax(UInt64) || return nothing
+    S = getfield(en, :member)
+    isconcretetype(S) || return nothing    # a pattern's members get their records at their first use
+    inst = getfield(en, :instance)
+    X = bare(inst)
+    (istrait(X) && contract(X) !== nothing) || return nothing
+    # two images may leave two entries in force for one member and set (compiler C-84): the latest holds
+    _latest_entry(S, getfield(en, :set)) === en || return nothing
+    by = getfield(en, :by)
+    how = How(by isa Symbol ? by : nothing)
+    _forget_records!(X, S)
+    _record_checks!(X, S, _records_at(X, S, inst, how)...)
+    how.by === nothing || _record_forwarders!(X, S, how.by)
+    return nothing
+end
+
+# the entry in force for the concrete member S in the set named `setname` that began last
+function _latest_entry(@nospecialize(S), setname::Core.TypeName)
+    best = nothing
+    for e in getfield((Base.unwrap_unionall(S)::DataType).name, :memberships, :acquire)
+        getfield(e, :set) === setname || continue
+        getfield(e, :max_world, :acquire) == typemax(UInt64) || continue
+        getfield(e, :member) == S || continue
+        (best === nothing || getfield(e, :min_world) > getfield(best, :min_world)) && (best = e)
+    end
+    return best
 end
 
 # The definition hook (compiler §10.1). Before a method is visible: the scope's pirates, strict
@@ -238,6 +303,7 @@ end
 # membership fixed (traits §5.11), make it ambiguous at the member, or serve a checked call with a result
 # outside the declared one (traits §5.10), is refused: an ImplementError.
 function _check_membership_calls(m::Method)
+    _sync_image_records!()
     sig = Base.unwrap_unionall(m.sig)
     (sig isa DataType && !isempty(sig.parameters)) || return nothing
     fT = sig.parameters[1]
@@ -626,11 +692,10 @@ function _check_pattern_member(@nospecialize(T), @nospecialize(X))
                 Tinst = _subst_tv(Tinst, tv, vals[k])
             end
         end
-        defaults, results = Any[], Any[]
-        _, _, problems = check_member(bare(X), T; stated = Tinst, how, defaults, results)
+        _, _, problems = check_member(bare(X), T; stated = Tinst, how)
         isempty(problems) || return ImplementError(Tinst, T, problems)
         # a member checked at its first use keeps its check while it is a member (traits §5.10, §5.11)
-        _record_checks!(X, T, defaults, results)
+        _record_checks!(X, T, _records_at(X, T, Tinst, how)...)
         return nothing
     end
     return nothing

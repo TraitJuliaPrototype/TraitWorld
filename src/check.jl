@@ -13,21 +13,20 @@ Check the type `S` against the contract of the trait `X` (and its supertraits').
 the trait instance the declaration wrote, `X{p…}`, or the bare `X`. Returns the trait's
 instance at `S`, the receiver kind (`:self`, `:field`, `:none`) and the problems found.
 """
-function check_member(@nospecialize(X), @nospecialize(S); @nospecialize(stated = X), how::How = How(nothing),
-                      defaults::Union{Nothing,Vector{Any}} = nothing, results::Union{Nothing,Vector{Any}} = nothing)
+function check_member(@nospecialize(X), @nospecialize(S); @nospecialize(stated = X), how::How = How(nothing))
     problems = String[]
     c = contract(X)
     c === nothing && return (stated, :self, String["$X has no contract: it is not a trait"])
     env = _params_at(c, S, stated, how, problems)
     inst = _instance(c, env, stated)
-    served_own = _check_contract!(problems, c, env, S, inst, how, defaults, results)
+    served_own = _check_contract!(problems, c, env, S, inst, how)
     _check_concrete!(problems, c, env, S, how)
     # the supertraits' contracts, at the parameters the subtrait gives them (traits §4.5)
     if inst isa DataType
         for (sc, senv) in _contracts_of(inst)
             sc === c && continue
             sinst = _instance(sc, senv, bare(sc.trait))
-            served_own |= _check_contract!(problems, sc, senv, S, sinst, how, defaults, results)
+            served_own |= _check_contract!(problems, sc, senv, S, sinst, how)
             _agree!(problems, sc, sinst, S, how)
             _check_concrete!(problems, sc, senv, S, how)
         end
@@ -146,10 +145,8 @@ function _instance(c::Contract, env, @nospecialize(stated))
 end
 
 # Completeness, results and fields of one contract at S. Returns whether S serves an
-# operation by its own method. `defaults` collects the calls a default serves, `results` the results
-# the check inferred: the definition hook keeps both while S is a member (traits §5.10, §5.11).
-function _check_contract!(problems, c::Contract, env, @nospecialize(S), @nospecialize(inst), how::How,
-                          defaults::Union{Nothing,Vector{Any}} = nothing, results::Union{Nothing,Vector{Any}} = nothing)
+# operation by its own method.
+function _check_contract!(problems, c::Contract, env, @nospecialize(S), @nospecialize(inst), how::How)
     own = false
     R = _receiver_type(S, how)
     complete_env = length(env) == length(c.params)
@@ -172,8 +169,8 @@ function _check_contract!(problems, c::Contract, env, @nospecialize(S), @nospeci
             tt === nothing && (push!(problems, "the declared signature of $(op.name) cannot be evaluated at $S"); continue)
             m = _serving_method(op, tt)
             if m === nothing
-                # a default serves the operation at S: recorded for the override rule (traits §5.11)
-                op.hasdefault && (defaults === nothing || push!(defaults, (c.trait, op.f, Tuple{Core.Typeof(op.f), tt.parameters...})); continue)
+                op.hasdefault && continue        # a default serves the operation at S
+
                 h = _hidden_method(op, tt)
                 if h !== nothing
                     push!(problems, "$(op.name)'s method $(h.sig) takes any receiver, so the trait's method, more specific, " *
@@ -199,15 +196,52 @@ function _check_contract!(problems, c::Contract, env, @nospecialize(S), @nospeci
             rt = Base.infer_return_type(op.f, tt)
             # the declared result as written, and what it is at S where that differs (`T` = `Float64`)
             dstr = string(op.result) == string(declared) ? "$declared" : "$(op.result) = $declared"
-            if rt <: declared
-                results === nothing || push!(results, (c, op, Tuple{Core.Typeof(op.f), tt.parameters...}, env, R))
-            else
+            rt <: declared ||
                 push!(problems, "$(op.name)'s method at $S infers its result as $rt, wider than the declared $dstr")
-            end
         end
     end
     complete_env && S isa DataType && _check_fields!(problems, c, env, S)
     return own
+end
+
+# The records a passed check leaves (traits §5.10, §5.11; lowering §3, step 7): for each operation of
+# the contract and its supertraits', a checked result where a method serves it and its result is
+# inferred (not at an abstract further argument), a fixed call where a default serves it. No inference:
+# the same at `@implement`, at a first use, and for a membership an image activated, whose check passed
+# when the image was built. A forwarding member's calls are its forwarders' (`_fwd_sigs`).
+function _records_at(@nospecialize(X), @nospecialize(S), @nospecialize(stated), how::How)
+    defaults, results = Any[], Any[]
+    c = contract(bare(X))
+    (c === nothing || how.by !== nothing) && return defaults, results
+    env = _params_at(c, S, stated, how, String[])
+    inst = _instance(c, env, stated)
+    _records_walk!(defaults, results, c, env, S, how)
+    if inst isa DataType
+        for (sc, senv) in _contracts_of(inst)
+            sc === c && continue
+            _records_walk!(defaults, results, sc, senv, S, how)
+        end
+    end
+    return defaults, results
+end
+
+function _records_walk!(defaults, results, c::Contract, env, @nospecialize(S), how::How)
+    length(env) == length(c.params) || return nothing
+    R = _receiver_type(S, how)
+    for op in c.operations
+        tt = _call_types(c, op, env, R)
+        tt === nothing && continue
+        sig = Tuple{Core.Typeof(op.f), tt.parameters...}
+        if _serving_method(op, tt) === nothing
+            op.hasdefault && push!(defaults, (c.trait, op.f, sig))
+            continue
+        end
+        declared = try _eval_in(c, op.result, env, R) catch; nothing end
+        declared isa Type || continue
+        _open_further(op, tt) && continue
+        push!(results, (c, op, sig, env, R))
+    end
+    return nothing
 end
 
 function _where_env(c::Contract, op::OperationDecl, env, @nospecialize(R))
