@@ -93,7 +93,7 @@ struct W2 <: Shp; s::Inner2; end
     @test latest(sarea, W2(Inner2(2.0))) == 2.0
 end
 
-## strict mode at the form, in both orders
+## strict mode at the form: the membership that creates the ambiguity is refused, in either order
 @trait XF
 @trait YF
 fa(::XF) = :x
@@ -101,18 +101,23 @@ fa(::YF) = :y
 struct SF1 <: XF end
 @implement XF SF1
 struct SF2 <: XF end
-@implement YF SF2
+struct SF3 <: XF end
+@implement YF SF3            # without strict mode: a warning
 
 @testset "strict mode at a declared subtype" begin
     TraitWorld.strict!(true)
     try
-        # the trait of the definition first: the second trait refused, the type not its member
+        # the trait of the definition declared first: the second trait refused, the type not its member
         @test thrown(:(@implement YF SF1)) isa ImplementError
         @test !member(SF1, YF)
-        # the other trait first: the declaration of the definition's trait refused, but the type stays
-        # its subtype by the definition (traits §6.3)
-        @test thrown(:(@implement XF SF2)) isa ImplementError
-        @test member(SF2, XF) && count(e -> live(e) && getfield(e, :set) === XF.name, entries(SF2)) == 0
+        # the second trait first: refused as well, since the definition's trait's method applies
+        # at the type by the definition (traits §6.3); the definition's trait is then declared
+        e = thrown(:(@implement YF SF2))
+        @test e isa ImplementError && occursin("All{", sprint(showerror, e))
+        @test !member(SF2, YF)
+        @test thrown(:(@implement XF SF2)) === nothing && member(SF2, XF)
+        # an ambiguity made before strict mode is not this membership's
+        @test thrown(:(@implement XF SF3)) === nothing
     finally
         TraitWorld.strict!(false)
     end
