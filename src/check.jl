@@ -56,6 +56,16 @@ function _check_concrete!(problems, c::Contract, env, @nospecialize(S), how::How
     end
 end
 
+# the instance of the trait named `tn` among S's declared supertypes, or nothing
+function _declared_instance(S::DataType, tn::Core.TypeName)
+    t = S
+    while t !== Any
+        t.name === tn && return t
+        t = supertype(t)
+    end
+    return nothing
+end
+
 # the receiver type: the member, or its forwarding field's type (traits §4.4)
 _receiver_type(@nospecialize(S), how::How) =
     how.by === nothing ? S : (S isa DataType && hasfield(S, how.by) ? fieldtype(S, how.by) : Any)
@@ -64,14 +74,30 @@ _receiver_type(@nospecialize(S), how::How) =
 # equations at Self; then their bounds (traits §3.2).
 function _params_at(c::Contract, @nospecialize(S), @nospecialize(stated), how::How, problems)
     env = Dict{Symbol,Any}()
+    source = Dict{Symbol,String}()
+    # the declared supertype (`struct S <: X{Int}`): the parameters come from the definition (traits §5.2)
+    decl = S isa DataType ? _declared_instance(S, Base.unwrap_unionall(c.trait).name) : nothing
+    if decl !== nothing
+        for (i, p) in enumerate(c.params)
+            v = decl.parameters[i]
+            v isa TypeVar && continue
+            env[p] = v
+            source[p] = "declared, $(S.name.name) <: $decl"
+        end
+    end
     sdt = Base.unwrap_unionall(stated)
     if stated isa DataType && sdt.name === Base.unwrap_unionall(c.trait).name
         for (i, p) in enumerate(c.params)
             v = sdt.parameters[i]
-            v isa TypeVar || (env[p] = v)
+            v isa TypeVar && continue
+            if haskey(env, p) && !(env[p] == v)
+                push!(problems, "the parameter $p is $(env[p]) ($(source[p])) and $v (stated)")
+            else
+                env[p] = v
+                haskey(source, p) || (source[p] = "stated")
+            end
         end
     end
-    source = Dict{Symbol,String}(p => "stated" for p in keys(env))
     if S isa DataType
         for f in c.fields
             any(p -> _mentions(f.type, p) && !haskey(env, p), c.params) || continue

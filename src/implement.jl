@@ -125,14 +125,16 @@ function _implement_one!(mod::Module, @nospecialize(X), @nospecialize(member), h
     if how.by !== nothing
         append!(added, _define_fwd!(mod, member, bare(X), how.by))
     end
-    # `struct S <: X` needs no entry: X is S's declared supertype (traits §5.2)
-    if !(member isa DataType && _declared_subtype(member, inst))
-        try
-            _declare!(member, inst, mod, how.by, receiver)
-        catch err
-            err isa ErrorException || rethrow()
-            throw(ImplementError(X, member, err.msg))
-        end
+    # every membership is an entry, `struct S <: X` too (traits §5.2): the image keeps it, its records come
+    # back from it, the member hook runs for an abstract member's subtypes, the ambiguity report sees it
+    try
+        _declare!(member, inst, mod, how.by, receiver)
+    catch err
+        err isa ErrorException || rethrow()
+        # a declared subtype stays a subtype of X: the module-end hook names the refusal, not a missing @implement
+        member isa DataType && _declared_subtype(member, inst) &&
+            (_REFUSED[(member.name, Base.unwrap_unionall(bare(X)).name)] = err.msg)
+        throw(ImplementError(X, member, err.msg))
     end
     if !_is_pattern(member) || how.by !== nothing
         how.by === nothing || (_FORWARD_FIELD[(Base.unwrap_unionall(member)::DataType).name] = how.by)
@@ -148,6 +150,9 @@ end
 
 # every `@implement X S` of this session, as (S's TypeName, X's TypeName): the module-end hook
 const _IMPLEMENTED = Set{Any}()
+# a declared subtype's `@implement` the runtime refused (strict mode's ambiguity, another instance), with
+# the reason: the module-end hook names it
+const _REFUSED = Dict{Any,String}()
 
 # The calls a membership fixed (traits §5.11): those a default serves at a member, and those its
 # forwarding's methods serve. A later method that would take one is refused (the definition hook).
@@ -444,6 +449,9 @@ function _module_end_hook(m::Module)
         contract(X) === nothing && continue
         (S.name, X.name) in _IMPLEMENTED && continue
         kind = isabstracttype(S) ? "abstract type" : "struct"
+        why = get(_REFUSED, (S.name, X.name), nothing)
+        why === nothing || throw(ImplementError(X.name.wrapper, S.name.wrapper,
+            "$kind $(S.name.name) <: $(X.name.name): its `@implement` was refused: $why"))
         throw(ImplementError(X.name.wrapper, S.name.wrapper,
             "$kind $(S.name.name) <: $(X.name.name) needs `@implement $(X.name.name) $(S.name.name)` before the end of module $m"))
     end
