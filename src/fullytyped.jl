@@ -214,7 +214,7 @@ end
 
 # a function passed at a `Callable{A, S}` argument: one target at its signature (traits §16)
 function _callable_targets!(extra, queue, @nospecialize(info), ir, stmt)
-    while info isa CC.AttributedCallInfo || info isa CC.GuardedCallInfo
+    while info isa CC.AttributedCallInfo
         info = info.info
     end
     info isa CC.ConstCallInfo && (info = info.call)
@@ -262,8 +262,6 @@ function _site_kind(@nospecialize(info), @nospecialize(f), @nospecialize(ft))
         if info isa CC.AttributedCallInfo
             dispatch |= info.dispatch
             info = info.info
-        elseif info isa CC.GuardedCallInfo
-            info = info.info
         else
             break
         end
@@ -290,7 +288,7 @@ end
 # the signatures a resolved call's callees are inferred at
 function _callee_sigs(@nospecialize(info))
     out = Any[]
-    while info isa CC.AttributedCallInfo || info isa CC.GuardedCallInfo
+    while info isa CC.AttributedCallInfo
         info = info.info
     end
     if info isa CC.ApplyCallInfo
@@ -379,7 +377,7 @@ function _origin(ir, mi, @nospecialize(v), interp, world, depth::Int)
         elseif Meta.isexpr(stmt, :call)
             f = CC.singleton_type(CC.argextype(stmt.args[1], ir))
             info = inst[:info]
-            while info isa CC.AttributedCallInfo || info isa CC.GuardedCallInfo
+            while info isa CC.AttributedCallInfo
                 info = info.info
             end
             if (f === getfield || f === getproperty) && length(stmt.args) >= 3
