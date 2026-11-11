@@ -74,3 +74,14 @@ end
     @test cf(Tuple{Type{Int}, Float64}) == "Int64(::Float64)"
     @test !occursin("Tuple{typeof", cf(Tuple{typeof(marea), MShape}))
 end
+
+@testset "no hint at an operation that is another owner's function" begin
+    e = try getindex(nothing, 1); nothing catch err; err end
+    m = sprint(showerror, e)
+    @test e isa MethodError && !occursin("Indexable", m) && !occursin("Keyed", m)
+    # an operation of the trait's own module keeps its hints
+    e = try marea(1, 2); nothing catch err; err end
+    @test occursin("`marea` is declared", sprint(showerror, e))
+    e = try mdouble(3); nothing catch err; err end
+    @test occursin("is not a member of `MShape`", sprint(showerror, e))
+end

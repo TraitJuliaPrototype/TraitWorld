@@ -43,6 +43,9 @@ function _trait_hints!(lines, @nospecialize(f), args, world::UInt)
     for m in ms
         sig = Base.unwrap_unionall(m.sig)
         sig isa DataType || continue
+        # an operation that is another owner's function (Base's `getindex`, for BaseTraits' `Indexable`):
+        # a failed call of it says nothing of the trait, so the trait's own method gives no hint
+        _is_trait_method(m) && (try owner(parentmodule(f)) != owner(m.module) catch; false end) && continue
         ps = sig.parameters
         # a call of an operation: its declared signature
         for i in 2:length(ps)
