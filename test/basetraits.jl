@@ -165,6 +165,9 @@ end
 # The library's pairs, each with its reason; a new pair fails here.
 @testset "the traits' operations: pairs with no joint method" begin
     amb = Test.detect_ambiguities(TraitWorld; recursive = true)
+    # a membership's method (W-141) is never called, only asked for: two that apply at one type (a member
+    # of two subtraits of one trait) are no conflict
+    filter!(p -> p[1].name !== :implements, amb)
     recv(m) = string(nameof(Base.unwrap_unionall(Base.unwrap_unionall(m.sig).parameters[2])))
     pairs = unique!(sort!([string(a.name, ": ", join(sort!([recv(a), recv(b)]), ", ")) for (a, b) in amb]))
     # `getindex` by position and by key: no one answer is right for every type in both, so each
