@@ -256,8 +256,10 @@ end
 # dictionaries are a cache of them (traits §5.10). Run before a definition or an image's methods are
 # checked. A failure here warns and refuses nothing.
 const _ENTRY_CURSOR = Ref(0)
+const _CHECK_CURSOR = Ref(0)
 
 function _sync_image_records!()
+    _sync_image_checks!()
     n = Int(ccall(:jl_activated_memberships_count, Csize_t, ()))
     n <= _ENTRY_CURSOR[] && return nothing
     list = ccall(:jl_activated_memberships, Any, ())::Core.SimpleVector
@@ -269,6 +271,25 @@ function _sync_image_records!()
             _records_from_entry!(en)
         catch err
             @warn "TraitWorld: the records of an image's membership were not made" entry = en exception = err
+        end
+    end
+    return nothing
+end
+
+# The checks images kept (lowering §11): the runtime's list of (member type, trait) pairs, read up to
+# the library's cursor. A failure here warns and refuses nothing.
+function _sync_image_checks!()
+    list = ccall(:jl_activated_member_checks, Any, ())::Vector{Any}
+    n = length(list)
+    n <= _CHECK_CURSOR[] && return nothing
+    from = _CHECK_CURSOR[] + 1
+    _CHECK_CURSOR[] = n
+    for i in from:2:n-1
+        T, X = list[i], list[i + 1]
+        try
+            _restore_checked!(T, X)
+        catch err
+            @warn "TraitWorld: the records of a member an image checked were not made" member = T trait = X exception = err
         end
     end
     return nothing
@@ -710,10 +731,11 @@ const _IN_PROGRESS = InProgress()
 # the runtime's member hook (compiler §10.4): called at a member's first use at dispatch
 _member_hook(@nospecialize(T), @nospecialize(X)) = (check_first_use(T, X); nothing)
 
-function _check_pattern_member(@nospecialize(T), @nospecialize(X))
+# The pattern's membership that makes `T` a member of `X`: the trait's instance at `T` (the pattern's
+# variables matched against `T`) and how the member serves the trait; `nothing` where there is none.
+function _member_instance_at(@nospecialize(T), @nospecialize(X))
     for (pat, inst, how) in _patterns_for(T, X)
         T <: pat || continue
-        # the trait's instance at T: the pattern's variables matched against T
         Tinst = inst
         if Base.has_free_typevars(inst)
             ti, vals = ccall(:jl_type_intersection_with_env, Any, (Any, Any), T, pat)::Core.SimpleVector
@@ -728,12 +750,35 @@ function _check_pattern_member(@nospecialize(T), @nospecialize(X))
                 Tinst = _subst_tv(Tinst, tv, vals[k])
             end
         end
-        _, _, problems = check_member(bare(X), T; stated = Tinst, how)
-        isempty(problems) || return ImplementError(Tinst, T, problems)
-        # a member checked at its first use keeps its check while it is a member (traits §5.10, §5.11)
-        _record_checks!(X, T, _records_at(X, T, Tinst, how)...)
-        return nothing
+        return (Tinst, how)
     end
+    return nothing
+end
+
+function _check_pattern_member(@nospecialize(T), @nospecialize(X))
+    r = _member_instance_at(T, X)
+    r === nothing && return nothing
+    Tinst, how = r
+    _, _, problems = check_member(bare(X), T; stated = Tinst, how)
+    isempty(problems) || return ImplementError(Tinst, T, problems)
+    # a member checked at its first use keeps its check while it is a member (traits §5.10, §5.11)
+    _record_checks!(X, T, _records_at(X, T, Tinst, how)...)
+    return nothing
+end
+
+# A pattern's member whose check passed while an image was built (lowering §11): the image keeps the
+# answer, and the runtime does not ask the hook for it again. Its records are made again here, without
+# inference, as an image's membership's are; the answer joins the library's own.
+function _restore_checked!(@nospecialize(T), @nospecialize(X))
+    key = (T, bare(X))
+    get(_CHECKED, key, missing) === missing || return nothing
+    r = _member_instance_at(T, X)
+    r === nothing && return nothing
+    Tinst, how = r
+    _forget_records!(X, T)
+    _record_checks!(X, T, _records_at(X, T, Tinst, how)...)
+    _CHECKED[key] = nothing
+    isconcretetype(T) && ccall(:jl_register_candidate, Cvoid, (Any, Any), X, T)
     return nothing
 end
 
