@@ -225,9 +225,15 @@ function _check_membership_owner(mod::Module, @nospecialize(X), @nospecialize(me
     to = _type_owner(bare(X))
     mo = _type_owner(member)
     if !(owns(definer, to) || owns(definer, mo))
-        throw(OwnershipError("@implement $(bare(X)) $member in $mod: $(_owner_name(definer)) owns neither " *
-            "the trait (owned by $(_owner_name(to))) nor the type (owned by $(_owner_name(mo))); " *
+        # a membership by neither owner is a pirate's (traits §12.1, §12.2): followed by default, with
+        # the code that relied on its absence compiled again; refused under strict mode
+        what = "@implement $(bare(X)) $member in $mod: $(_owner_name(definer)) owns neither " *
+            "the trait (owned by $(_owner_name(to))) nor the type (owned by $(_owner_name(mo)))"
+        STRICT[] && throw(OwnershipError(what * ": a pirate's membership, which strict mode refuses; " *
             "the trait's owner or the type's owner declares it, a foreign pair in the trait owner's package extension"))
+        @warn what * ": a pirate's membership. It is followed; code that relied on its absence is compiled again. " *
+            "The trait's owner or the type's owner declares it, a foreign pair in the trait owner's package extension" maxlog = 1 _id = Symbol(what)
+        return nothing
     end
     r = Base.moduleroot(mod)
     trig = _extension_parent(r) === nothing ? nothing : get(_EXT_TRIGGERS, r, nothing)

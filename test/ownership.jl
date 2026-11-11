@@ -34,8 +34,14 @@ end
 @testset "ownership" begin
     @test TraitWorld.owner(Main.OwnType) === Main.OwnType
     @test TraitWorld.owner(Base) === :Julia && TraitWorld.owner(TraitWorld.CC) === :Julia
-    # a third package may not declare a foreign trait for a foreign type
+    # a third package's membership of a foreign trait for a foreign type is a pirate's (traits §12.1):
+    # refused under strict mode, followed with a warning otherwise
+    TraitWorld.strict!(true)
     @test_throws OwnershipError Core.eval(Main.OwnThird, :(@implement OwnTrait.Greets OwnType.P))
+    TraitWorld.strict!(false)
+    @test !Base.invokelatest(<:, Main.OwnType.P, Main.OwnTrait.Greets)
+    @test_logs (:warn, r"a pirate's membership") Core.eval(Main.OwnThird, :(@implement OwnTrait.Greets OwnType.P))
+    @test Base.invokelatest(<:, Main.OwnType.P, Main.OwnTrait.Greets)
     # the type's owner may
     Core.eval(Main.OwnType, :(import ..OwnTrait; @implement OwnTrait.Greets P))
     @test Main.OwnType.P() isa Main.OwnTrait.Greets
