@@ -257,6 +257,6 @@ _no_pirates(m::Module) = (ccall(:jl_get_module_trait_options, Cint, (Any,), m) &
 function _check_pirate(m::Method)
     _no_pirates(m.module) || return nothing
     owned_method(m) && return nothing
-    throw(OwnershipError("$(m.name) at $(m.sig) in $(m.module) is a pirate: $(_owner_name(owner(m.module))) " *
+    throw(OwnershipError("$(_callform(m.sig)) in $(m.module) is a pirate: $(_owner_name(owner(m.module))) " *
         "owns neither the function nor a type in each of its signatures, and the scope declares `no_pirates`"))
 end

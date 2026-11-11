@@ -66,3 +66,11 @@ using .MsgLib: MShape, marea, mname, mdouble
     m = only(m for m in methods(marea) if m.sig == Tuple{typeof(marea), MShape})
     @test endswith(string(m.file), "messages.jl")
 end
+
+@testset "a signature prints as a call" begin
+    cf = TraitWorld._callform
+    @test cf(Tuple{typeof(sum), Vector{Int8}}) == "sum(::Vector{Int8})"
+    @test (c = cf(Tuple{typeof(push!), Vector{T}, T} where T); startswith(c, "push!(::") && endswith(c, ", ::T) where {T}"))
+    @test cf(Tuple{Type{Int}, Float64}) == "Int64(::Float64)"
+    @test !occursin("Tuple{typeof", cf(Tuple{typeof(marea), MShape}))
+end

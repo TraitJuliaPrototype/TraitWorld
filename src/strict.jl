@@ -45,7 +45,7 @@ function Base.showerror(io::IO, e::PirateError)
     m = e.method
     print(io, "PirateError: strict mode refuses `", m.name, "(",
           join((_short(t, 40) for t in (Base.unwrap_unionall(m.sig)::DataType).parameters[2:end]), ", "),
-          ")`, defined by ", _owner_name(e.definer), ".\n  It would win at the call `", _short(e.sig),
+          ")`, defined by ", _owner_name(e.definer), ".\n  It would win at the call `", _callform(e.sig),
           "`, which code compiled by facts makes (in `", _code_name(e.caller), "`).\n  ",
           _owner_name(e.definer), " owns neither the function nor a type in that signature (a pirate). ",
           "Define it where a type it is for is owned, name the definer a joint owner (`@joint_owners`), ",
@@ -267,7 +267,7 @@ function Base.showerror(io::IO, e::PirateAtLoadError)
     print(io, "PirateError: `", e.method.name, "(",
           join((_short(t, 40) for t in (Base.unwrap_unionall(e.method.sig)::DataType).parameters[2:end]), ", "),
           ")`, defined by ", _owner_name(e.definer), " before a package image was loaded, wins at its fact `",
-          _short(e.sig), "` in `", _code_name(e.code), "`.\n  It came first, so strict mode cannot refuse it: ",
+          _callform(e.sig), "` in `", _code_name(e.code), "`.\n  It came first, so strict mode cannot refuse it: ",
           "the image's code is compiled again with it. Load the package before the pirate.")
 end
 

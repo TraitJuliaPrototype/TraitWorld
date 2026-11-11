@@ -9,6 +9,26 @@ struct ImplementError <: Exception
 end
 ImplementError(@nospecialize(X), @nospecialize(T), p::AbstractVector) = ImplementError(X, T, convert(Vector{String}, p), false)
 ImplementError(@nospecialize(X), @nospecialize(T), p::String) = ImplementError(X, T, [p], false)
+"""
+A signature as a call, `f(::A, ::B)`, for a message (traits §11.3): never the tuple type
+`Tuple{typeof(f), A, B}`, which is the compiler's form.
+"""
+function _callform(@nospecialize(sig))
+    u = Base.unwrap_unionall(sig)
+    (u isa DataType && u <: Tuple && !isempty(u.parameters)) || return sprint(show, sig; context = :compact => true)
+    ft = u.parameters[1]
+    fname = ft isa DataType && isdefined(ft, :instance) ? string(nameof(ft.instance)) :
+            ft isa DataType && ft.name === Type.body.name ? sprint(show, ft.parameters[1]; context = :compact => true) :
+            string("(::", sprint(show, ft; context = :compact => true), ")")
+    args = join(("::" * sprint(show, p; context = :compact => true) for p in u.parameters[2:end]), ", ")
+    vars = String[]
+    while sig isa UnionAll
+        push!(vars, sprint(show, sig.var))
+        sig = sig.body
+    end
+    return string(fname, "(", args, ")", isempty(vars) ? "" : " where {" * join(vars, ", ") * "}")
+end
+
 "The error for a method refused at its definition: `T` stays a member of `X`."
 _method_refused(@nospecialize(X), @nospecialize(T), p::String) = ImplementError(X, T, [p], true)
 

@@ -209,7 +209,7 @@ function _check_contract!(problems, c::Contract, env, @nospecialize(S), @nospeci
             if _untyped_receiver(m, op)
                 # a method that takes any receiver loses to the trait's method, or is ambiguous with it,
                 # once S is a member (traits §6.2; open issue 150)
-                push!(problems, "$(op.name)'s method $(m.sig) takes any receiver, so the trait's method, more specific, " *
+                push!(problems, "$(op.name)'s method $(_callform(m.sig)) takes any receiver, so the trait's method, more specific, " *
                                 "would hide it: define $(op.name) at $S")
                 continue
             end
