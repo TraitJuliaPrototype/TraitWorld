@@ -5,14 +5,26 @@ struct ImplementError <: Exception
     trait::Any
     type::Any
     problems::Vector{String}
+    method::Bool                  # a method refused at its definition for a member's check (traits §5.10, §5.11)
 end
-ImplementError(@nospecialize(X), @nospecialize(T), p::String) = ImplementError(X, T, [p])
+ImplementError(@nospecialize(X), @nospecialize(T), p::AbstractVector) = ImplementError(X, T, convert(Vector{String}, p), false)
+ImplementError(@nospecialize(X), @nospecialize(T), p::String) = ImplementError(X, T, [p], false)
+"The error for a method refused at its definition: `T` stays a member of `X`."
+_method_refused(@nospecialize(X), @nospecialize(T), p::String) = ImplementError(X, T, [p], true)
 
 function Base.showerror(io::IO, e::ImplementError)
     print(io, "ImplementError: ")
-    show(io, e.type)
-    print(io, " cannot be a member of ")
-    show(io, e.trait)
+    if e.method
+        print(io, "a method is refused: ")
+        show(io, e.type)
+        print(io, " is a member of ")
+        show(io, e.trait)
+        print(io, ", and the method would break its check")
+    else
+        show(io, e.type)
+        print(io, " cannot be a member of ")
+        show(io, e.trait)
+    end
     for p in e.problems
         print(io, "\n  - ", p)
     end

@@ -17,6 +17,7 @@ macro trait_module(opts...)
             fully_typed = o.args[2].value      # from @enforce_fully_typed or @warn_not_fully_typed (traits §14)
             continue
         end
+        o isa Symbol && (o = Expr(:(=), o, true))        # `bounded` is `bounded = true` (traits §2)
         (Meta.isexpr(o, :(=)) && o.args[1] isa Symbol && o.args[2] isa Bool &&
          o.args[1] in (:facts, :bounded, :no_pirates, :dynamic, :first_seen)) ||
             error("@trait_module: an option is facts, bounded, no_pirates, dynamic or first_seen = true or false; got $o")

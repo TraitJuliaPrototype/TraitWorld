@@ -26,7 +26,23 @@ the trait's method for each operation, the contract on the type's `TypeName`, an
 `Dynamic{X}`'s membership (lowering §2). A trait's declaration changes no compiled code.
 """
 macro trait(head, body = nothing)
-    return _trait(__module__, head, body)
+    return _at_source!(_trait(__module__, head, body), __source__)
+end
+
+# the code a declaration makes lies where the declaration is written: a message's "@ file:line" and a
+# stack frame name the user's `@trait`, not this library's source
+const _SRC_DIR = @__DIR__
+function _at_source!(@nospecialize(ex), src::LineNumberNode)
+    ex isa Expr || return ex
+    for (i, a) in enumerate(ex.args)
+        if a isa LineNumberNode
+            # the user's own lines (a default's body) stay
+            startswith(string(a.file), _SRC_DIR) && (ex.args[i] = src)
+        elseif a isa Expr
+            a.head === :quote || _at_source!(a, src)
+        end
+    end
+    return ex
 end
 
 function _trait(mod::Module, head, body)

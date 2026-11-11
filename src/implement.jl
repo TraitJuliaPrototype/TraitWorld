@@ -127,14 +127,18 @@ function _implement_one!(mod::Module, @nospecialize(X), @nospecialize(member), h
     end
     # every membership is an entry, `struct S <: X` too (traits §5.2): the image keeps it, its records come
     # back from it, the member hook runs for an abstract member's subtypes, the ambiguity report sees it
-    try
+    refusal = try
         _declare!(member, inst, mod, how.by, receiver)
+        nothing
     catch err
         err isa ErrorException || rethrow()
+        err.msg
+    end
+    if refusal !== nothing              # raised outside the catch: the message prints once
         # a declared subtype stays a subtype of X: the module-end hook names the refusal, not a missing @implement
         member isa DataType && _declared_subtype(member, inst) &&
-            (_REFUSED[(member.name, Base.unwrap_unionall(bare(X)).name)] = err.msg)
-        throw(ImplementError(X, member, err.msg))
+            (_REFUSED[(member.name, Base.unwrap_unionall(bare(X)).name)] = refusal)
+        throw(ImplementError(X, member, refusal))
     end
     if !_is_pattern(member) || how.by !== nothing
         how.by === nothing || (_FORWARD_FIELD[(Base.unwrap_unionall(member)::DataType).name] = how.by)
@@ -322,7 +326,7 @@ function _check_membership_calls(m::Method)
             s = typeintersect(r.sig, m.sig)      # the record's calls the method applies to
             (s === Union{} || !_would_win(m, s, world)) && continue
             how = r.source isa Symbol ? "the forwarding of $(r.trait) by the field $(r.source)" : "a default of $(bare(r.source))"
-            throw(ImplementError(r.trait, r.member, "$how serves $(nameof(fT.instance)) at $(r.member) since its membership: " *
+            throw(_method_refused(r.trait, r.member, "$how serves $(nameof(fT.instance)) at $(r.member) since its membership: " *
                                                    "define the method before `@implement`, or in its block"))
         end
     end
@@ -337,16 +341,16 @@ function _check_membership_calls(m::Method)
         cur = _current_method(s, world)
         if cur !== nothing && cur !== m && !(cur.sig == m.sig) &&
            ccall(:jl_type_morespecific, Cint, (Any, Any), m.sig, cur.sig) == 0
-            throw(ImplementError(r.trait, r.member,
-                "the method $m would make $f ambiguous with $cur at $s, the member $(r.member)'s call of " *
-                "$(bare(r.trait))'s $(_declared(r.op, r.contract)): define it more specific than $cur, or not at this member"))
+            throw(_method_refused(r.trait, r.member,
+                "the method $m\n    would make $f ambiguous with $cur\n    at the member $(r.member)'s call of " *
+                "$(bare(r.trait))'s $(_declared(r.op, r.contract))\n    fix: define it more specific than that method, or not at this member"))
         end
         rt = _infer_new_method(m, s, world)
         rt <: declared && continue
-        throw(ImplementError(r.trait, r.member,
-            "the method $m would serve $s, the member $(r.member)'s call of $(bare(r.trait))'s " *
-            "$(_declared(r.op, r.contract)), and infers its result as $rt, outside the declared $declared: " *
-            "return within $declared, or do not define the method at this member"))
+        throw(_method_refused(r.trait, r.member,
+            "the method $m\n    would serve the member $(r.member)'s call of $(bare(r.trait))'s " *
+            "$(_declared(r.op, r.contract))\n    and infers its result as $rt, outside the declared $declared\n" *
+            "    fix: return within $declared, or do not define the method at this member"))
     end
     return nothing
 end

@@ -223,7 +223,8 @@ function _check_contract!(problems, c::Contract, env, @nospecialize(S), @nospeci
             # the declared result as written, and what it is at S where that differs (`T` = `Float64`)
             dstr = string(op.result) == string(declared) ? "$declared" : "$(op.result) = $declared"
             rt <: declared ||
-                push!(problems, "$(op.name)'s method at $S infers its result as $rt, wider than the declared $dstr")
+                push!(problems, "$(op.name)'s method at $S infers its result as $rt, " *
+                                (declared <: rt ? "wider than" : "outside") * " the declared $dstr")
         end
     end
     complete_env && S isa DataType && _check_fields!(problems, c, env, S)

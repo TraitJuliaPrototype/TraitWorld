@@ -15,12 +15,13 @@ end
 "`_declare!` where a refusal (a cycle, another instance, strict mode's ambiguity) is an `ImplementError`."
 function _declare_checked!(@nospecialize(member), @nospecialize(instance), mod::Module,
                            @nospecialize(by), receiver::Symbol)
-    try
+    refusal = try
         return _declare!(member, instance, mod, by, receiver)
     catch err
         err isa ErrorException || rethrow()
-        throw(ImplementError(instance, member, err.msg))
+        err.msg
     end
+    throw(ImplementError(instance, member, refusal))      # outside the catch: the message prints once
 end
 
 "whether `X` is a trait: an open set"

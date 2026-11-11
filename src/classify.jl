@@ -237,6 +237,12 @@ function _describe(@nospecialize(f), argtypes::Vector{Any})
             return string(_describe_name(g), "(", pos, "; ", kws, ")")
         end
     end
+    # a field read or written, by its name
+    if (f === getproperty || f === getfield || f === setproperty!) && length(argtypes) >= 3 &&
+       argtypes[3] isa Core.Const && argtypes[3].val isa Symbol
+        return string("the field `", argtypes[3].val, "` of a ", CC.widenconst(argtypes[2]),
+                      f === setproperty! ? " (written)" : "")
+    end
     return string(_describe_name(f), "(", join([string(CC.widenconst(a)) for a in argtypes[2:end]], ", "), ")")
 end
 _describe_name(@nospecialize(f)) = f isa Function ? string(nameof(f)) : string(f)
