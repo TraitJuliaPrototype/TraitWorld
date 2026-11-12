@@ -61,4 +61,9 @@ end
     Core.eval(Main.PirateScope, :(Base.length(::Mine) = 7))
     @test length(Main.PirateScope.Mine()) == 7
     @test !TraitWorld.owned_method(which(Main.OwnTrait.greet, (Main.OwnType.P,)))
+    # a membership written as a method of `Core.implements` (W-141) is a method: a pirate's is refused in
+    # such a scope, and declares nothing
+    @test_throws OwnershipError Core.eval(Main.PirateScope,
+        :(Core.implements(::Type{$(Main.OwnTrait.Greets)}, ::Type{Rational{Int}}) = nothing))
+    @test !(Rational{Int} <: Main.OwnTrait.Greets)
 end
