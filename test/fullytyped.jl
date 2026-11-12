@@ -24,6 +24,8 @@ usesop(xs::Vector{Lengthy}) = llen(xs[1]) + 1      # an operation on a value kno
 @enforce_fully_typed etotal(h::Holder) = sum(sink, h.data)
 @enforce_fully_typed etwice(x::Int) = 2x
 @enforce_fully_typed eabs(h::Holder) = h.data
+@enforce_concrete_only result cabs(h::Holder) = h.data
+@enforce_concrete_only result cabs2(x::Int) = 2x
 @warn_not_fully_typed wtotal(h::Holder) = sum(sink, h.data)
 
 module Strict
@@ -69,7 +71,9 @@ slen(v::Vector) = length(v)
     h = Holder([1, 2])
     @test_throws NotFullyTypedError etotal(h)
     @test etwice(3) == 6
-    @test_throws AbstractTypeError eabs(h)
+    @test eabs(h) == [1, 2]                          # a result of an abstract type is no fault of the mode
+    @test_throws AbstractTypeError cabs(h)           # a method that asks for a concrete result
+    @test cabs2(3) == 6
     e = try etotal(h) catch e; e end
     @test occursin("field `data` of `Holder`", sprint(showerror, e))
     @test (@test_logs (:warn, r"@warn_not_fully_typed") wtotal(h)) == 3

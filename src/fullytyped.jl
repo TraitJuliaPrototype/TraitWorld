@@ -105,7 +105,18 @@ end
 _module_of(mi::Core.MethodInstance) = mi.def isa Method ? (mi.def::Method).module : mi.def
 
 "Whether a type fails fully typed mode as a value's type: as the compiler's rule (compiler §2.7)."
-ft_abstract(@nospecialize(rt)) = CC.ft_abstract_result(CC.widenconst(rt))
+# whether a result's type is abstract in the report's sense: neither concrete, a union of at most four
+# concrete types, a type's type, nor a trait or an intersection of traits. The report names its cause.
+function ft_abstract(@nospecialize(rt))
+    rt = CC.widenconst(rt)
+    (rt === Union{} || isconcretetype(rt) || CC.isType(rt)) && return false
+    if rt isa Union
+        ts = Base.uniontypes(rt)
+        length(ts) <= 4 && all(t -> isconcretetype(t) || CC.isType(t), ts) && return false
+    end
+    ccall(:jl_is_trait_arg_type, Cint, (Any,), rt) != 0 && return false
+    return true
+end
 
 # the blocks on a normal path: those from which a return with a value is reachable
 function _normal_blocks(ir)
@@ -484,8 +495,8 @@ end
 """
     AbstractTypeError
 
-Raised under `@enforce_fully_typed` by code whose result at the signature it runs at is of an abstract
-type that is not a trait (traits §14).
+Raised by a method under `@enforce_concrete_only result` at a signature whose result is not concrete
+(traits §14).
 """
 struct AbstractTypeError <: Exception
     sig::Any
@@ -510,7 +521,7 @@ function _fully_typed_hook(site::Core.SimpleVector)
         catch
             nothing
         end
-        site[4] == 2 ? AbstractTypeError(mi.specTypes, site[5], r) : NotFullyTypedError(mi.specTypes, r)
+        NotFullyTypedError(mi.specTypes, r)
     end
     level == 2 && throw(err)
     @warn "@warn_not_fully_typed: " * sprint(showerror, err)
@@ -523,8 +534,8 @@ end
 
 Fully typed mode with errors (traits §14): the method (or every method of the module) is compiled by
 facts; where its code at a signature has a call it cannot resolve when compiled, in it or in what it
-calls, the code raises `NotFullyTypedError`, and where its result there is of an abstract type that
-is not a trait, `AbstractTypeError`. Fully typed code pays nothing.
+calls, the code raises `NotFullyTypedError`. The result's type is no fault: a type is a fault where it
+is used (`@enforce_concrete_only result` asks for a concrete result). Fully typed code pays nothing.
 """
 macro enforce_fully_typed(ex)
     esc(_fully_typed_mode(__module__, ex, :enforce))
@@ -606,6 +617,18 @@ const _CONCRETE_WARNED = Set{Any}()
     return nothing
 end
 
+# the method's result at the signature: the type inference gives it, known where the call is compiled
+@inline _concrete_result(level::Symbol, @nospecialize(f), ::Type{T}) where {T} =
+    _concrete_known(T) ? nothing : _result_fail(level, f, T)
+@noinline function _result_fail(level::Symbol, @nospecialize(f), @nospecialize(T))
+    level === :enforce && throw(AbstractTypeError(f, T, nothing))
+    key = (f, :result, T)
+    key in _CONCRETE_WARNED && return nothing
+    push!(_CONCRETE_WARNED, key)
+    @warn "`$f` returns a value of the type $T, which is not concrete (`@warn_on_abstract result`)"
+    return nothing
+end
+
 # a `where` variable a trait fixes, at the call: decided where the call is compiled
 @inline _concrete_param(level::Symbol, @nospecialize(f), n::Symbol, ::Type{T}) where {T} =
     _concrete_known(T) ? nothing : _concrete_fail(level, f, n, T, "`$n`")
@@ -621,7 +644,8 @@ end
 
 Before a method: a call where a named part is not concrete (traits §14) raises `TraitUseError`, or
 warns once per method and type. The names are the method's `where` variables and its trait arguments,
-each standing for its `Self`. Without names, all of them. In a trait's body, the same macros name the
+each standing for its `Self`. Without names, all of them. `result` names the method's result: a
+signature at which inference gives it a type that is not concrete raises `AbstractTypeError`. In a trait's body, the same macros name the
 trait's parameters and `Self`, checked at each membership.
 """
 macro enforce_concrete_only(args...)
@@ -668,11 +692,23 @@ function _concrete_method(mod::Module, args, level::Symbol)
             push!(checks, :($lib($(QuoteNode(level)), $(QuoteNode(fname)), $(QuoteNode(n)), $n)))
         elseif n in argnames
             push!(checks, :($libself($(QuoteNode(level)), $(QuoteNode(fname)), $(QuoteNode(n)), $(GlobalRef(Core, :keep))($n))))
+        elseif n === :result
+            continue
         else
-            error("@enforce_concrete_only: $n is neither a `where` variable nor an argument of $fname")
+            error("@enforce_concrete_only: $n is neither a `where` variable, an argument of $fname, nor `result`")
         end
     end
     body = def.args[2]
+    if :result in names && !(:result in wherevars) && !(:result in argnames)
+        # the body as a function of its own: its inferred result is the method's at this signature
+        inner = gensym(:body)
+        rt = GlobalRef(Base, :_return_type)
+        libres = GlobalRef(@__MODULE__, :_concrete_result)
+        body = Expr(:block,
+            :(local $inner = () -> $body),
+            :($libres($(QuoteNode(level)), $(QuoteNode(fname)), $rt($inner, Tuple{}))),
+            :($inner()))
+    end
     def.args[2] = Expr(:block, checks..., body)
     return def
 end
