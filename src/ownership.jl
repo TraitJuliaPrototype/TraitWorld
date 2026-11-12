@@ -219,21 +219,20 @@ end
 _owner_name(@nospecialize(o)) = o === :Julia ? "Julia" : string(o)
 
 # A membership is declared by the trait's owner or the type's owner (traits §12.1); one in a package
-# extension names each of its triggers
+# extension names each of its triggers. Returns whether the membership is a pirate's (traits §12.2):
+# one by neither owner. It behaves as a pirate's method: refused in a scope that declares `no_pirates`,
+# followed elsewhere with a warning, and under strict mode refused where it would change code compiled
+# by facts (`_declare_pirate!`).
 function _check_membership_owner(mod::Module, @nospecialize(X), @nospecialize(member))
     definer = owner(mod)
     to = _type_owner(bare(X))
     mo = _type_owner(member)
     if !(owns(definer, to) || owns(definer, mo))
-        # a membership by neither owner is a pirate's (traits §12.1, §12.2): followed by default, with
-        # the code that relied on its absence compiled again; refused under strict mode
-        what = "@implement $(bare(X)) $member in $mod: $(_owner_name(definer)) owns neither " *
-            "the trait (owned by $(_owner_name(to))) nor the type (owned by $(_owner_name(mo)))"
-        STRICT[] && throw(OwnershipError(what * ": a pirate's membership, which strict mode refuses; " *
-            "the trait's owner or the type's owner declares it, a foreign pair in the trait owner's package extension"))
-        @warn what * ": a pirate's membership. It is followed; code that relied on its absence is compiled again. " *
-            "The trait's owner or the type's owner declares it, a foreign pair in the trait owner's package extension" maxlog = 1 _id = Symbol(what)
-        return nothing
+        what = _pirate_membership_text(mod, X, member)
+        _no_pirates(mod) && throw(OwnershipError(what * ": a pirate's membership, and the scope declares `no_pirates`. " *
+            "The trait's owner or the type's owner declares it, a foreign pair in the trait owner's package extension"))
+        STRICT[] || _warn_pirate_membership(what)
+        return true
     end
     r = Base.moduleroot(mod)
     trig = _extension_parent(r) === nothing ? nothing : get(_EXT_TRIGGERS, r, nothing)
@@ -243,6 +242,16 @@ function _check_membership_owner(mod::Module, @nospecialize(X), @nospecialize(me
         isempty(missing_) || throw(ImplementError(X, member,
             "a membership in the package extension $r names each of its triggers; it does not name $(join(missing_, ", "))"))
     end
+    return false
+end
+
+function _pirate_membership_text(mod::Module, @nospecialize(X), @nospecialize(member))
+    return "@implement $(bare(X)) $member in $mod: $(_owner_name(owner(mod))) owns neither the trait " *
+        "(owned by $(_owner_name(_type_owner(bare(X))))) nor the type (owned by $(_owner_name(_type_owner(member))))"
+end
+function _warn_pirate_membership(what::String)
+    @warn what * ": a pirate's membership. It is followed; code that relied on its absence is compiled again. " *
+        "The trait's owner or the type's owner declares it, a foreign pair in the trait owner's package extension" maxlog = 1 _id = Symbol(what)
     return nothing
 end
 

@@ -34,11 +34,10 @@ end
 @testset "ownership" begin
     @test TraitWorld.owner(Main.OwnType) === Main.OwnType
     @test TraitWorld.owner(Base) === :Julia && TraitWorld.owner(TraitWorld.CC) === :Julia
-    # a third package's membership of a foreign trait for a foreign type is a pirate's (traits §12.1):
-    # refused under strict mode, followed with a warning otherwise
-    TraitWorld.strict!(true)
-    @test_throws OwnershipError Core.eval(Main.OwnThird, :(@implement OwnTrait.Greets OwnType.P))
-    TraitWorld.strict!(false)
+    # a third package's membership of a foreign trait for a foreign type is a pirate's (traits §12.1,
+    # §12.2), and behaves as a pirate's method: refused in a scope that declares no_pirates, followed with
+    # a warning elsewhere (under strict mode too, where it changes no code compiled by facts: test/strict.jl)
+    @test_throws OwnershipError Core.eval(Main.PirateScope, :(@implement Main.OwnTrait.Greets Main.OwnType.P))
     @test !Base.invokelatest(<:, Main.OwnType.P, Main.OwnTrait.Greets)
     @test_logs (:warn, r"a pirate's membership") Core.eval(Main.OwnThird, :(@implement OwnTrait.Greets OwnType.P))
     @test Base.invokelatest(<:, Main.OwnType.P, Main.OwnTrait.Greets)

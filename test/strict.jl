@@ -57,6 +57,74 @@ toplevel(quote
     end
 end)
 
+toplevel(quote
+    module PMTrait                            # a trait's owner, with a method at the trait
+    using TraitWorld
+    @trait Named begin
+        name_of(x::Named)::String
+    end
+    tag(x) = "plain"
+    tag(x::Named) = "named"
+    end
+    module PMType                             # the types' owner; it serves the operation, declares no membership
+    using TraitWorld
+    import ..PMTrait
+    struct A end
+    struct B end
+    struct C end
+    PMTrait.name_of(::A) = "a"
+    PMTrait.name_of(::B) = "b"
+    PMTrait.name_of(::C) = "c"
+    end
+    module PMLib                              # code compiled by facts
+    using TraitWorld
+    @trait_module
+    import ..PMTrait, ..PMType
+    isnamed(x) = x isa PMTrait.Named
+    tagof(x::PMType.C) = PMTrait.tag(x)
+    end
+    module PMThird                            # owns neither the trait nor the types
+    using TraitWorld
+    import ..PMTrait, ..PMType
+    end
+end)
+
+# A pirate's membership under strict mode (traits §12.2, §12.3): the method's rule
+@testset "strict mode: a pirate's membership" begin
+    A, B, C = G(:PMType, :A), G(:PMType, :B), G(:PMType, :C)
+    Named = G(:PMTrait, :Named)
+    isnamed, tagof = G(:PMLib, :isnamed), G(:PMLib, :tagof)
+    third(ex) = try Core.eval(Main.PMThird, ex); nothing catch e; while e isa LoadError; e = e.error; end; e end
+    TraitWorld.strict!(true)
+    try
+        @test latest(isnamed, B()) === false                     # code compiled by facts folds "B is no Named"
+        @test latest(tagof, C()) == "plain"                      # and calls `tag` at C
+        # no code compiled by facts relied on A's absence: accepted, with the warning
+        @test_logs (:warn, r"a pirate's membership") match_mode = :any Core.eval(Main.PMThird, :(@implement PMTrait.Named PMType.A))
+        @test latest(<:, A, Named)
+        # it would change the folded answer: refused, and it does not exist
+        e = third(:(@implement PMTrait.Named PMType.B))
+        @test e isa PirateError && e.method isa TraitWorld.PirateMembership && !e.later
+        @test occursin("is not a `", sprint(showerror, e)) && !occursin("implements", sprint(showerror, e))
+        @test !latest(<:, B, Named) && latest(isnamed, B()) === false
+        @test isempty(latest(methods, Core.implements, Tuple{Type{Named}, Type{B}}))
+        # it would change the method selected at a call: refused
+        e = third(:(@implement PMTrait.Named PMType.C))
+        @test e isa PirateError && e.method isa TraitWorld.PirateMembership && !e.later
+        @test occursin("tag(", sprint(showerror, e))
+        @test !latest(<:, C, Named) && latest(tagof, C()) == "plain"
+        @test isempty(TraitWorld._STRICT_MISSES)
+        # the type's owner declares it: a stakeholder's change, followed
+        Core.eval(Main.PMType, :(@implement PMTrait.Named B))
+        @test latest(<:, B, Named) && latest(isnamed, B()) === true
+    finally
+        TraitWorld.strict!(false)
+    end
+    # strict mode off: followed, with the warning
+    @test_logs (:warn, r"a pirate's membership") match_mode = :any Core.eval(Main.PMThird, :(@implement PMTrait.Named PMType.C))
+    @test latest(<:, C, Named) && latest(tagof, C()) == "named"
+end
+
 @testset "strict mode" begin
     b = G(:StrictLib, :Buf)([1.0, 2.0, 3.0])
     sq, scaled, looked = G(:StrictLib, :sq), G(:StrictLib, :scaled), G(:StrictLib, :looked)

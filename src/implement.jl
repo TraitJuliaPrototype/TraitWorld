@@ -84,16 +84,17 @@ end
 
 function _implement!(mod::Module, traits::Vector{Any}, @nospecialize(member), by::Union{Nothing,Symbol}, block)
     how = How(by)
+    pirates = Base.IdSet{Any}()                         # the traits this membership is a pirate's at
     for X in traits
         istrait(X) || throw(ArgumentError("@implement: $X is not a trait"))
-        _check_membership_owner(mod, X, member)
+        _check_membership_owner(mod, X, member) && push!(pirates, X)
     end
     foreach(X -> _forget_records!(X, member), traits)   # a redeclaration fixes them anew (traits §5.10, §5.11)
     defined = block === nothing ? Method[] : _define_block!(mod, traits, member, block)
     added = Method[]
     try
         for X in traits
-            append!(added, Base.invokelatest(_implement_one!, mod, X, member, how))
+            append!(added, Base.invokelatest(_implement_one!, mod, X, member, how, X in pirates))
         end
         # the forwarding's methods fix their calls once every trait's are defined: two traits forwarded
         # by one field may share an operation's method
@@ -113,7 +114,7 @@ end
 # A pattern member: a family (S{P} where P), a closed abstract type, a trait.
 _is_pattern(@nospecialize(T)) = !(T isa DataType) || isabstracttype(T) || Base.has_free_typevars(T)
 
-function _implement_one!(mod::Module, @nospecialize(X), @nospecialize(member), how::How)
+function _implement_one!(mod::Module, @nospecialize(X), @nospecialize(member), how::How, pirate::Bool = false)
     added = Method[]
     if _is_pattern(member)
         inst = _pattern_instance(X, member)
@@ -128,7 +129,9 @@ function _implement_one!(mod::Module, @nospecialize(X), @nospecialize(member), h
     # every membership is an entry, `struct S <: X` too (traits §5.2): the image keeps it, its records come
     # back from it, the member hook runs for an abstract member's subtypes, the ambiguity report sees it
     refusal = try
-        _declare!(member, inst, mod, how.by, receiver)
+        # a pirate's membership under strict mode is refused where it would change code compiled by facts
+        pirate && STRICT[] ? _declare_pirate!(member, inst, mod, how.by, receiver, X) :
+                             _declare!(member, inst, mod, how.by, receiver)
         nothing
     catch err
         err isa ErrorException || rethrow()
