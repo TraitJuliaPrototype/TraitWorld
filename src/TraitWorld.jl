@@ -15,15 +15,15 @@ isdefined(Core, :MembershipEntry) ||
 # image holds the code its run-time sites reach whatever the values (compiler §9; E-326).
 Base.Experimental.@compiler_options facts = true
 
-export @trait, @implement, Dynamic, unwrap, Kept, kept_call, isdynamic, like, withfields, ImplementError, TraitUseError,
-       @bounded, @open, check_definitions, classify, @trait_module, compiled_for, with_dynamic, keep,
+export @trait, @implement, Dynamic, unwrap, Kept, kept_call, isdynamic, like, withfields, ImplementError, TraitUseError, OperationError,
+       @bounded, @unbounded, check_definitions, classify, @trait_module, compiled_for, with_dynamic, keep,
        detect_dynamic_fallbacks, detect_unused_casts, Callable,
        @enforce_fully_typed, @warn_not_fully_typed, fully_typed, isfullytyped, FullyTypedReport,
        NotFullyTypedError, AbstractTypeError, @enforce_concrete_only, @warn_on_abstract,
        OwnershipError, @joint_owners, PirateError, verify_main, VerifyReport, add_entrypoints, make_executable, make_library, BuildError
 
-# the casts and `keep` (traits §7.6, §7.8): Julia's own, re-exported; the casts' names are reserved,
-# so they are imported, never assigned
+# the casts and `keep` (traits §7.6, §7.8): Julia's own, re-exported. A call written with a cast is the
+# cast's where the name is bound to these; a package's own function of the name is called as any other
 import Core: compiled_for, with_dynamic, keep
 
 # Intersections All{X, Y, …} (traits §3.6): Core does not export the name, and the library does,

@@ -251,7 +251,7 @@ Base.getindex(v::IndexableVector, i::Int) = v.c[firstindex(v.c) + i - 1]
 
 `x` as a read-only `AbstractVector{T}` for plain code, without a copy (an `IndexableVector`).
 """
-@open function asvector(x::Indexable{T}) where {T}
+@unbounded function asvector(x::Indexable{T}) where {T}
     k = keep(x)
     return IndexableVector{T, typeof(k)}(k)
 end

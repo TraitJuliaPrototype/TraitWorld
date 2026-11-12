@@ -20,6 +20,9 @@ struct Rope; n::Int; end
 llen(r::Rope) = r.n
 @implement Lengthy Rope
 usesop(xs::Vector{Lengthy}) = llen(xs[1]) + 1      # an operation on a value known by its trait: declared
+describe1(x::Lengthy) = llen(x) > 1 ? "long" : "short"
+passes(xs::Vector{Lengthy}) = describe1(xs[1])     # a value known by its trait passed to a method at the trait
+@enforce_fully_typed epasses(xs::Vector{Lengthy}) = describe1(xs[1])
 
 @enforce_fully_typed etotal(h::Holder) = sum(sink, h.data)
 @enforce_fully_typed etwice(x::Int) = 2x
@@ -67,6 +70,10 @@ slen(v::Vector) = length(v)
     @test isfullytyped(r3) && occursin("field `data`", join(r3.result_cause))
     # operations on a value known by its trait count as declared
     @test isfullytyped(fully_typed(usesop, (Vector{Lengthy},)))
+    # fully typed is exactly what a closed build compiles (traits §14, §16): a value known by its trait
+    # passed to a method at the trait is resolved by the members, as the build resolves it
+    @test isfullytyped(fully_typed(passes, (Vector{Lengthy},)))
+    @test epasses(Lengthy[Rope(3)]) == "long"       # the mode raises only where a build would refuse
 
     h = Holder([1, 2])
     @test_throws NotFullyTypedError etotal(h)

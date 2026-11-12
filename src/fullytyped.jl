@@ -38,9 +38,11 @@ isfullytyped(r::FullyTypedReport) = isempty(r.sites)
 """
     fully_typed(f, argtypes) -> FullyTypedReport
 
-The calls in `f` at `argtypes`, and in what it calls, that are dispatched when they run, each with its
-root cause, through any number of layers (traits §14). Error paths are left out. Operations on a value
-the code knows only by its trait count as declared.
+The calls in `f` at `argtypes`, and in what it calls, that a closed build from that signature cannot
+resolve (traits §14, §16), each with its root cause through any number of layers. `f` is fully typed
+there exactly where the list is empty: it then builds under `juliac --trim`, and where the list is not
+empty the build refuses these calls. The check is the build's own, run in the session with every
+member the session has: a call on a value known only by its trait is resolved by the members.
 """
 fully_typed(@nospecialize(f), @nospecialize(argtypes::Tuple)) =
     fully_typed_by_type(Base.signature_type(f, argtypes))
@@ -52,7 +54,61 @@ const _VERIFY_BOUND = 100_000
 
 function fully_typed_by_type(@nospecialize(sig); world::UInt = Base.get_world_counter())
     w = _walk(sig, world)
-    return FullyTypedReport(sig, w.sites, w.result, w.result_cause, w.complete)
+    sites = _build_sites(sig, world, w.sites)
+    sites === nothing && return FullyTypedReport(sig, w.sites, w.result, w.result_cause, w.complete)
+    return FullyTypedReport(sig, sites, w.result, w.result_cause, true)
+end
+
+const _BUILD_KINDS = (
+    "unresolved call (with its arguments' attributes)" => :barrier,
+    "unresolved call to function" => :splat,
+    "unresolved argument to call" => :splat,
+    "builtin `Core.invokelatest`" => :latest,
+    "builtin `Core.invoke_in_world`" => :latest,
+    "unresolved call" => :dispatch,
+)
+
+"""
+The calls a closed build from `sig` refuses (traits §14, §16; compiler §2.7): the build's own check,
+run in the session. Fully typed code is exactly the code with none. Each call is named as the build
+names it; where the session's walk found the same call (`known`), its root cause is the walk's.
+`nothing` where `sig` selects no one method.
+"""
+function _build_sites(@nospecialize(sig), world::UInt, known::Vector{RuntimeSite})
+    ms = Base._methods_by_ftype(sig, 1, world)
+    (ms isa Vector && length(ms) == 1) || return nothing
+    mi = CC.specialize_method(ms[1]::Core.MethodMatch)
+    errors, parents = CC.closed_check(Any[mi], world)
+    sites = RuntimeSite[]
+    seen = Set{Tuple{Symbol,Int,String}}()
+    V = CC.TrimVerifier
+    for (warn, e) in errors
+        warn && continue                       # a call that only raises: the build accepts it
+        e isa V.CallMissing || continue
+        frames = V.verify_create_stackframes(e.codeinst, e.stmtidx, parents)
+        file, line = isempty(frames) ? (Symbol("?"), 0) : (Symbol(frames[1].file), Int(frames[1].line))
+        call = sprint(io -> V.verify_print_stmt(io, e.codeinfo, e.sptypes, e.stmtidx))
+        (file, line, call) in seen && continue
+        push!(seen, (file, line, call))
+        code = CC.get_ci_mi(e.codeinst)
+        k = findfirst(x -> x.file === file && x.line == line, known)
+        if k !== nothing
+            x = known[k]
+            push!(sites, RuntimeSite(x.kind, code, file, line, x.call, x.cause))
+            continue
+        end
+        kind = :build
+        for (text, kd) in _BUILD_KINDS
+            occursin(text, e.desc) && (kind = kd; break)
+        end
+        cause = String[e.desc]
+        for f in frames[2:end]
+            push!(cause, "reached from $(f.func) at $(f.file):$(f.line)")
+            length(cause) > 6 && break
+        end
+        push!(sites, RuntimeSite(kind, code, file, line, call, cause))
+    end
+    return sites
 end
 
 # the walk shared by `fully_typed` and `verify_main`: every signature the code reaches on normal
@@ -451,6 +507,7 @@ const _KIND_HINT = Dict(
     :splat    => "pass a tuple, or the elements",
     :latest   => "a call in the latest world (`invokelatest`) is never fully typed",
     :barrier  => "the caller does not know the argument's type: type it, or make the argument `Dynamic`",
+    :build    => "a closed build cannot compile this call",
 )
 
 function Base.show(io::IO, ::MIME"text/plain", r::FullyTypedReport)
@@ -459,7 +516,7 @@ function Base.show(io::IO, ::MIME"text/plain", r::FullyTypedReport)
     else
         n = length(r.sites)
         print(io, "not fully typed: ", r.sig, "\n  ", n, n == 1 ? " call is" : " calls are",
-              " dispatched when ", n == 1 ? "it runs" : "they run", ":")
+              " left to run time, which a closed build refuses:")
         for s in first(r.sites, 12)
             print(io, "\n  ", s.file, ":", s.line, "  ", s.call)
             for (k, c) in enumerate(s.cause)
@@ -515,14 +572,17 @@ const _FT_ERRORS = IdDict{Any,Any}()
 function _fully_typed_hook(site::Core.SimpleVector)
     mi = site[1]::Core.MethodInstance
     level = site[2]::Int
+    # the compiled code found a call it leaves to run time. The fault is the closed build's refusal
+    # (traits §14): where the build's check resolves every call (by the members), there is none
     err = get!(_FT_ERRORS, mi) do
         r = try
             fully_typed_by_type(mi.specTypes)
         catch
             nothing
         end
-        NotFullyTypedError(mi.specTypes, r)
+        r !== nothing && isfullytyped(r) ? nothing : NotFullyTypedError(mi.specTypes, r)
     end
+    err === nothing && return nothing
     level == 2 && throw(err)
     @warn "@warn_not_fully_typed: " * sprint(showerror, err)
     return nothing
@@ -753,7 +813,9 @@ function verify_main(@nospecialize(main), @nospecialize(argtypes::Tuple); entryp
     w = _walk(sig, world; bound)
     # an instance compiled at a set (a `Dynamic` argument) is a target too
     targets = entrypoints ? Any[T for T in w.seen if T isa DataType && !Base.has_free_typevars(T)] : Any[w.seen...]
-    return VerifyReport(sig, targets, Any[T for T in w.extra if T isa Core.MethodInstance || T in w.seen], w.sites, w.complete)
+    holes = _build_sites(sig, world, w.sites)
+    return VerifyReport(sig, targets, Any[T for T in w.extra if T isa Core.MethodInstance || T in w.seen],
+                        holes === nothing ? w.sites : holes, w.complete)
 end
 
 """

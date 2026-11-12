@@ -14,10 +14,10 @@ contract (§5.10), and declare the membership. A refusal raises `ImplementError`
 nothing. The declaring code continues in the new world.
 """
 macro implement(args...)
-    return _implement_expr(__module__, args)
+    return _implement_expr(__module__, args, __source__)
 end
 
-function _implement_expr(mod::Module, args)
+function _implement_expr(mod::Module, args, source = nothing)
     length(args) >= 2 || error("@implement X S [begin … end | by f]")
     traitsex, memberex = args[1], args[2]
     rest = args[3:end]
@@ -53,10 +53,31 @@ function _implement_expr(mod::Module, args)
             error("@implement: a where variable is T or T <: B; got $v")
         end
     end
-    call = :($(GlobalRef(@__MODULE__, :_implement_vars!))($mod, Any[$(traits...)], $memberex,
+    call = :($(GlobalRef(@__MODULE__, :_implement_caught!))($mod, Any[$(traits...)], $memberex,
              Any[$(names...)], $(QuoteNode(by)), $(QuoteNode(block))))
-    out = Expr(:block, Expr(:let, Expr(:block, tvdefs...), call), Expr(:latestworld), nothing)
+    # a check's error is raised here, in the caller's code: its first frame is the `@implement` line,
+    # not the library's (traits §11.3)
+    err = gensym(:err)
+    raise = Expr(:block)
+    source isa LineNumberNode && push!(raise.args, source)
+    push!(raise.args, :($err === nothing || throw($err)))
+    out = Expr(:block, :(local $err = $(Expr(:let, Expr(:block, tvdefs...), call))), raise, Expr(:latestworld), nothing)
     return esc(out)
+end
+
+# the library's errors of a check (traits §11.3): raised at the user's line
+const _CheckError = Union{ImplementError,TraitUseError,OwnershipError}
+
+"`_implement_vars!`, with a check's error returned for the macro's code to raise at the caller's line."
+function _implement_caught!(mod::Module, traits::Vector{Any}, @nospecialize(body), tvs::Vector{Any},
+                            by::Union{Nothing,Symbol}, block)
+    try
+        _implement_vars!(mod, traits, body, tvs, by, block)
+        return nothing
+    catch e
+        (e isa _CheckError || e isa PirateError) || rethrow()
+        return e
+    end
 end
 
 "the field each type forwards a trait to, by type name (for `like`, traits §6.5)"
@@ -315,7 +336,18 @@ end
 
 # The definition hook (compiler §10.1). Before a method is visible: the scope's pirates, strict
 # mode's walk, then the membership's own checks. After: strict mode's log, the bounded check.
+# A check's error is returned: the runtime raises it at the definition, whose line is then its first
+# frame, not the library's (traits §11.3; compiler §10.1).
 function _definition_hook(m::Method, after::Bool)
+    try
+        _definition_checks(m, after)
+        return nothing
+    catch e
+        (e isa _CheckError || e isa PirateError) || rethrow()
+        return e
+    end
+end
+function _definition_checks(m::Method, after::Bool)
     if after
         _strict_on_definition(m, true)   # strict mode's check after the definition (traits §12.3)
         return _check_bounded(m)

@@ -3,7 +3,7 @@
 """
     @trait_module opts...
 
-Before a module's first method: its methods are compiled by facts, an open method at a trait argument
+Before a module's first method: its methods are compiled by facts, an unbounded method at a trait argument
 is refused (`bounded`), a pirate is refused (`no_pirates`), and where nothing else decides, a trait
 argument's attribute is what the caller knows (`first_seen`). All four are on unless written
 otherwise (`@trait_module bounded = false`); `dynamic = true` makes every trait argument of the

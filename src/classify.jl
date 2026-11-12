@@ -1,6 +1,6 @@
 # The classification of methods at traits (traits §7.3; compiler §6.7). A method is fully bounded
 # at an argument typed by a trait when its body reaches the argument only through the contract;
-# any other use makes it open there. The library infers the method at its own signature with the
+# any other use makes it unbounded there. The library infers the method at its own signature with the
 # compiler's check interpreter, whose hook records each call that takes a value typed by a trait
 # outside the contract, with its line; inference continues past it (compiler §6.7, C-40).
 
@@ -173,7 +173,7 @@ function _record_use!(interp::ClassifyInterp, @nospecialize(f), argtypes::Vector
     # another module is judged where it is made (traits §7.3)
     d = sv.linfo.def
     (d isa Method && d.module === _state(interp).mod) || return nothing
-    # a function marked `@open` is open on purpose: its uses are its own, not its callers' (traits §7.3)
+    # a function marked `@unbounded` is unbounded on purpose: its uses are its own, not its callers' (traits §7.3)
     d !== _state(interp).method && _bounded_option(d) === false && return nothing
     # a trait's own method for an operation is the contract itself (its forwarding, its default)
     _is_trait_method(d) && return nothing
@@ -331,7 +331,7 @@ function _related(interp::ClassifyInterp, @nospecialize(X))
     return false
 end
 
-# whether a method is at a trait argument, and the option its body states (`@bounded`, `@open`). A
+# whether a method is at a trait argument, and the option its body states (`@bounded`, `@unbounded`). A
 # trait's own method for an operation is the contract itself, and is not classified.
 function _trait_arguments(m::Method)
     _is_trait_method(m) && return false
@@ -343,7 +343,7 @@ function _trait_arguments(m::Method)
     end
     return false
 end
-# whether `bounded` refuses `m` where it is open: its own `@bounded` or `@open`, else its module's
+# whether `bounded` refuses `m` where it is unbounded: its own `@bounded` or `@unbounded`, else its module's
 # option (`@trait_module`, traits §13)
 function _bounded(m::Method)
     o = _bounded_option(m)
@@ -363,8 +363,8 @@ end
 """
     check_definitions(M::Module) -> Vector{String}
 
-The methods of `M` at trait arguments that are open, each with its uses outside the contract
-(traits §11.2); empty where every one is fully bounded. Methods marked `@open` are skipped.
+The methods of `M` at trait arguments that are unbounded, each with its uses outside the contract
+(traits §11.2); empty where every one is fully bounded. Methods marked `@unbounded` are skipped.
 """
 function check_definitions(M::Module)
     problems = String[]
@@ -387,7 +387,7 @@ end
 """
     @bounded f(…) = …
 
-The method must be fully bounded at its trait arguments: an open one is refused with
+The method must be fully bounded at its trait arguments: an unbounded one is refused with
 `TraitUseError` where it is defined (traits §7.3, §13).
 """
 macro bounded(ex)
@@ -395,23 +395,23 @@ macro bounded(ex)
 end
 
 """
-    @open f(…) = …
+    @unbounded f(…) = …
 
-The method is open on purpose: `bounded` does not refuse it (traits §7.3).
+The method is unbounded on purpose: `bounded` does not refuse it (traits §7.3).
 """
-macro open(ex)
+macro unbounded(ex)
     return esc(_mark_bounded(ex, false))
 end
 
 function _mark_bounded(ex, on::Bool)
-    (Meta.isexpr(ex, :(=)) || Meta.isexpr(ex, :function)) || error("@bounded and @open take a method definition")
+    (Meta.isexpr(ex, :(=)) || Meta.isexpr(ex, :function)) || error("@bounded and @unbounded take a method definition")
     body = ex.args[2]
     body = Meta.isexpr(body, :block) ? body : Expr(:block, body)
     pushfirst!(body.args, Expr(:meta, :bounded, on))
     return Expr(ex.head, ex.args[1], body)
 end
 
-# Under `@bounded`, an open method is refused where it is defined (the definition hook, once the
+# Under `@bounded`, an unbounded method is refused where it is defined (the definition hook, once the
 # method is visible, so that inference can follow it). A method whose only questionable calls reach
 # no method yet waits: a definition of a name it waits for classifies it again, and its module's end
 # a last time (compiler §6.7).
@@ -437,7 +437,7 @@ function _decide_bounded(m::Method; final::Bool = false)
     # fails the build
     ccall(:jl_generating_output, Cint, ()) == 0 && Base.delete_method(m)
     lines = ["$(u.what) at line $(u.line) is not in the contract of $(u.trait)" for u in uses]
-    throw(TraitUseError("$(m.name) is declared bounded, and is open:\n  " * join(lines, "\n  ")))
+    throw(TraitUseError("$(m.name) is declared bounded, and is unbounded:\n  " * join(lines, "\n  ")))
 end
 
 # the module's end (the module-end hook): its waiting methods are classified a last time
