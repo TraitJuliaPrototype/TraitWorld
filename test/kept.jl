@@ -43,3 +43,22 @@ kunknown(sc, xs::Vector{Any}) = (kadd!(sc, xs[1]); sc)
     @test_throws MethodError push!(KShape[], ka)          # storage typed by the trait takes `unwrap(k)`
     @test sprint(show, kb) == "Kept{$(KShape)}($(KCircle(1.0)), Dynamic)"
 end
+
+# `keep` is not for storage typed by the trait (traits §7.8): `detect_kept_storage` lists such stores
+module KeptBad
+using TraitWorld
+@trait_module
+import ..KeptM: KShape
+struct Bag; shapes::Vector{KShape}; end
+mutable struct One; shape::KShape; end
+@unbounded badadd!(b::Bag, s::KShape) = (push!(b.shapes, keep(s)); b)      # a box at one caller, the object at another
+@unbounded badset!(o::One, s::KShape) = (o.shape = keep(s); o)
+goodadd!(b::Bag, s::KShape) = (push!(b.shapes, s); b)                      # the object, whoever calls
+end
+
+@testset "detect_kept_storage" begin
+    found = detect_kept_storage(KeptBad)
+    @test Set(m.name for (m, _, _, _) in found) == Set([:badadd!, :badset!])
+    @test all(slot === KShape for (_, _, _, slot) in found)
+    @test isempty(detect_kept_storage(KeptM))                  # `Kept{X}` is the storage for `keep`
+end

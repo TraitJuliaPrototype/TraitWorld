@@ -106,6 +106,7 @@ end
 @implement ColTable Halves by right
 colmean(t::ColTable, i::Int) = (c = col(t, i); sum(c) / length(c))
 
+struct NoPositional; a::Int; b::Float64; NoPositional(a::Int) = new(a, 1.0); end
 @testset "block and forwarding" begin
     v = [[1.0, 2.0], [3.0, 5.0]]
     @test v isa ColTable
@@ -117,6 +118,10 @@ colmean(t::ColTable, i::Int) = (c = col(t, i); sum(c) / length(c))
     h2 = like(h, [[7.0]])
     @test h2 isa Halves && h2.name == "h" && ncols(h2) == 1
     @test withfields(h; name = "k").name == "k"
+    # a type whose inner constructor replaced the positional one cannot be rebuilt: the error names
+    # the constructor to define (lowering §8)
+    e = try withfields(NoPositional(1); b = 2.0); nothing catch err; err end
+    @test e isa ArgumentError && occursin("NoPositional(::Int64, ::Float64)", e.msg)
     struct Chain; inner::Halves; end
     e = try @eval(@implement ColTable Chain by inner); nothing catch err; err end
     @test e isa ImplementError && occursin("chain", sprint(showerror, e))

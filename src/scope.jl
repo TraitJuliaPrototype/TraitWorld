@@ -97,6 +97,72 @@ function detect_unused_casts(mod::Module)
     return out
 end
 
+"""
+    detect_kept_storage(mod::Module)
+
+The stores in the methods of `mod` and its submodules of a `keep`'s value, or of any `Dynamic{X}`, into
+storage typed by the trait: a field `::X`, an element of a `Vector{X}` (traits §7.8, §8.1). Such
+storage holds the object at one caller and a box at another; the argument is assigned there without
+`keep`, or the storage is typed `Kept{X}`. A package's tests check that it is empty. Listed where the
+method is inferred at its declared signature, as `(method, the method's line, the storing function,
+the storage's type)`.
+"""
+function detect_kept_storage(mod::Module)
+    out = Tuple{Method,Int,Any,Any}[]
+    CC = Core.Compiler
+    for m in _module_methods(mod)
+        sig = Base.unwrap_unionall(m.sig)
+        (sig isa DataType && any(_is_trait_arg, sig.parameters)) || continue
+        for (src, _) in (try Base.code_typed_by_type(m.sig; optimize = false) catch; [] end)
+            src isa Core.CodeInfo || continue
+            # (a query by the signature also gives the more specific methods' code: each at its own)
+            (isdefined(src, :parent) && src.parent isa Core.MethodInstance && src.parent.def !== m) && continue
+            for st in src.code
+                Meta.isexpr(st, :(=)) && (st = st.args[2])
+                Meta.isexpr(st, :call) && length(st.args) >= 3 || continue
+                ts = Any[CC.widenconst(CC.argextype(a, src, CC.VarState[])) for a in st.args]
+                f = CC.singleton_type(CC.argextype(st.args[1], src, CC.VarState[]))
+                slot, k = _storage_slot(f, st.args, ts)
+                slot === nothing && continue
+                _is_trait_arg(slot) || continue
+                # the stored value: a `keep`'s result, or a value typed `Dynamic{X}`
+                a = st.args[k]
+                def = a isa Core.SSAValue ? src.code[a.id] : nothing
+                Meta.isexpr(def, :(=)) && (def = def.args[2])
+                kept = Meta.isexpr(def, :call) && CC.singleton_type(CC.argextype(def.args[1], src, CC.VarState[])) === Core.keep
+                V = ts[k]
+                (kept || any(t -> t isa DataType && t <: Dynamic, Base.uniontypes(V))) || continue
+                push!(out, (m, Int(m.line), f, slot))
+            end
+        end
+    end
+    return unique!(out)
+end
+
+# the type of the storage a call writes and the index of the stored value among the call's arguments
+# (the function first): a field (`setproperty!`, `setfield!`), an element (`push!`, `pushfirst!`,
+# `setindex!`); `(nothing, 0)` for any other call
+function _storage_slot(@nospecialize(f), args::Vector{Any}, ts::Vector{Any})
+    if (f === setproperty! || f === setfield!) && length(args) >= 4
+        T = ts[2]
+        name = args[3] isa QuoteNode ? args[3].value : nothing
+        T = Base.unwrap_unionall(T)
+        (name isa Symbol && T isa DataType && hasfield(T, name)) || return (nothing, 0)
+        return (fieldtype(T, name), 4)
+    elseif (f === push! || f === pushfirst! || f === setindex!) && length(args) >= 3
+        # (a container whose element type names the method's variables, `Vector{X{T}} where T`: the
+        # element type with them)
+        V = Base.unwrap_unionall(ts[2])
+        (V isa DataType && V <: AbstractArray) || return (nothing, 0)
+        S = V
+        while S.name !== Base.unwrap_unionall(AbstractArray).name
+            S = Base.unwrap_unionall(supertype(S))::DataType
+        end
+        return (S.parameters[1], 3)
+    end
+    return (nothing, 0)
+end
+
 _is_attributed_call(@nospecialize(f)) =
     f === Core.attributed_call || (f isa GlobalRef && f.mod === Core && f.name === :attributed_call)
 

@@ -38,7 +38,10 @@ end
 
 function _rebuild(S::DataType, vals::Vector{Any})
     C = S.name.wrapper
-    hasmethod(C, Tuple{map(typeof, vals)...}) ||
-        throw(MethodError(C, Tuple(vals)))   # the hint: a positional constructor that takes every field
+    if !hasmethod(C, Tuple{map(typeof, vals)...})
+        want = string(nameof(C), "(", join(("::" * _tstr(typeof(v)) for v in vals), ", "), ")")
+        throw(ArgumentError("`like` and `withfields` rebuild a $(nameof(C)) by its positional constructor, with every field in order; " *
+                            "$(nameof(C)) has no method `$want`. Define one (an inner constructor has replaced the default)"))
+    end
     return C(vals...)
 end

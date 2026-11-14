@@ -17,7 +17,7 @@ Base.Experimental.@compiler_options facts = true
 
 export @trait, @implement, Dynamic, unwrap, Kept, kept_call, isdynamic, like, withfields, ImplementError, TraitUseError, OperationError,
        @bounded, @unbounded, check_definitions, classify, @trait_module, compiled_for, with_dynamic, keep,
-       detect_dynamic_fallbacks, detect_unused_casts, Callable,
+       detect_dynamic_fallbacks, detect_unused_casts, detect_kept_storage, Callable,
        @enforce_fully_typed, @warn_not_fully_typed, fully_typed, isfullytyped, FullyTypedReport,
        NotFullyTypedError, AbstractTypeError, @enforce_concrete_only, @warn_on_abstract,
        OwnershipError, @joint_owners, PirateError, verify_main, VerifyReport, add_entrypoints, make_executable, make_library, BuildError

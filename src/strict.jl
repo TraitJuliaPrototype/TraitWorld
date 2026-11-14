@@ -198,6 +198,24 @@ function _strict_violation(m::Method)
     return _winning_fact(m, s -> !_stakeholder(definer, s))
 end
 
+# A package extension counts as its parent (traits §12.1), so its method for the parent's function is
+# no pirate. One that would win at a fact of code compiled by facts and names no type of its triggers
+# is the parent's change made late: followed, with a warning (traits §12.3).
+function _warn_extension_method(m::Method)
+    r = Base.moduleroot(m.module)
+    _extension_parent(r) === nothing && return nothing
+    trig = get(_EXT_TRIGGERS, r, nothing)
+    (trig === nothing || isempty(trig)) && return nothing
+    for o in sig_owners(m.sig)::Base.IdSet{Any}
+        o isa Module && string(nameof(Base.moduleroot(o))) in trig && return nothing
+    end
+    hit = _winning_fact(m, s -> true)
+    hit === nothing && return nothing
+    @warn "strict mode: $(_callform(m.sig)) in the package extension $r names no type of its triggers ($(join(trig, ", "))) " *
+          "and wins at $(_callform(hit[1])) in code compiled by facts. It is followed as its parent's change: that code is compiled again."
+    return nothing
+end
+
 # --- after the definition: Julia's own invalidation log, the check the walk could miss ----------
 
 const _STRICT_LOG = Ref{Any}(nothing)
@@ -347,6 +365,7 @@ function _strict_on_definition(m::Method, after::Bool)
     if !after
         v = _strict_violation(m)
         v === nothing || throw(PirateError(m, owner(m.module), v[1], v[2], false))
+        _warn_extension_method(m)
         _strict_log_start!()
     else
         _strict_after!(m)
@@ -373,7 +392,10 @@ function _strict_image_refusals(ms::Vector{Any})
             push!(out, m)
             continue
         end
-        _owned_or_julia(m) && continue
+        if _owned_or_julia(m)
+            _warn_extension_method(m)        # an extension's method, its parent's change (traits §12.3)
+            continue
+        end
         v = _strict_violation(m)
         v === nothing && continue
         @error sprint(showerror, PirateError(m, owner(m.module), v[1], v[2], false)) * "\n  (the image's method is left inactive)"

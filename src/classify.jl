@@ -107,6 +107,14 @@ function _in_contract(interp::ClassifyInterp, @nospecialize(f), argtypes::Vector
         g === nothing && return false
         return _in_contract(interp, g, argtypes[3:end], k - 2, X)
     end
+    # a call of an argument declared `Callable{A, S}`, as the compiler reads it (compiler §7.4): the
+    # function's own call is the contract's; any other argument is judged as an argument of that call
+    if f === Core._callable_call && length(argtypes) >= 4 && k >= 4
+        k == 4 && return true
+        g = CC.singleton_type(CC.widenconst(argtypes[4]))
+        g === nothing && return false
+        return _in_contract(interp, g, argtypes[4:end], k - 3, X)
+    end
     # a struct's constructor storing it in a field typed by the trait or a supertype (traits §7.3): its `convert`
     # and `isa` against the field's type, which the struct's parameters make `Type{<:Y}` here
     if (f === convert && k == 3) || (f === isa && k == 2)
