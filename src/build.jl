@@ -294,6 +294,16 @@ function _run_build(driver::String, out::String, kind::Symbol; project, trim::Sy
     return out
 end
 
+# A program builds exactly where its entry is fully typed (traits §14, §16): the build's check runs in
+# the session first, and a program that is not fully typed is refused here, with the report.
+function _check_before_build(@nospecialize(f), @nospecialize(argtypes::Tuple))
+    r = fully_typed(f, argtypes)
+    isfullytyped(r) && return nothing
+    n = length(r.sites)
+    throw(BuildError("$(nameof(f)) is not fully typed at $(Tuple{argtypes...}): a build refuses $n call$(n == 1 ? "" : "s") it cannot resolve",
+                     sprint(show, MIME"text/plain"(), r)))
+end
+
 """
     make_executable(main, path; project = Base.active_project(), trim = :safe, keep = false) -> path
 
@@ -318,6 +328,7 @@ function make_executable(@nospecialize(main), path::AbstractString; project = Ba
     rt <: Union{Integer,Nothing} && rt !== Union{} ||
         throw(ArgumentError("`main(args::Vector{String})` returns an exit code, an integer; it infers $rt"))
     src = _source_of(main, Tuple{Vector{String}}, session)
+    _check_before_build(main, (Vector{String},))
     src[1] === :session && src[4] > 0 &&
         @info "make_executable: the build replays the $(length(src[2])) definitions of the session that $(src[3]) depends on; $(src[4]) other statements are not replayed"
     dir = mktempdir(; cleanup = false)
@@ -358,6 +369,7 @@ function make_library(functions, path::AbstractString; project = Base.active_pro
         rt = Base.infer_return_type(f, Tuple{A...})
         rt <: R || throw(ArgumentError("$f at $(Tuple{A...}) infers its result as $rt, declared $R"))
         s = _source_of(f, Tuple{A...}, session)
+        _check_before_build(f, A)
         push!(srcs, s)
         name = string(s[1] === :package ? last(s[3]) : s[3])
         push!(decls, "Base._ccallable($(repr(name)), $R, Tuple{typeof($(_ref(s))), $(join(string.(A), ", "))$(isempty(A) ? "" : ",")})")

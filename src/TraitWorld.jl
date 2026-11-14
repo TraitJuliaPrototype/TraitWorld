@@ -22,8 +22,8 @@ export @trait, @implement, Dynamic, unwrap, Kept, kept_call, isdynamic, like, wi
        NotFullyTypedError, AbstractTypeError, @enforce_concrete_only, @warn_on_abstract,
        OwnershipError, @joint_owners, PirateError, verify_main, VerifyReport, add_entrypoints, make_executable, make_library, BuildError
 
-# the casts and `keep` (traits §7.6, §7.8): Julia's own, re-exported; the casts' names are reserved,
-# so they are imported, never assigned
+# the casts and `keep` (traits §7.6, §7.8): Julia's own, re-exported. A call written with a cast is the
+# cast's where the name is bound to these; a package's own function of the name is called as any other
 import Core: compiled_for, with_dynamic, keep
 
 # Intersections All{X, Y, …} (traits §3.6): Core does not export the name, and the library does,
@@ -51,6 +51,7 @@ include("hints.jl")
 include("strict.jl")
 include("ahead.jl")
 include("build.jl")
+include("buildbase.jl")
 
 # BaseTraits (traits §10): a module of the library, its names exported with the library's
 include("BaseTraits.jl")
