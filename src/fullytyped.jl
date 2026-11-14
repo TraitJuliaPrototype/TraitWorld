@@ -61,6 +61,7 @@ function fully_typed_by_type(@nospecialize(sig); world::Union{Nothing,UInt} = no
     return FullyTypedReport(sig, sites, w.result, w.result_cause, true)
 end
 
+const _NO_PARENTS = CC.TrimVerifier.ParentMap()
 const _BUILD_KINDS = (
     "unresolved call (with its arguments' attributes)" => :barrier,
     "unresolved call to function" => :splat,
@@ -97,10 +98,23 @@ function _build_sites(@nospecialize(sig), world::UInt, known::Vector{RuntimeSite
         # the walk's site for it: the same call, or the nearest call above it that the walk reported
         # (the build compiles a callee the session leaves to run time, and refuses a call below it).
         # The report then names the call in the user's code, with its root cause
+        # A call above counts only where the build did not know the callee's argument types either: where
+        # it compiled the callee for concrete types (a member the session compiles once, compiler §7.6),
+        # the walk's cause there is the session's, not the build's
         k = nothing
-        for f in frames
-            k = findfirst(x -> x.file === Symbol(f.file) && x.line == Int(f.line), known)
-            k === nothing || break
+        ci, idx, callee = e.codeinst, e.stmtidx, nothing
+        while true
+            if callee === nothing || !Base.isdispatchtuple(CC.get_ci_mi(callee).specTypes)
+                for f in V.verify_create_stackframes(ci, idx, _NO_PARENTS)
+                    k = findfirst(x -> x.file === Symbol(f.file) && x.line == Int(f.line), known)
+                    k === nothing || break
+                end
+                k === nothing || break
+            end
+            up = get(parents, ci, nothing)
+            up === nothing && break
+            callee = ci
+            ci, idx = up
         end
         if k !== nothing
             x = known[k]

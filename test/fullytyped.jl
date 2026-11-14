@@ -56,7 +56,31 @@ slen(v::Vector) = length(v)
 @enforce_concrete_only T firstof(v::Vector{T}) where {T} = v[1]
 @warn_on_abstract T wfirstof(v::Vector{T}) where {T} = v[1]
 
+# a trait whose members are compiled once in a session: a build compiles for the type where the call knows it
+module OnceLib
+using TraitWorld
+@trait_module
+@trait Model begin
+    @default_dynamic
+    rate(m::Model, u::Float64)::Float64
+end
+struct Kept{K}; k::K; end
+inner(m::Model, u::Float64) = Kept(keep(m))
+outer(m::Model, u::Float64) = inner(m, u)                     # passes the trait argument on
+withkw(m::Model, u::Float64; scale = 1.0) = Kept(keep(m))     # a keyword method: its wrapper passes it on
+end
+struct Decay; k::Float64; end
+OnceLib.rate(d::Decay, u::Float64) = -d.k * u
+@implement OnceLib.Model Decay
+const DECAY = Decay(1.0)
+once_outer() = OnceLib.outer(DECAY, 1.0)
+once_kw() = OnceLib.withkw(DECAY, 1.0; scale = 2.0)
+
 @testset "fully typed mode" begin
+    # a trait with a `Dynamic` default: in a session its methods are compiled once, and a call that passes
+    # the argument on is made when it runs; a build compiles for the type the call knows (compiler §7.6)
+    @test once_outer() isa OnceLib.Kept{Dynamic{OnceLib.Model}}            # the session: compiled once
+    @test isfullytyped(fully_typed(once_outer, ())) && isfullytyped(fully_typed(once_kw, ()))
     r = fully_typed(total, (Holder,))
     @test !isfullytyped(r)
     s = sprint(show, MIME"text/plain"(), r)
