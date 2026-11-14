@@ -16,7 +16,7 @@ isdefined(Core, :MembershipEntry) ||
 Base.Experimental.@compiler_options facts = true
 
 export @trait, @implement, Dynamic, unwrap, Kept, kept_call, isdynamic, like, withfields, ImplementError, TraitUseError,
-       @bounded, @open, check_definitions, classify, @trait_module, compiled_for, with_dynamic, keep,
+       @bounded, @unbounded, check_definitions, classify, @trait_module, compiled_for, with_dynamic, keep,
        detect_dynamic_fallbacks, detect_unused_casts, Callable,
        @enforce_fully_typed, @warn_not_fully_typed, fully_typed, isfullytyped, FullyTypedReport,
        NotFullyTypedError, AbstractTypeError, @enforce_concrete_only, @warn_on_abstract,

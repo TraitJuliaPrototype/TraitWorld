@@ -107,7 +107,7 @@ px(p::P2) = p.x
 @implement Pt P2
 ok(p::Pt) = px(p) + 1.0                                   # through the contract: accepted
 kept(p::Pt) = keep(p)                                     # keeping it: within every contract
-@open peek(p::Pt) = p.x                                   # open on purpose
+@unbounded peek(p::Pt) = p.x                                   # unbounded on purpose
 scaled(p::Pt, k::Float64 = 2.0) = k * px(p)               # a default: its method calls one defined after it
 later(p::Pt) = helper(p, 1.0)                             # a call that reaches no method yet
 helper(p::Pt, k::Float64) = k + px(p)

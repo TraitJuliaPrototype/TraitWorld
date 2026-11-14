@@ -391,7 +391,7 @@ gt(x::Integrator) = x.t
     @test gt(Integ([1.0], (1, 2), 2.5)) == 2.5
 end
 
-## the classification (traits §7.3): fully bounded methods, open ones, @bounded and @open
+## the classification (traits §7.3): fully bounded methods, unbounded ones, @bounded and @unbounded
 module ClassifyCase
 using TraitWorld
 @trait CTable begin
@@ -419,14 +419,14 @@ end
     e = try Core.eval(C, :(@bounded leak2(t::CTable) = typeof(t))); nothing catch err; err end
     @test e isa TraitUseError
     @test !isdefined(C, :leak2) || isempty(methods(getglobal(C, :leak2)))
-    Core.eval(C, :(@open leak3(t::CTable) = typeof(t)))
+    Core.eval(C, :(@unbounded leak3(t::CTable) = typeof(t)))
     Core.eval(C, :(@bounded ok2(t::CTable) = ncols(t)))
     @test Base.invokelatest(getglobal(C, :ok2), C.CT([[1.0]])) == 1
-    @test length(check_definitions(C)) == 2                         # @open is skipped
+    @test length(check_definitions(C)) == 2                         # @unbounded is skipped
 end
 
 ## the classification's further rules (traits §7.3), found by W-104's third slice: a declared field written,
-## a constructor storing the argument in a field typed by the trait, a callee's own variables, an `@open`
+## a constructor storing the argument in a field typed by the trait, a callee's own variables, an `@unbounded`
 ## function's uses its own, a value of an unrelated trait not tracked
 module ClassifyMore
 using TraitWorld
@@ -445,7 +445,7 @@ struct Holder{U}; w::VWin{U}; end
 setflag!(w::VWin{U}) where {U} = (w.flag = true; nothing)                # a writable declared field
 hold(w::VWin{U}) where {U} = Holder{U}(w)                                 # stored in a field typed by the trait
 pass(w::VWin{U}) where {U} = setflag!(w)                                  # the callee's own `U`
-@open peek(w::VWin{U}) where {U} = typeof(w)                              # open on purpose
+@unbounded peek(w::VWin{U}) where {U} = typeof(w)                              # unbounded on purpose
 viapeek(w::VWin{U}) where {U} = (peek(w); nothing)                        # its use is peek's
 struct Box; o::Other; end
 reads(w::VWin{U}, b::Box) where {U} = (string(b.o); nothing)              # `b.o` is no argument of VWin's
