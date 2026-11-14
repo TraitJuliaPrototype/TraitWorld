@@ -100,7 +100,7 @@ end
 """
     detect_kept_storage(mod::Module)
 
-The stores in the methods of `mod` and its submodules of a `keep`'s value, or of any `Dynamic{X}`, into
+The stores in the methods of `mod` and its submodules of a `keep`'s value into
 storage typed by the trait: a field `::X`, an element of a `Vector{X}` (traits §7.8, §8.1). Such
 storage holds the object at one caller and a box at another; the argument is assigned there without
 `keep`, or the storage is typed `Kept{X}`. A package's tests check that it is empty. Listed where the
@@ -125,18 +125,35 @@ function detect_kept_storage(mod::Module)
                 slot, k = _storage_slot(f, st.args, ts)
                 slot === nothing && continue
                 _is_trait_arg(slot) || continue
-                # the stored value: a `keep`'s result, or a value typed `Dynamic{X}`
-                a = st.args[k]
-                def = a isa Core.SSAValue ? src.code[a.id] : nothing
-                Meta.isexpr(def, :(=)) && (def = def.args[2])
-                kept = Meta.isexpr(def, :call) && CC.singleton_type(CC.argextype(def.args[1], src, CC.VarState[])) === Core.keep
-                V = ts[k]
-                (kept || any(t -> t isa DataType && t <: Dynamic, Base.uniontypes(V))) || continue
+                # the stored value: a `keep`'s result, directly or through a local variable. A `Dynamic{X}`
+                # the method makes itself is the same at every caller, and is a member (§8.1)
+                _is_keep_value(st.args[k], src) || continue
                 push!(out, (m, Int(m.line), f, slot))
             end
         end
     end
     return unique!(out)
+end
+
+# whether a statement's argument is the value of a `Core.keep` call: the call's own result, or a local
+# variable some statement assigns one to
+function _is_keep_value(@nospecialize(a), src::Core.CodeInfo, depth::Int = 0)
+    CC = Core.Compiler
+    depth > 4 && return false
+    if a isa Core.SSAValue
+        def = src.code[a.id]
+        Meta.isexpr(def, :(=)) && (def = def.args[2])
+        Meta.isexpr(def, :call) && return CC.singleton_type(CC.argextype(def.args[1], src, CC.VarState[])) === Core.keep
+        return (def isa Core.SlotNumber || def isa Core.SSAValue) && _is_keep_value(def, src, depth + 1)
+    elseif a isa Core.SlotNumber
+        for st in src.code
+            Meta.isexpr(st, :(=)) && st.args[1] isa Core.SlotNumber && st.args[1].id == a.id || continue
+            rhs = st.args[2]
+            Meta.isexpr(rhs, :call) && CC.singleton_type(CC.argextype(rhs.args[1], src, CC.VarState[])) === Core.keep && return true
+            (rhs isa Core.SSAValue || (rhs isa Core.SlotNumber && rhs.id != a.id)) && _is_keep_value(rhs, src, depth + 1) && return true
+        end
+    end
+    return false
 end
 
 # the type of the storage a call writes and the index of the stored value among the call's arguments

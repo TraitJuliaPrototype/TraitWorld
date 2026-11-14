@@ -54,11 +54,13 @@ mutable struct One; shape::KShape; end
 @unbounded badadd!(b::Bag, s::KShape) = (push!(b.shapes, keep(s)); b)      # a box at one caller, the object at another
 @unbounded badset!(o::One, s::KShape) = (o.shape = keep(s); o)
 goodadd!(b::Bag, s::KShape) = (push!(b.shapes, s); b)                      # the object, whoever calls
+@unbounded viaadd!(b::Bag, s::KShape) = (k = keep(s); push!(b.shapes, k); b)  # through a local variable
+boxadd!(b::Bag, s::KShape) = (push!(b.shapes, Dynamic{KShape}(s)); b)        # a box the method makes: the same whoever calls
 end
 
 @testset "detect_kept_storage" begin
     found = detect_kept_storage(KeptBad)
-    @test Set(m.name for (m, _, _, _) in found) == Set([:badadd!, :badset!])
+    @test Set(m.name for (m, _, _, _) in found) == Set([:badadd!, :badset!, :viaadd!])
     @test all(slot === KShape for (_, _, _, slot) in found)
     @test isempty(detect_kept_storage(KeptM))                  # `Kept{X}` is the storage for `keep`
 end
