@@ -287,7 +287,9 @@ function _classify(m::Method; world::UInt = Base.get_world_counter())
         push!(tv, s.var)
         s = s.body
     end
-    CC.typeinf_frame(interp, m, sig, Core.svec(tv...), false)
+    # in the world Julia's own inference runs in: the compiler's code there is the system image's,
+    # which no package's method ends (the check's hook is called in the latest world)
+    Base.invoke_in_typeinf_world(CC.typeinf_frame, interp, m, sig, Core.svec(tv...), false)
     _names_undefined!(st.waits_for, m)
     return (uses = st.uses, pending = st.pending, waits_for = st.waits_for)
 end

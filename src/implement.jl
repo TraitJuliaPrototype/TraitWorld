@@ -442,7 +442,7 @@ function _infer_new_method(m::Method, @nospecialize(s), world::UInt)
     try
         _, sparams = ccall(:jl_type_intersection_with_env, Any, (Any, Any), s, m.sig)::Core.SimpleVector
         mi = Base.specialize_method(m, s, sparams)
-        frame = CC.typeinf_frame(CC.NativeInterpreter(world), mi, false)
+        frame = Base.invoke_in_typeinf_world(CC.typeinf_frame, CC.NativeInterpreter(world), mi, false)   # the compiler's own world, as `_classify`
         frame === nothing && return Any
         return CC.widenconst(CC.ignorelimited(frame.result.result))
     catch
