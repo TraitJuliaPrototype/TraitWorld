@@ -85,3 +85,50 @@ end
     e = try mdouble(3); nothing catch err; err end
     @test occursin("is not a member of `MShape`", sprint(showerror, e))
 end
+
+# a check's error is raised at the user's line: the first frame of its backtrace is the `@implement`
+# or the method's definition, not the library (traits §11.3)
+function first_frame(code::String)
+    try
+        Base.include_string(@__MODULE__, code, "user_code.jl")
+        return nothing
+    catch e
+        st = stacktrace(catch_backtrace())
+        while e isa LoadError; e = e.error; end
+        return e, st[1]
+    end
+end
+
+@testset "a check's error has the user's line as its first frame" begin
+    @eval struct MNoArea; end
+    e, fr = first_frame("\n\n@implement MShape MNoArea\n")
+    @test e isa ImplementError
+    @test string(fr.file) == "user_code.jl" && fr.line == 3
+    # a method that breaks a member's contract, refused by the definition hook
+    @eval begin
+        struct MGood; end
+        MsgLib.marea(::MGood) = 1.0
+        MsgLib.mname(::MGood) = "good"
+        @implement MShape MGood
+    end
+    e, fr = first_frame("\nMsgLib.marea(::MGood) = 1\n")
+    @test e isa ImplementError
+    @test string(fr.file) == "user_code.jl" && fr.line == 2
+end
+
+@trait MScalable begin
+    mscale(s::MScalable, k::Float64)::Float64
+end
+struct MSC; end
+mscale(::MSC, k::Float64) = k
+@implement MScalable MSC
+
+@testset "an operation called outside its declared signature" begin
+    e = try mscale(MSC(), 2); nothing catch err; err end
+    @test e isa OperationError
+    m = msg(e)
+    @test occursin("no method of `mscale` takes (::MSC, ::Int64)", m)
+    @test occursin("`mscale` is declared `mscale(s::MScalable, k::Float64)::Float64` by MScalable", m)
+    @test occursin("MSC's methods of `mscale`: mscale(::MSC, ::Float64)", m)
+    @test !occursin("manually thrown", m)
+end

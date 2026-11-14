@@ -15,7 +15,7 @@ isdefined(Core, :MembershipEntry) ||
 # image holds the code its run-time sites reach whatever the values (compiler §9; E-326).
 Base.Experimental.@compiler_options facts = true
 
-export @trait, @implement, Dynamic, unwrap, Kept, kept_call, isdynamic, like, withfields, ImplementError, TraitUseError,
+export @trait, @implement, Dynamic, unwrap, Kept, kept_call, isdynamic, like, withfields, ImplementError, TraitUseError, OperationError,
        @bounded, @unbounded, check_definitions, classify, @trait_module, compiled_for, with_dynamic, keep,
        detect_dynamic_fallbacks, detect_unused_casts, Callable,
        @enforce_fully_typed, @warn_not_fully_typed, fully_typed, isfullytyped, FullyTypedReport,

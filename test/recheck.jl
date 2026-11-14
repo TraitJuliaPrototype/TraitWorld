@@ -82,7 +82,7 @@ mstate(::MC, s) = 0
 @implement Meas MC
 @testset "deleted, then defined again (Revise's order)" begin
     Base.delete_method(which(msz, (MC,)))
-    @test_throws MethodError latest(msz, MC())
+    @test_throws OperationError latest(msz, MC())
     @test thrown(:(msz(::MC) = UInt(1))) isa ImplementError   # the record, not the state, is the reference
     @test thrown(:(msz(::MC) = 2)) === nothing
     @test latest(via, MC()) === 2

@@ -348,7 +348,7 @@ function _trait_method(trait::Symbol, params::Vector{Symbol}, bounds::Vector{Any
     plainargs = Any[nm for nm in names]
     op.vararg && (plainargs[end] = Expr(:..., plainargs[end]))
     serve = op.body === nothing ?
-        :(throw(MethodError($(op.fname), ($(plainargs...),)))) :
+        :(throw($(lib(:OperationError))($(op.fname), ($(plainargs...),), $trait))) :
         _subst(op.body, :Self, :(typeof($rname)))
     body = quote
         $fwd = $(lib(:_fwd))($rname, $trait)

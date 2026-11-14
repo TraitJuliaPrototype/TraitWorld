@@ -50,6 +50,51 @@ function Base.showerror(io::IO, e::ImplementError)
     end
 end
 
+"""
+    OperationError
+
+A call of a trait's operation that no method of the member takes (traits §11.3): the member's own
+methods of the operation are for other arguments. The message names the call, the operation's declared
+signature and the member's methods.
+"""
+struct OperationError <: Exception
+    f::Any
+    args::Tuple
+    trait::Any
+end
+function Base.showerror(io::IO, e::OperationError)
+    f = e.f
+    argtypes = map(Core.Typeof, e.args)
+    print(io, "OperationError: no method of `", nameof(f), "` takes (", join(("::" * _short_type(T) for T in argtypes), ", "), ")")
+    X = bare(e.trait)
+    c = try contract(X) catch; nothing end
+    if c !== nothing
+        for op in c.operations
+            op.f === f || continue
+            print(io, "\n  `", op.name, "` is declared `", _declared(op, c), "` by ", _short_type(X))
+        end
+    end
+    # the methods of the operation for the member: those that take a member's value where the call has one
+    k = findfirst(T -> T <: X, argtypes)
+    if k !== nothing
+        S = argtypes[k]
+        own = String[]
+        for m in methods(f)
+            _is_trait_method(m) && continue
+            sig = Base.unwrap_unionall(m.sig)
+            (sig isa DataType && length(sig.parameters) > k) || continue
+            p = sig.parameters[k + 1]
+            Base.isvarargtype(p) && continue
+            p = p isa TypeVar ? p.ub : p
+            (p isa Type && S <: p && p !== Any) || continue
+            push!(own, _callform(m.sig))
+        end
+        isempty(own) ? print(io, "\n  ", _short_type(S), " has no method of `", nameof(f), "`") :
+                       print(io, "\n  ", _short_type(S), "'s methods of `", nameof(f), "`: ", join(own, ", "))
+    end
+end
+_short_type(@nospecialize(T)) = sprint(show, T; context = :compact => true)
+
 "A use outside the contract where the contract is required (traits §7.3, §11.3)."
 struct TraitUseError <: Exception
     msg::String
