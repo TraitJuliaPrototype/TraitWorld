@@ -80,8 +80,6 @@ function _implement_caught!(mod::Module, traits::Vector{Any}, @nospecialize(body
     end
 end
 
-"the field each type forwards a trait to, by type name (for `like`, traits §6.5)"
-const _FORWARD_FIELD = IdDict{Core.TypeName,Symbol}()
 
 # The member's pattern from its body and its `where` variables. A variable bounded by a `Union`
 # declares one membership per type of the union (lowering §3):
@@ -146,6 +144,8 @@ function _implement_one!(mod::Module, @nospecialize(X), @nospecialize(member), h
     receiver = how.by === nothing ? :self : :field
     if how.by !== nothing
         append!(added, _define_fwd!(mod, member, bare(X), how.by))
+        lm = _define_like!(mod, member, how.by)       # `like`'s rebuilding of this member (lowering §8)
+        lm === nothing || push!(added, lm)
     end
     # every membership is an entry, `struct S <: X` too (traits §5.2): the image keeps it, its records come
     # back from it, the member hook runs for an abstract member's subtypes, the ambiguity report sees it
@@ -163,9 +163,6 @@ function _implement_one!(mod::Module, @nospecialize(X), @nospecialize(member), h
         member isa DataType && _declared_subtype(member, inst) &&
             (_REFUSED[(member.name, Base.unwrap_unionall(bare(X)).name)] = refusal)
         throw(ImplementError(X, member, refusal))
-    end
-    if !_is_pattern(member) || how.by !== nothing
-        how.by === nothing || (_FORWARD_FIELD[(Base.unwrap_unionall(member)::DataType).name] = how.by)
     end
     _is_pattern(member) && _pending!(member, inst, how)
     _is_pattern(member) || _record_checks!(X, member, _records_at(X, member, X, how)...)

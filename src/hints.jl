@@ -7,6 +7,7 @@ function _method_error_hint(io::IO, ex::MethodError, @nospecialize(argtypes), @n
     lines = String[]
     try
         _trait_hints!(lines, ex.f, ex.args, ex.world)
+        _positional_hint!(lines, ex.f, ex.args)
     catch
         return
     end

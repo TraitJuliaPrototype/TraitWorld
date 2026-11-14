@@ -106,6 +106,7 @@ end
 @implement ColTable Halves by right
 colmean(t::ColTable, i::Int) = (c = col(t, i); sum(c) / length(c))
 
+renamed(t) = withfields(t; name = "k")
 struct NoPositional; a::Int; b::Float64; NoPositional(a::Int) = new(a, 1.0); end
 @testset "block and forwarding" begin
     v = [[1.0, 2.0], [3.0, 5.0]]
@@ -118,10 +119,17 @@ struct NoPositional; a::Int; b::Float64; NoPositional(a::Int) = new(a, 1.0); end
     h2 = like(h, [[7.0]])
     @test h2 isa Halves && h2.name == "h" && ncols(h2) == 1
     @test withfields(h; name = "k").name == "k"
+    # both call the constructor by position, with nothing looked up when they run: fully typed (lowering §8)
+    @test isfullytyped(fully_typed(like, (Halves, Vector{Vector{Float64}})))
+    @test isfullytyped(fully_typed(renamed, (Halves,)))
+    @test (@inferred like(h, [[7.0]])) isa Halves && (@inferred renamed(h)).name == "k"
+    @test like(v, [[9.0]]) == [[9.0]]                    # a type that serves the trait by its own methods
+    @test_throws ArgumentError like(v, 1)
+    @test_throws ArgumentError withfields(h; nme = "k")
     # a type whose inner constructor replaced the positional one cannot be rebuilt: the error names
     # the constructor to define (lowering §8)
     e = try withfields(NoPositional(1); b = 2.0); nothing catch err; err end
-    @test e isa ArgumentError && occursin("NoPositional(::Int64, ::Float64)", e.msg)
+    @test e isa MethodError && occursin("has none that takes its 2 fields (::Int64, ::Float64)", sprint(showerror, e))
     struct Chain; inner::Halves; end
     e = try @eval(@implement ColTable Chain by inner); nothing catch err; err end
     @test e isa ImplementError && occursin("chain", sprint(showerror, e))
