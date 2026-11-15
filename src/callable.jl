@@ -24,8 +24,18 @@ let A = TypeVar(:A, Tuple), S = TypeVar(:S), Z = TypeVar(:Z, Core.Callable{A, S}
     _declare!(pattern, Core.Callable{A, S}, @__MODULE__, :object, :field)
 end
 
-# Dynamic{Callable{A, S}}'s call: the arguments at A, the result checked against S. Kept at several signatures
-# (`Dynamic{All{Callable{A, S}, Callable{B, S}}}`, traits §7.7), the call takes the one its arguments match.
+# Dynamic{Callable{A, S}}'s call: the arguments at A, the result checked against S. At the box of one signature
+# `A` and `S` are the box's own parameters, known where the call is compiled, and the result is checked in the
+# method's body: in code compiled by facts a call of a helper with the result, whose type is not known, is a
+# run-time site (E-442: Julia's dynamic call, against 166 ns a call).
+function (d::Dynamic{Core.Callable{A, S}})(args...) where {A, S}
+    args isa A || throw(MethodError(getfield(d, :object), args))
+    r = getfield(d, :object)(args...)
+    r isa S || throw(TypeError(:Callable, S === Nothing ? "end the function with `nothing`" : "", S, r))
+    return r::S
+end
+# Kept at several signatures (`Dynamic{All{Callable{A, S}, Callable{B, S}}}`, traits §7.7), the call takes the one
+# its arguments match.
 function (d::Dynamic{Z})(args...) where {A, S, Z <: Core.Callable{A, S}}
     args isa A && return _checked_result(getfield(d, :object)(args...), S)
     for (A2, S2) in _signatures(Z)
