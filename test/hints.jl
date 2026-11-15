@@ -33,10 +33,14 @@ struct Both end
 
 applyc(f::Callable{Tuple{Int}, Int}, x) = f(x)
 onlyfloat(x::Float64) = x
+struct Scale; k::Int; end
+(s::Scale)(x::Int) = s.k * x
 
 @testset "hints" begin
     m = msg(() -> applyc(onlyfloat, 1))
     @test occursin("`onlyfloat` is given at `Callable{Tuple{Int64}, Int64}`, and none of its methods takes `Tuple{Int64}`; its methods take (::Float64)", m)
+    m = msg(() -> applyc(Scale(2), 1))      # a callable struct, not declared: no member (GT-32)
+    @test occursin("`Scale` is callable and no `Function`, and is no member of `Callable`", m) && occursin("@implement Callable Scale", m)
     m = msg(() -> colmean(Circle(1.0), 1))
     @test occursin("`Circle` is not a member of `ColTable`", m) && occursin("@implement ColTable Circle", m)
     @test occursin("its declared members: Tab", m)

@@ -143,6 +143,13 @@ function _callable_hint!(lines, @nospecialize(d), @nospecialize(v))
     (A isa DataType && !Base.has_free_typevars(A)) || return
     v isa Dynamic && (v = getfield(v, :object))
     v isa Compiled && (v = getfield(v, :object))
+    # a callable struct that is no `Function` and was not declared: no member (traits §9; GT-32)
+    if !(v isa Function) && !(typeof(v) <: Core.Callable) && !isempty(methods(v))
+        T = _tstr(Base.typename(typeof(v)).wrapper)
+        push!(lines, "`$T` is callable and no `Function`, and is no member of `Callable`: its owner declares it, " *
+                     "`@implement Callable $T`; or pass a function that calls it, `x -> v(x)`")
+        return
+    end
     hasmethod(v, A) && return
     ms = try collect(methods(v)) catch; Method[] end
     sigs = String[]
