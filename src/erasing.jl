@@ -2,7 +2,7 @@
 #
 # For a trait that declares `@default_dynamic` (and `Callable`, whose default is Julia's), a method at the trait
 # is defined at the two kept forms, `Dynamic{<:X}` and `Compiled{<:X}`, and one forwarder takes a plain member
-# and boxes it: `f(@nospecialize(t::X), …) = f(Dynamic{X}(t), …)`. Dispatch and the runtime do not change: the
+# and boxes it: `f(t::X, …) = f(Dynamic{X}(t), …)`, a box and a call compiled per member type. Dispatch and the runtime do not change: the
 # kept-form method is more specific than the forwarder, so a box and a wrapper reach the method as they are, and
 # a plain member reaches it boxed. A trait without the default takes a plain member as it is (Julia's rule).
 #
@@ -31,8 +31,17 @@ function erases(@nospecialize(X))
     return ccall(:jl_get_default_attribute, Cint, (Any,), u) >= 2      # a set of Julia's own: `Callable`
 end
 
+# The forwarder's box. The forwarder's own signature has already matched the argument at the trait, so the box is
+# made without the constructor's membership test (a run-time subtype query: some 500 ns for a trait, a method
+# lookup for a `Callable`, E-402): the struct is made directly. A kept form reaches a forwarder only where the
+# kept-form method could not take it (a wrapper of a function without a method at a `Callable`'s signature,
+# a member of every `Callable` by its own call method): the constructor decides then, and refuses it.
+@inline _box(::Type{D}, @nospecialize(x)) where {D<:Dynamic} = x isa Union{Dynamic, Compiled} ? D(x) : _new_box(D, x)
+# the runtime's constructor of a struct from its fields, which tests no field's type (`new` would test the member
+# against the trait when it runs: a membership query, some 90 ns on this build, E-402)
+@inline _new_box(::Type{D}, @nospecialize(x)) where {D<:Dynamic} = ccall(:jl_new_struct, Any, (Any, Any...), D, x)::D
 # a kept form passes as it is; a plain member is boxed at the trait (a forwarder of several trait arguments)
-_box_plain(@nospecialize(X::Type), @nospecialize(x)) = x isa Union{Dynamic, Compiled} ? x : Dynamic{X}(x)
+_box_plain(@nospecialize(X::Type), @nospecialize(x)) = x isa Union{Dynamic, Compiled} ? x : _new_box(Dynamic{X}, x)
 
 """
     @erasing function f(t::X, …) … end
@@ -40,7 +49,7 @@ _box_plain(@nospecialize(X::Type), @nospecialize(x)) = x isa Union{Dynamic, Comp
 
 The trait's default at a method (W-151): for each argument typed by a trait that erases by default (`erases`),
 the method is defined at the two kept forms, `Dynamic{<:X}` and `Compiled{<:X}`, and one forwarder takes a plain
-member and passes `Dynamic{X}(t)` on. In the body the argument is the kept form, not the object: `typeof(t)` is
+member and passes `Dynamic{X}(t)` on (per positional arity; compiled per member type, a box and a call). In the body the argument is the kept form, not the object: `typeof(t)` is
 the box's or the wrapper's type. An argument typed by a `where` variable bounded by such a trait (`t::C` with
 `C <: X`) is treated so, with `C` the kept form's type. A trait whose parameters the signature leaves open
 (`t::Column`, `t::Column{<:Real}`) cannot be boxed there: the argument takes a plain member as it is. Applied to a
@@ -253,9 +262,12 @@ function _erasing_def(mod::Module, src::LineNumberNode, @nospecialize(ex), d)
             if a.vararg
                 push!(fargs, Expr(:..., fa)); push!(cargs, Expr(:..., nm))
             elseif erasing[i] !== nothing
+                # compiled per member type, a box and a call: on this build `@nospecialize` at a trait argument takes
+                # the attribute's run-time path at every call (91 ns, E-402); `@specialize` keeps a set's default bit
+                # (`Callable`'s, Julia's own) from compiling it once. The kept-form method is compiled once
                 X = erasing[i][1]
-                push!(fargs, Expr(:macrocall, GlobalRef(Base, Symbol("@nospecialize")), src, fa))
-                push!(cargs, nerase == 1 ? Expr(:call, Expr(:curly, _g(:Dynamic), X), nm) :
+                push!(fargs, Expr(:macrocall, GlobalRef(Base, Symbol("@specialize")), src, fa))
+                push!(cargs, nerase == 1 ? Expr(:call, _g(:_box), Expr(:curly, _g(:Dynamic), X), nm) :
                                            Expr(:call, _g(:_box_plain), X, nm))
             else
                 push!(fargs, fa); push!(cargs, nm)
