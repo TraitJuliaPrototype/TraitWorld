@@ -49,6 +49,11 @@ end
 
 # A box of a wrapper holds the object: the wrapper's choice is erased there.
 (::Type{Dynamic{X}})(w::Compiled) where {X} = Dynamic{X}(getfield(w, :object))
+# A box of the same trait is itself, and a box of a subtrait holds its object at the trait: neither tests the
+# membership again. (Julia's constructor, compiled once for any value, makes a new box and tests the object
+# against the trait when it runs: a run-time membership query at each re-boxing, E-403.)
+(::Type{Dynamic{X}})(d::Dynamic{X}) where {X} = d
+(::Type{Dynamic{X}})(d::Dynamic{Y}) where {X, Y <: X} = _new_box(Dynamic{X}, getfield(d, :object))
 
 # Storage typed `Dynamic{X}` converts what is assigned to it: a member is boxed, a wrapper's object boxed, a
 # box of another trait boxed again at `X` (the review's addendum, the storage table). A method of `convert`
