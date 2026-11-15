@@ -144,17 +144,18 @@ end
         @test thrown(:(module PirateB; Main.SU.lookup(x::Float64) = x; end)) isa PirateError
         @test_throws MethodError latest(looked, b)
 
-        # pirates that win nowhere in code compiled by facts: accepted
-        @test thrown(:(module PirateC; Base.abs2(x::Int8) = Int8(7); end)) === nothing
-        @test latest(abs2, Int8(2)) == 7
+        # pirates that win nowhere in code compiled by facts: accepted (its body calls only facts, so
+        # code that comes to dispatch to it stays in the deep class, which strict mode secures: facts §11.2)
+        @test thrown(:(module PirateC; Base.abs2(x::Int8) = x * x + x; end)) === nothing
+        @test latest(abs2, Int8(2)) == 6
         @test latest(sq, b) == 14.0
 
         # deleting a pirate that code compiled by facts now dispatches to is refused (compiler §10.2)
         Core.eval(Main, :(module StrictLib6; using TraitWorld; @trait_module
                           sq8(xs::Vector{Int8}) = (s = 0; for x in xs; s += abs2(x); end; s); end))
-        @test latest(G(:StrictLib6, :sq8), Int8[2]) == 7
+        @test latest(G(:StrictLib6, :sq8), Int8[2]) == 6
         @test_throws PirateError Base.delete_method(which(abs2, (Int8,)))
-        @test latest(abs2, Int8(2)) == 7
+        @test latest(abs2, Int8(2)) == 6
 
         # the session (Main) defining SU's function for Float64 is a pirate by the letter: refused;
         # SU's own definition is a stakeholder's: followed
