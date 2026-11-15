@@ -13,8 +13,9 @@
 # The forwarder is Julia's `@nospecialize` method at the trait: compiled once, its argument at the declared type
 # `X`, so the box's field test holds by the declared type and the box is made with no test and no heap of its own.
 # Where a caller that knows the member's type inlines it, the test holds through the membership's entry, which
-# inference records (compiler §4.8). Where the trait's parameters are the method's variables (`X{T}`), the
-# forwarder is compiled per member type (`@specialize`), so that the box's parameters are known.
+# inference records (compiler §4.8). Where a parameter of the trait is a variable only the argument itself binds
+# (`ip::IndexProvider{I}`), the forwarder is compiled per member type (`@specialize`), so that the box's
+# parameters are known.
 
 """
     erases(X) -> Bool
@@ -41,7 +42,9 @@ end
 # forwarder, through the membership's entry, which inference records. A kept form reaches a forwarder only where
 # the kept-form method could not take it (a wrapper of a function without a method at a `Callable`'s signature, a
 # member of every `Callable` by its own call method): the constructor decides then, and refuses it.
-@inline _box(::Type{D}, @nospecialize(x)) where {D<:Dynamic} = x isa Union{Dynamic, Compiled} ? D(x) : _new_box(D, x)
+# Its result is declared: inferred at the argument's declared type (`@nospecialize`), the constructor's methods for a
+# kept form would leave it `Any`.
+@inline _box(::Type{D}, @nospecialize(x)) where {D<:Dynamic} = (x isa Union{Dynamic, Compiled} ? D(x) : _new_box(D, x))::D
 @eval @inline _new_box(::Type{D}, @nospecialize(x)) where {D<:Dynamic} = $(Expr(:new, :D, :x))
 # a kept form passes as it is; a plain member is boxed at the trait (a forwarder of several trait arguments)
 @inline _box_plain(::Type{D}, @nospecialize(x)) where {D<:Dynamic} = x isa Union{Dynamic, Compiled} ? x : _new_box(D, x)
@@ -154,12 +157,7 @@ end
 # argument. A `where` variable that types the argument must occur nowhere else (a struct's constructor
 # `T{F}(f::F)`): the call fixes it to the member's type, which the box is not.
 function _box_formable(@nospecialize(X), i::Int, @nospecialize(via), atypes)
-    others = TypeVar[]
-    for j in 2:length(atypes)
-        j == i && continue
-        _collect_vars_deep!(others, atypes[j])
-    end
-    _collect_vars_deep!(others, atypes[1])
+    others = _others_vars(atypes, i)
     via isa TypeVar && any(v -> v === via, others) && return false
     for C in _components(X)      # classify.jl
         _is_callable(C) || continue
@@ -169,6 +167,15 @@ function _box_formable(@nospecialize(X), i::Int, @nospecialize(via), atypes)
     end
     via isa TypeVar && any(v -> v === via, _free_vars(X)) && return false
     return true
+end
+# the variables the arguments other than `i` bind, with those their bounds name
+function _others_vars(atypes, i::Int)
+    others = TypeVar[]
+    for j in 1:length(atypes)
+        j == i && continue
+        _collect_vars_deep!(others, atypes[j])
+    end
+    return others
 end
 _is_callable(@nospecialize(C)) = (u = Base.unwrap_unionall(C); u isa DataType && u.name === Base.unwrap_unionall(Core.Callable).name)
 # the variables of `t`, with those their bounds name
@@ -181,32 +188,42 @@ function _collect_vars_deep!(vs, @nospecialize(t))
     return vs
 end
 
+# the free variables of `t`: those no `UnionAll` inside `t` binds
 function _free_vars(@nospecialize(t))
     vs = TypeVar[]
-    _collect_vars!(vs, t)
+    _collect_vars!(vs, t, TypeVar[])
     return vs
 end
-function _collect_vars!(vs, @nospecialize(t))
+function _collect_vars!(vs, @nospecialize(t), bound::Vector{TypeVar})
     if t isa TypeVar
-        any(v -> v === t, vs) || push!(vs, t)
+        any(v -> v === t, bound) || any(v -> v === t, vs) || push!(vs, t)
     elseif t isa UnionAll
-        _collect_vars!(vs, t.var.lb); _collect_vars!(vs, t.var.ub); _collect_vars!(vs, t.body)
+        _collect_vars!(vs, t.var.lb, bound); _collect_vars!(vs, t.var.ub, bound)
+        _collect_vars!(vs, t.body, push!(copy(bound), t.var))
     elseif t isa Union
-        _collect_vars!(vs, t.a); _collect_vars!(vs, t.b)
+        _collect_vars!(vs, t.a, bound); _collect_vars!(vs, t.b, bound)
     elseif t isa DataType
         for p in t.parameters
-            _collect_vars!(vs, p)
+            _collect_vars!(vs, p, bound)
         end
     elseif t isa Core.TypeofVararg
-        isdefined(t, :T) && _collect_vars!(vs, t.T)
-        isdefined(t, :N) && _collect_vars!(vs, t.N)
+        isdefined(t, :T) && _collect_vars!(vs, t.T, bound)
+        isdefined(t, :N) && _collect_vars!(vs, t.N, bound)
     end
     return vs
 end
 
-# The forwarder's code: `return #self#(box(a2), a3, …)`, made by lowering a
-# definition of the same arguments with the method's variables (so the box's type reads them as static
-# parameters, in the method's order) and taking its code. The forwarder's line is the definition's.
+# The forwarder's code: each plain argument boxed by `new` in the forwarder's own body, then
+# `return #self#(b2, a3, …)`. The box is made in the body, not by a call: in code compiled by facts a call
+# whose argument is typed by the set is a run-time site, and its result would be unknown. A kept form reaches the
+# forwarder only where the kept-form method could not take it (a wrapper of a function without a method at a
+# `Callable`'s signature): the constructor decides then, and refuses it. Made by lowering a definition of the
+# same arguments with the method's variables (so the box's type reads them as static parameters, in the
+# method's order) and taking its code. The forwarder's line is the definition's.
+#
+# Compiled once (`@nospecialize`) where one argument erases and the other arguments fix its trait's parameters;
+# per member type (`@specialize`) where only the member's own type fixes a parameter (`ip::IndexProvider{I}`), or
+# where several arguments erase: the call with a box at each is then at concrete types.
 function _forwarder_code(atypes, tvars, loc, code::Core.CodeInfo, pos, traits, mod::Module)
     n = length(atypes)
     names = Symbol[]
@@ -217,7 +234,8 @@ function _forwarder_code(atypes, tvars, loc, code::Core.CodeInfo, pos, traits, m
     end
     vnames = Symbol[Symbol("#sp", k) for k in 1:length(tvars)]
     single = length(pos) == 1
-    fargs, cargs = Any[], Any[]
+    KF = QuoteNode(Union{Dynamic, Compiled})
+    fargs, cargs, boxes = Any[], Any[], Any[]
     for i in 2:n
         nm = names[i - 1]
         if atypes[i] isa Core.TypeofVararg
@@ -227,25 +245,30 @@ function _forwarder_code(atypes, tvars, loc, code::Core.CodeInfo, pos, traits, m
         k = findfirst(==(i), pos)
         if k === nothing
             push!(fargs, nm); push!(cargs, nm)
-        else
-            D = Dynamic{traits[k]}
-            vs = TypeVar[v for v in tvars if any(w -> w === v, _free_vars(D))]
-            # compiled once where the box's trait is fixed; per member type where the call's types fix it
-            push!(fargs, Expr(:macrocall, GlobalRef(Base, isempty(vs) ? Symbol("@nospecialize") : Symbol("@specialize")), loc, nm))
-            Dexpr = if isempty(vs)
-                QuoteNode(D)
-            else
-                UA = D
-                for v in reverse(vs)
-                    UA = UnionAll(v, UA)
-                end
-                Expr(:call, GlobalRef(Core, :apply_type), QuoteNode(UA),
-                     Any[vnames[findfirst(w -> w === v, collect(tvars))] for v in vs]...)
-            end
-            push!(cargs, Expr(:call, GlobalRef(TraitWorld, single ? :_box : :_box_plain), Dexpr, nm))
+            continue
         end
+        D = Dynamic{traits[k]}
+        vs = TypeVar[v for v in tvars if any(w -> w === v, _free_vars(D))]
+        others = _others_vars(atypes, i)
+        once = single && all(v -> any(w -> w === v, others), vs)
+        push!(fargs, Expr(:macrocall, GlobalRef(Base, once ? Symbol("@nospecialize") : Symbol("@specialize")), loc, nm))
+        Dexpr = if isempty(vs)
+            QuoteNode(D)
+        else
+            UA = D
+            for v in reverse(vs)
+                UA = UnionAll(v, UA)
+            end
+            Expr(:call, GlobalRef(Core, :apply_type), QuoteNode(UA),
+                 Any[vnames[findfirst(w -> w === v, collect(tvars))] for v in vs]...)
+        end
+        Dn, bn = Symbol("#D", i), Symbol("#b", i)
+        push!(boxes, Expr(:(=), Dn, Dexpr))
+        kept = single ? Expr(:call, GlobalRef(Core, :typeassert), Expr(:call, Dn, nm), Dn) : nm
+        push!(boxes, Expr(:(=), bn, Expr(:if, Expr(:call, GlobalRef(Core, :isa), nm, KF), kept, Expr(:new, Dn, nm))))
+        push!(cargs, bn)
     end
-    body = Expr(:block, loc, Expr(:meta, :erasing_forwarder), Expr(:meta, :bounded, false),
+    body = Expr(:block, loc, Expr(:meta, :erasing_forwarder), Expr(:meta, :bounded, false), boxes...,
                 Expr(:return, Expr(:call, Symbol("#self#"), cargs...)))
     sig = Expr(:call, Symbol("#forwarder#"), fargs...)
     isempty(vnames) || (sig = Expr(:where, sig, vnames...))

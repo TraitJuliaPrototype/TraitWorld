@@ -43,6 +43,7 @@ bare(c::Col) = form(c)                               # a parametric trait writte
 bare2(c::Col{<:Real}) = form(c)                      # nor with a parameter left open
 plainkind(n::Named) = form(n)                        # a trait without the default
 apply(f::Callable{Tuple{Float64}, Float64}, x::Float64) = (form(f), f(x))
+struct Prob{S <: Shape}; s::S; end                   # Julia's default outer constructor forwards too
 struct Scene; items::Vector{Dynamic{Shape}}; end
 struct Holder; s::Dynamic{Shape}; end
 end
@@ -79,6 +80,12 @@ end
     fw = [m for m in methods(BT.total) if TraitWorld._is_forwarder(m)]
     @test length(fw) == 2 && length(methods(BT.total)) == 4
     @test isempty([m for m in methods(BT.plainkind) if TraitWorld._is_forwarder(m)])
+    # the forwarder is compiled once where the trait's parameters are fixed, per member type where only the member fixes them
+    @test only(m for m in methods(BT.kind) if TraitWorld._is_forwarder(m)).nospecialize != 0
+    @test only(m for m in methods(BT.first2) if TraitWorld._is_forwarder(m)).nospecialize == 0
+    # a struct whose parameter is bounded by the trait: its default outer constructor boxes; its own constructor does not
+    @test BT.Prob(c) isa BT.Prob{Dynamic{Shape}} && BT.Prob(compiled_for(c)) isa BT.Prob{Compiled{Circle}}
+    @test BT.Prob{Circle}(c) isa BT.Prob{Circle}
     @test erases(Shape) && !erases(Named) && erases(Callable{Tuple{Int}, Int}) && erases(All{Shape, Named}) && !erases(Int)
     @test isempty(detect_ambiguities(BT))
 end

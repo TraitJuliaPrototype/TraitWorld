@@ -25,8 +25,10 @@ sloppy(v::Vector{Any}) = sum(v)
     @test Tuple{typeof(double), Float64} in r.targets
     @test Tuple{typeof(total2), Vector{Shape2}} in r.targets
     @test main1(2) == 3.0 + 4.0 + 4.0
-    # a call folded where the program is compiled reaches no target
-    @test !(Tuple{typeof(double), Float64} in verify_main(() -> applyf(double, 1.0), ()).targets)
+    # a call folded where the program is compiled reaches no target: the wrapper's call
+    @test !(Tuple{typeof(double), Float64} in verify_main(() -> applyf(TraitWorld.ByType.compiled_for(double), 1.0), ()).targets)
+    # a function boxed by `Callable`'s default is called through the box: its method is a target
+    @test Tuple{typeof(double), Float64} in verify_main(() -> applyf(double, 1.0), ()).targets
     r2 = verify_main(sloppy, (Vector{Any},))
     @test !isempty(r2.holes)
 end
