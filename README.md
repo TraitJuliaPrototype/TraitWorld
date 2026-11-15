@@ -35,6 +35,11 @@ falls short of them, the references' Deviations tables say so.
   precompiled (`JULIA_TW_AHEAD=0` turns it off); `verify_main`; BaseTraits (`HasLength`,
   `Iterable`, `Indexable`, `MutableIndexable`, `Resizable`, `Keyed`, `Solvable`, `LinearOp`,
   `BoundedText`, `asvector`, `retain!`).
+- W-151 (stage 1 of the next iteration; a prototype of D-1 and D-3, not in force: traits T-113, T-114,
+  lowering L-59): the wrapper `Compiled` that `TraitWorld.ByType.compiled_for(x)` returns, a member of
+  every trait its object is in; `@erasing` (a trait's default as the method at the kept forms and a
+  forwarder that boxes a plain member; `@default_dynamic` sets no compiler bit); `convert` into
+  `Dynamic{X}`; `check_at_box` (the method read at the box), which `check_definitions` and `bounded` use.
 
 ## Running
 
