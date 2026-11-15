@@ -20,7 +20,7 @@ export @trait, @implement, Dynamic, unwrap, Kept, kept_call, isdynamic, like, wi
        detect_dynamic_fallbacks, detect_unused_casts, detect_kept_storage, Callable,
        @enforce_fully_typed, @warn_not_fully_typed, fully_typed, isfullytyped, FullyTypedReport,
        NotFullyTypedError, AbstractTypeError, @enforce_concrete_only, @warn_on_abstract,
-       OwnershipError, @joint_owners, PirateError, verify_main, VerifyReport, add_entrypoints, make_executable, make_library, BuildError,
+       OwnershipError, @joint_owners, @owner_only, delete_membership, PirateError, verify_main, VerifyReport, add_entrypoints, make_executable, make_library, BuildError,
        Compiled, @erasing, erases, check_at_box
 
 # the casts and `keep` (traits §7.6, §7.8): Julia's own, re-exported. A call written with a cast is the
@@ -53,6 +53,8 @@ include("callable.jl")
 include("fullytyped.jl")
 include("hints.jl")
 include("strict.jl")
+include("report.jl")
+include("delete.jl")
 include("ahead.jl")
 include("build.jl")
 include("buildbase.jl")
@@ -84,6 +86,8 @@ export HasLength, Iterable, Indexable, MutableIndexable, Resizable, Keyed, Solva
 # The hooks the runtime and Base call through `invokelatest` or `jl_apply`: precompiled, so that no session
 # compiles them at its first package load (W-121, E-286: `_strict_at_load!` took half of TraitWorld's load)
 precompile(_strict_at_load!, (Base.PkgId,))
+precompile(_report_at_load!, (Base.PkgId,))
+precompile(_report_endings!, (Vector{Any},))
 precompile(_member_hook, (Any, Any))
 precompile(_definition_hook, (Method, Bool))
 precompile(_expand_definition, (Core.SimpleVector, Core.CodeInfo, Module))
@@ -115,6 +119,8 @@ function __init__()
     Base.Experimental.register_error_hint(_method_error_hint, MethodError)
     # strict mode (traits §12.3): JULIA_TW_STRICT=1, the report after each package load
     _strict_init!()
+    # the pirate's report (traits §12.2): by default, after a definition, a declaration and a load
+    _report_init!()
     ccall(:jl_set_method_deletion_hook, Cvoid, (Any,), _deletion_hook)
 end
 

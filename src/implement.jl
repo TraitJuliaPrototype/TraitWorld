@@ -158,6 +158,7 @@ function _implement_one!(mod::Module, @nospecialize(X), @nospecialize(member), h
         err isa ErrorException || rethrow()
         err.msg
     end
+    _report_now!()                      # a pirate's membership that ended deep code (traits §12.2)
     if refusal !== nothing              # raised outside the catch: the message prints once
         # a declared subtype stays a subtype of X: the module-end hook names the refusal, not a missing @implement
         member isa DataType && _declared_subtype(member, inst) &&
@@ -346,7 +347,9 @@ function _definition_hook(m::Method, after::Bool)
 end
 function _definition_checks(m::Method, after::Bool)
     if after
+        es = _take_endings()             # the deep code the definition ended (compiler §10.2)
         _strict_on_definition(m, true)   # strict mode's check after the definition (traits §12.3)
+        STRICT[] || _report_endings!(es) # the pirate's report, by default (traits §12.2)
         return _check_bounded(m)
     end
     _check_pirate(m)                     # a scope that declares `no_pirates` (traits §12.2)

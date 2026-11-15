@@ -4,10 +4,11 @@
     @trait_module opts...
 
 Before a module's first method: its methods are compiled by facts, an unbounded method at a trait argument
-is refused (`bounded`), a pirate is refused (`no_pirates`), and where nothing else decides, a trait
-argument's attribute is what the caller knows (`first_seen`). All four are on unless written
-otherwise (`@trait_module bounded = false`); `dynamic = true` makes every trait argument of the
-module's methods `Dynamic` by default. The options are Julia's module options (compiler §2.1).
+is refused (`bounded`), a pirate is refused (`no_pirates`), where nothing else decides, a trait
+argument's attribute is what the caller knows (`first_seen`), and the functions the module neither
+exports nor declares `public` take methods from it only (`owner_only`, traits §12.2). All five are on
+unless written otherwise (`@trait_module bounded = false`); `dynamic = true` makes every trait argument
+of the module's methods `Dynamic` by default. The options are Julia's module options (compiler §2.1).
 """
 macro trait_module(opts...)
     given = Dict{Symbol,Bool}()
@@ -19,12 +20,12 @@ macro trait_module(opts...)
         end
         o isa Symbol && (o = Expr(:(=), o, true))        # `bounded` is `bounded = true` (traits §2)
         (Meta.isexpr(o, :(=)) && o.args[1] isa Symbol && o.args[2] isa Bool &&
-         o.args[1] in (:facts, :bounded, :no_pirates, :dynamic, :first_seen)) ||
-            error("@trait_module: an option is facts, bounded, no_pirates, dynamic or first_seen = true or false; got $o")
+         o.args[1] in (:facts, :bounded, :no_pirates, :dynamic, :first_seen, :owner_only)) ||
+            error("@trait_module: an option is facts, bounded, no_pirates, dynamic, first_seen or owner_only = true or false; got $o")
         given[o.args[1]] = o.args[2]
     end
     settings = Any[Expr(:(=), k, get(given, k, k !== :dynamic))
-                   for k in (:facts, :bounded, :no_pirates, :dynamic, :first_seen)]
+                   for k in (:facts, :bounded, :no_pirates, :dynamic, :first_seen, :owner_only)]
     fully_typed === nothing || push!(settings, Expr(:(=), :fully_typed, fully_typed))
     return esc(Expr(:macrocall, GlobalRef(Base.Experimental, Symbol("@compiler_options")),
                     __source__, settings...))

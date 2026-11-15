@@ -142,8 +142,48 @@ function _owners!(acc::Base.IdSet{Any}, @nospecialize(T))
     return acc
 end
 
-"The owners of every function and type a signature names."
-sig_owners(@nospecialize(sig)) = _owners!(Base.IdSet{Any}(), sig)
+"""
+The owners of every function and type a signature names; of a call of an owner-only function (traits
+§12.2; compiler §1.2), the function's owner alone, whatever types it names.
+"""
+function sig_owners(@nospecialize(sig))
+    o = _owner_only_owner(sig)
+    o === nothing || return (s = Base.IdSet{Any}(); push!(s, o); s)
+    return _owners!(Base.IdSet{Any}(), sig)
+end
+
+# The owner of the function of a signature where the function is owner-only (its owner's alone: by its
+# module's `owner_only` option, a trait module's default, unless exported or public; or by `@owner_only`),
+# else `nothing`. The compiler's test, which inference reads (compiler §1.2).
+function _owner_only_owner(@nospecialize(sig))
+    b = Base.unwrap_unionall(sig)
+    b isa DataType && b <: Tuple && !isempty(b.parameters) || return nothing
+    F = b.parameters[1]
+    F isa TypeVar && (F = F.ub)
+    if F === typeof(Core.kwcall) && length(b.parameters) >= 3
+        F = b.parameters[3]
+        F isa TypeVar && (F = F.ub)
+    end
+    F isa Type || return nothing
+    F = Base.unwrap_unionall(F)
+    (F isa DataType && CC.is_owner_only(F)) || return nothing
+    return owner(F.name.module)
+end
+
+"""
+    @owner_only f g …
+
+At the top level of a function's own module: the functions named take methods from their owner only,
+exported or not (traits §12.2). A method of one by another package is a pirate's, whatever types it
+names; so a call of one is a fact at any signature (facts §3). A trait module's functions that it
+neither exports nor declares `public` are owner-only by default.
+"""
+macro owner_only(names...)
+    (!isempty(names) && all(n -> n isa Symbol, names)) ||
+        error("@owner_only: name the module's functions, as in `@owner_only area perimeter`")
+    return esc(Expr(:block, [:(ccall(:jl_set_owner_only, Cvoid, (Any, Any), @__MODULE__, $(QuoteNode(n)))) for n in names]...,
+                    nothing))
+end
 
 # one signature per Union member at the top level of each argument, at most `limit` combinations; a
 # `Vararg` tail that may be empty gives the alternative without it too
@@ -197,10 +237,14 @@ end
 
 Whether `m` is no pirate (traits §12.2): in each alternative of its signature (each `Union` member
 taken separately, each arity a `Vararg` tail admits), its package owns the function or one of the
-types. A `Union` with an own type, or a lower-bounded type variable, is no way around it.
+types. A `Union` with an own type, or a lower-bounded type variable, is no way around it. A method of
+an owner-only function is no pirate only where its package owns the function.
 """
 function owned_method(m::Method)
     definer = owner(m.module)
+    # a method of an owner-only function is its owner's only, whatever types it names (traits §12.2)
+    fo = _owner_only_owner(m.sig)
+    fo === nothing || return owns(definer, fo)
     for s in _sig_alternatives(m.sig)
         _owns_any(definer, sig_owners(s)::Base.IdSet{Any}) || return false
     end

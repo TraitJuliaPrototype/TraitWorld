@@ -81,7 +81,9 @@ function Base.showerror(io::IO, e::PirateError)
           join((_short(t, 40) for t in (Base.unwrap_unionall(m.sig)::DataType).parameters[2:end]), ", "),
           ")`, defined by ", _owner_name(e.definer), ".\n  It would win at the call `", _callform(e.sig),
           "`, which code compiled by facts makes (in `", _code_name(e.caller), "`).\n  ",
-          _owner_name(e.definer), " owns neither the function nor a type in that signature (a pirate). ",
+          _owner_only_owner(m.sig) === nothing ?
+              "$(_owner_name(e.definer)) owns neither the function nor a type in that signature (a pirate). " :
+              "$(_owner_name(e.definer)) does not own the function, an owner-only function of $(_owner_name(_owner_only_owner(m.sig))) (a pirate). ",
           "Define it where a type it is for is owned, name the definer a joint owner (`@joint_owners`), ",
           "or turn strict mode off (`TraitWorld.strict!(false)`) to follow it as plain Julia does.")
     e.later && print(io, "\n  (found after the definition; the method was deleted again)")
@@ -119,7 +121,12 @@ function _winning_fact(m::Method, @nospecialize(isig), accept)
         caller isa Core.CodeInstance && caller.max_world == typemax(UInt) || return nothing
         _deep(caller) || return nothing                      # outside the deep class: followed (facts §11.2)
         if _facts_code(caller)
-            return CC.is_fact_sig(s) && _would_win(m, isig, s, world) && accept(s) ? caller : nothing
+            CC.is_fact_sig(s) || return nothing
+            _would_win(m, isig, s, world) && accept(s) && return caller
+            # a fact at a signature the new method covers only in part (an owner-only function's call at
+            # an abstract signature, facts §3): it wins where it is selected on that part
+            si = typeintersect(s, isig)
+            return si !== Union{} && si != s && _would_win(m, isig, si, world) && accept(si) ? caller : nothing
         end
         caller in seen && return nothing
         si = typeintersect(s, isig)                          # plain code may call at an abstract signature
@@ -325,8 +332,8 @@ end
 """
 Declare a pirate's membership under strict mode (traits §12.3), by the method's rule: refused, with
 `PirateError`, where it would change code compiled by facts; declared otherwise, with the warning.
-The invalidation log of the declaration is read after it, as after a method's definition. A
-membership is not taken back, so what the log finds is reported and kept (`_STRICT_MISSES`).
+The invalidation log of the declaration is read after it, as after a method's definition: what it
+finds (`_STRICT_MISSES`) is undone as a method's is, the membership taken back, and refused.
 """
 function _declare_pirate!(@nospecialize(member), @nospecialize(inst), mod::Module, @nospecialize(by),
                           receiver::Symbol, @nospecialize(X))
@@ -346,8 +353,11 @@ function _declare_pirate!(@nospecialize(member), @nospecialize(inst), mod::Modul
     _warn_pirate_membership(_pirate_membership_text(mod, X, member))
     v = log isa Vector ? _strict_log_hit(log, definer) : nothing
     if v !== nothing
+        # the miss is undone as a method's is: the membership taken back (traits §5.13), then refused
         push!(_STRICT_MISSES, (pm, v[1], v[2]))
-        @error sprint(showerror, PirateError(pm, definer, v[1], v[2], true))
+        ccall(:jl_delete_membership, Cvoid, (Any, Any, Any), member, inst, mod)
+        _forget_membership!(X, member, inst)
+        throw(PirateError(pm, definer, v[1], v[2], true))
     end
     return en
 end

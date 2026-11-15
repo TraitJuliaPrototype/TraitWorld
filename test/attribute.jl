@@ -85,7 +85,7 @@ end
 
 @testset "trait modules" begin
     opts = ccall(:jl_get_module_trait_options, Cint, (Any,), Geometry)
-    @test opts == 1 | 2 | 8                                # bounded, no_pirates, first_seen
+    @test opts == 1 | 2 | 8 | 64                           # bounded, no_pirates, first_seen, owner_only
     @test ccall(:jl_get_module_facts, Cint, (Any,), Geometry) == 1
     @test Geometry.known(Geometry.Sq(2.0)) === :compiled
     @test Geometry.unknown(Any[Geometry.Sq(2.0)]) === :dynamic
