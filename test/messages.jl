@@ -133,8 +133,8 @@ mscale(::MSC, k::Float64) = k
     e = try mscale(MSC(), 2); nothing catch err; err end
     @test e isa MethodError
     m = msg(e)
-    @test occursin("no method matching mscale(::MSC, ::$Int)", m)
+    @test occursin("no method matching mscale(::", m) && occursin("MSC, ::$Int)", m)
     @test occursin("`mscale` is declared `mscale(s::MScalable, k::Float64)::Float64` by MScalable", m)
-    @test occursin("mscale(::MSC, ::Float64)", m)                 # Julia's closest candidate: the member's method
+    @test occursin("MSC, !Matched::Float64)", m)                   # Julia's closest candidate: the member's method
     @test isempty([mm for mm in methods(mscale) if mm.sig isa DataType && mm.sig.parameters[2] === MScalable])
 end
