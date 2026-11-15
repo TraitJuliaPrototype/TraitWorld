@@ -332,8 +332,8 @@ end
 """
 Declare a pirate's membership under strict mode (traits §12.3), by the method's rule: refused, with
 `PirateError`, where it would change code compiled by facts; declared otherwise, with the warning.
-The invalidation log of the declaration is read after it, as after a method's definition. A
-membership is not taken back, so what the log finds is reported and kept (`_STRICT_MISSES`).
+The invalidation log of the declaration is read after it, as after a method's definition: what it
+finds (`_STRICT_MISSES`) is undone as a method's is, the membership taken back, and refused.
 """
 function _declare_pirate!(@nospecialize(member), @nospecialize(inst), mod::Module, @nospecialize(by),
                           receiver::Symbol, @nospecialize(X))
@@ -353,8 +353,11 @@ function _declare_pirate!(@nospecialize(member), @nospecialize(inst), mod::Modul
     _warn_pirate_membership(_pirate_membership_text(mod, X, member))
     v = log isa Vector ? _strict_log_hit(log, definer) : nothing
     if v !== nothing
+        # the miss is undone as a method's is: the membership taken back (traits §5.13), then refused
         push!(_STRICT_MISSES, (pm, v[1], v[2]))
-        @error sprint(showerror, PirateError(pm, definer, v[1], v[2], true))
+        ccall(:jl_delete_membership, Cvoid, (Any, Any, Any), member, inst, mod)
+        _forget_membership!(X, member, inst)
+        throw(PirateError(pm, definer, v[1], v[2], true))
     end
     return en
 end

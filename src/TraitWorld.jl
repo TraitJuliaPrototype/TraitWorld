@@ -20,7 +20,7 @@ export @trait, @implement, Dynamic, unwrap, Kept, kept_call, isdynamic, like, wi
        detect_dynamic_fallbacks, detect_unused_casts, detect_kept_storage, Callable,
        @enforce_fully_typed, @warn_not_fully_typed, fully_typed, isfullytyped, FullyTypedReport,
        NotFullyTypedError, AbstractTypeError, @enforce_concrete_only, @warn_on_abstract,
-       OwnershipError, @joint_owners, @owner_only, PirateError, verify_main, VerifyReport, add_entrypoints, make_executable, make_library, BuildError,
+       OwnershipError, @joint_owners, @owner_only, delete_membership, PirateError, verify_main, VerifyReport, add_entrypoints, make_executable, make_library, BuildError,
        Compiled, @erasing, erases, check_at_box
 
 # the casts and `keep` (traits §7.6, §7.8): Julia's own, re-exported. A call written with a cast is the
@@ -54,6 +54,7 @@ include("fullytyped.jl")
 include("hints.jl")
 include("strict.jl")
 include("report.jl")
+include("delete.jl")
 include("ahead.jl")
 include("build.jl")
 include("buildbase.jl")
