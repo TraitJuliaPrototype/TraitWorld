@@ -53,7 +53,7 @@ function Base.show(io::IO, r::PirateReport)
     m = r.method
     what = m isa PirateMembership ?
         "the membership of `$(_short(m.member, 40))` in `$(_short(m.trait, 40))`, declared by $(_owner_name(r.definer)), which owns neither the trait nor the type" :
-        "`$(_callform(m.sig))`, defined by $(_owner_name(r.definer)) in $(m.module), which owns neither the function nor a type in it"
+        "`$(_callform(m.sig))`, defined by $(_owner_name(r.definer)) in $(m.module), " * _pirate_why(m, r.definer)
     print(io, "a pirate ended code compiled by facts that only a stakeholder's change or a pirate can end: ", what,
           r.sig === nothing ? "" : ", wins at `$(_callform(r.sig))`",
           ". It ended $(length(r.code)) instance$(length(r.code) == 1 ? "" : "s"): ", _ended_names(r.code),
@@ -62,6 +62,13 @@ function Base.show(io::IO, r::PirateReport)
           "The trait's owner or the type's owner declares the membership, or names the declarer a joint owner (`@joint_owners`)" :
           "Define it where a type it is for is owned, or name the definer a joint owner (`@joint_owners`)",
           "; strict mode (`TraitWorld.strict!()`) refuses such a definition; `TraitWorld.report_pirates!(false)` silences this report.")
+end
+
+# why a method is a pirate's (traits §12.2): another owner's owner-only function, or Julia's piracy
+function _pirate_why(m::Method, @nospecialize(definer))
+    fo = _owner_only_owner(m.sig)
+    fo === nothing || return "which does not own the function: an owner-only function of $(_owner_name(fo)), whose methods are its owner's"
+    return "which owns neither the function nor a type in it"
 end
 
 # the method now selected at an edge's signature, for a load's broken fact

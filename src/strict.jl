@@ -81,7 +81,9 @@ function Base.showerror(io::IO, e::PirateError)
           join((_short(t, 40) for t in (Base.unwrap_unionall(m.sig)::DataType).parameters[2:end]), ", "),
           ")`, defined by ", _owner_name(e.definer), ".\n  It would win at the call `", _callform(e.sig),
           "`, which code compiled by facts makes (in `", _code_name(e.caller), "`).\n  ",
-          _owner_name(e.definer), " owns neither the function nor a type in that signature (a pirate). ",
+          _owner_only_owner(m.sig) === nothing ?
+              "$(_owner_name(e.definer)) owns neither the function nor a type in that signature (a pirate). " :
+              "$(_owner_name(e.definer)) does not own the function, an owner-only function of $(_owner_name(_owner_only_owner(m.sig))) (a pirate). ",
           "Define it where a type it is for is owned, name the definer a joint owner (`@joint_owners`), ",
           "or turn strict mode off (`TraitWorld.strict!(false)`) to follow it as plain Julia does.")
     e.later && print(io, "\n  (found after the definition; the method was deleted again)")
@@ -119,7 +121,12 @@ function _winning_fact(m::Method, @nospecialize(isig), accept)
         caller isa Core.CodeInstance && caller.max_world == typemax(UInt) || return nothing
         _deep(caller) || return nothing                      # outside the deep class: followed (facts §11.2)
         if _facts_code(caller)
-            return CC.is_fact_sig(s) && _would_win(m, isig, s, world) && accept(s) ? caller : nothing
+            CC.is_fact_sig(s) || return nothing
+            _would_win(m, isig, s, world) && accept(s) && return caller
+            # a fact at a signature the new method covers only in part (an owner-only function's call at
+            # an abstract signature, facts §3): it wins where it is selected on that part
+            si = typeintersect(s, isig)
+            return si !== Union{} && si != s && _would_win(m, isig, si, world) && accept(si) ? caller : nothing
         end
         caller in seen && return nothing
         si = typeintersect(s, isig)                          # plain code may call at an abstract signature
