@@ -176,7 +176,9 @@ end
 """
     check_at_box(m::Method; world) -> Vector{BoxFault} or nothing
 
-The method read at the box (D-3): its instance at `box_signature(m)`, inferred by the facts rule, optimized.
+The method read at the box (D-3): its instance at `box_signature(m)`, inferred under the method's policy,
+optimized, and kept in Julia's cache with its edges (an image keeps it; a definition that changes it ends it);
+inferred apart only where the cache keeps no code.
 A fault is a call in it that takes a value at the box (the box, or a value known only by a trait) and finds no
 method (directly, below a call that only throws, or left to run time with no method at the types known), or only
 throws (an undeclared field read at the box). A call left to run time that finds a method when it runs is Julia's
@@ -186,16 +188,20 @@ at a trait or the box cannot be formed.
 function check_at_box(m::Method; world::UInt = Base.get_world_counter())
     sig = box_signature(m)
     sig === nothing && return nothing
+    # the chain below a call that only throws is read by the facts rule, as each callee is compiled
     interp = CC.NativeInterpreter(world; facts = true)
-    # the native interpreter runs in inference's own world (Base's reflection): no package's method ends the
-    # compiler's code it runs
-    r = try
-        Base.code_typed_by_type(sig; interp, optimize = true)
-    catch
-        return nothing
+    src = _box_instance(sig, world)
+    if src === nothing
+        # the native interpreter runs in inference's own world (Base's reflection): no package's method ends the
+        # compiler's code it runs
+        r = try
+            Base.code_typed_by_type(sig; interp, optimize = true)
+        catch
+            return nothing
+        end
+        (length(r) == 1 && r[1][1] isa Core.CodeInfo) || return nothing
+        src = r[1][1]
     end
-    (length(r) == 1 && r[1][1] isa Core.CodeInfo) || return nothing
-    src = r[1][1]
     faults = BoxFault[]
     for (i, st) in enumerate(src.code)
         st isa Expr && st.head === :(=) && (st = st.args[2])
@@ -242,6 +248,42 @@ function check_at_box(m::Method; world::UInt = Base.get_world_counter())
         end
     end
     return faults
+end
+
+# The method's instance at the box (compiler §6.7, D-3): the instance a box's call runs, inferred and optimized by
+# Julia's own inference under the method's policy and cached with its edges, so that an image keeps it as code and a
+# later definition ends it as it ends any code. Run in the world Julia's inference runs in, as the classification
+# was. Its optimized code, or nothing where the cache keeps none, or where a box's call runs an instance at another
+# signature (the attribute's instance at the trait for a method of a trait without the default, compiler C-112):
+# the check then reads the box apart.
+function _box_instance(@nospecialize(sig), world::UInt)
+    mi = try
+        Base.method_instance(sig; world)
+    catch
+        nothing
+    end
+    mi isa Core.MethodInstance || return nothing
+    mi.specTypes == sig || return nothing
+    ci = try
+        Base.invoke_in_typeinf_world(CC.typeinf_ext_toplevel, mi, world, CC.SOURCE_MODE_GET_SOURCE, CC.TRIM_NO)
+    catch
+        nothing
+    end
+    ci isa Core.CodeInstance || return nothing
+    inf = ci.inferred
+    src = inf isa Core.CodeInfo ? copy(inf) : inf isa String ? (try Base._uncompressed_ir(ci, inf) catch; nothing end) : nothing
+    src isa Core.CodeInfo || return nothing
+    if src.slottypes === nothing
+        # the cache keeps no slot types: the arguments' types are the instance's, a varargs tail as its tuple
+        m = mi.def::Method
+        ps = Any[(Base.unwrap_unionall(mi.specTypes)::DataType).parameters...]
+        n = Int(m.nargs)
+        if m.isva
+            ps = Any[ps[1:n-1]..., Tuple{ps[n:end]...}]
+        end
+        src.slottypes = Any[ps[1:min(n, length(ps))]...]
+    end
+    return src
 end
 
 # whether a method is checked at the box: an argument at a trait, or a kept form of `@erasing`; not a trait's own

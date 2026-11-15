@@ -37,17 +37,10 @@ function erases(@nospecialize(X))
     return ccall(:jl_get_default_attribute, Cint, (Any,), u) >= 2      # a set of Julia's own: `Callable`
 end
 
-# The forwarder's box. The forwarder's own signature has matched the argument at the trait, so the box is made by
-# `new`, with no constructor: its field test holds by the argument's declared type, or, where a caller inlines the
-# forwarder, through the membership's entry, which inference records. A kept form reaches a forwarder only where
-# the kept-form method could not take it (a wrapper of a function without a method at a `Callable`'s signature, a
-# member of every `Callable` by its own call method): the constructor decides then, and refuses it.
-# Its result is declared: inferred at the argument's declared type (`@nospecialize`), the constructor's methods for a
-# kept form would leave it `Any`.
-@inline _box(::Type{D}, @nospecialize(x)) where {D<:Dynamic} = (x isa Union{Dynamic, Compiled} ? D(x) : _new_box(D, x))::D
+# A box made by `new`, with no constructor (a box of a subtrait's box, `compiled.jl`): its field test holds by the
+# argument's type, decided where the code is compiled (compiler §4.8). The forwarder makes its box the same way in
+# its own body (`_forwarder_code`).
 @eval @inline _new_box(::Type{D}, @nospecialize(x)) where {D<:Dynamic} = $(Expr(:new, :D, :x))
-# a kept form passes as it is; a plain member is boxed at the trait (a forwarder of several trait arguments)
-@inline _box_plain(::Type{D}, @nospecialize(x)) where {D<:Dynamic} = x isa Union{Dynamic, Compiled} ? x : _new_box(D, x)
 
 # a trait's own method reads its receiver through `_fwd` (lowering §2); no other method does
 _code_names_fwd(src::Core.CodeInfo) = any(_names_fwd, src.code)
