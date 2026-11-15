@@ -110,8 +110,8 @@ function _trait(mod::Module, head, body)
         Any[$(QuoteNode.(supers)...)], $(lib(:OperationDecl))[$(opdecls...)],
         $(lib(:FieldDecl))[$(fielddecls...)], Pair{Symbol,Any}[$(eqs...)], $(QuoteNode(items.attribute)),
         Pair{Symbol,Symbol}[$([:($(QuoteNode(n)) => $(QuoteNode(l))) for (n, l) in items.concrete]...)]))))
-    # the trait's default (traits §4.6): `@default_dynamic` is recorded on the contract, where `@erasing` reads it
-    # to make the forwarders (W-151); the compiler's step 4 is not set for it. `@default_compiled` sets the
+    # the trait's default (traits §4.6): `@default_dynamic` is recorded on the contract, where the expansion hook
+    # reads it to make the forwarders (erasing.jl); the compiler's step 4 is not set for it. `@default_compiled` sets the
     # compiler's bit, read at a trait argument (compiler §6.3)
     items.attribute === :compiled &&
         push!(out.args, :(ccall(:jl_set_default_attribute, Cvoid, (Any, Cint), $name, 1)))
@@ -357,7 +357,10 @@ function _trait_method(trait::Symbol, params::Vector{Symbol}, bounds::Vector{Any
     serve = op.body === nothing ?
         :(throw($(lib(:OperationError))($(op.fname), ($(plainargs...),), $trait))) :
         _subst(op.body, :Self, :(typeof($rname)))
+    # a method `@trait` makes is not forwarded where its trait erases by default (compiler §6.3): a plain member
+    # served by a default runs it as itself
     body = quote
+        $(Expr(:meta, :no_forwarder))
         $fwd = $(lib(:_fwd))($rname, $trait)
         if $fwd isa $(lib(:NoForward))
             $serve

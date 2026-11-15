@@ -1,6 +1,6 @@
 # Values carry, by type (W-151; the review of 2026-11-15, P1 as accepted; open issue 186): the two kept forms, the
-# box `Dynamic{X}` and the wrapper `Compiled` that `compiled_for(x)` returns; a trait's default as generated methods
-# (`@erasing`: the method at the kept forms, a forwarder that boxes a plain member); `convert` into storage typed
+# box `Dynamic{X}` and the wrapper `Compiled` that `compiled_for(x)` returns; a trait's default as methods made where
+# a method is defined (W-160: the method at the kept forms, a forwarder that boxes a plain member); `convert` into storage typed
 # `Dynamic{X}`; the definition-time check as a reading of the method at the box (D-3).
 using Test, TraitWorld
 using TraitWorld.ByType: compiled_for
@@ -33,16 +33,16 @@ cget(c::FC, i::Int) = c.v[i]
 @implement Col{Float64} FC
 
 form(x) = x isa Dynamic ? :box : x isa Compiled ? :wrapper : :plain
-@erasing kind(s::Shape) = form(s)
-@erasing total(s::Shape, k::Int = 2) = k * area(s)
-@erasing scaled(s::Shape; by = 1.0) = by * area(s)
-@erasing typed(s::C) where {C <: Shape} = C
-@erasing pair(a::Shape, b::Shape) = (form(a), form(b))
-@erasing first2(c::Col{T}) where {T} = (form(c), cget(c, 1))
+kind(s::Shape) = form(s)
+total(s::Shape, k::Int = 2) = k * area(s)
+scaled(s::Shape; by = 1.0) = by * area(s)
+typed(s::C) where {C <: Shape} = C
+pair(a::Shape, b::Shape) = (form(a), form(b))
+first2(c::Col{T}) where {T} = (form(c), cget(c, 1))
 bare(c::Col) = form(c)                               # a parametric trait written bare: the box cannot be formed
-@erasing bare2(c::Col) = form(c)
+bare2(c::Col{<:Real}) = form(c)                      # nor with a parameter left open
 plainkind(n::Named) = form(n)                        # a trait without the default
-@erasing apply(f::Callable{Tuple{Float64}, Float64}, x::Float64) = (form(f), f(x))
+apply(f::Callable{Tuple{Float64}, Float64}, x::Float64) = (form(f), f(x))
 struct Scene; items::Vector{Dynamic{Shape}}; end
 struct Holder; s::Dynamic{Shape}; end
 end
@@ -103,11 +103,11 @@ end
             n2(t::T2)::Int
         end
         helper(x) = length(x)
-        @erasing good(t::T2) = n2(t) + 1
-        @erasing spread(t::T2) = size(t)
-        @erasing through(t::T2) = helper(t)
-        @erasing field(t::T2) = t.data
-        @erasing leak(t::T2) = typeof(t)
+        good(t::T2) = n2(t) + 1
+        spread(t::T2) = size(t)
+        through(t::T2) = helper(t)
+        field(t::T2) = t.data
+        leak(t::T2) = typeof(t)
     end
     Core.eval(M, Expr(:toplevel, code.args...))      # each statement expanded after the one before it is evaluated
     ps = check_definitions(M)

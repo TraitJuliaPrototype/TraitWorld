@@ -1,22 +1,27 @@
-# A trait's default as generated methods (W-151, the prototype of P1 as accepted; open issue 186).
+# A trait's default as methods made where a method is defined (W-160; D-1; traits §7, lowering §5,
+# compiler §10.1).
 #
-# For a trait that declares `@default_dynamic` (and `Callable`, whose default is Julia's), a method at the trait
-# is defined at the two kept forms, `Dynamic{<:X}` and `Compiled{<:X}`, and one forwarder takes a plain member
-# and boxes it: `f(t::X, …) = f(Dynamic{X}(t), …)`, a box and a call compiled per member type. Dispatch and the runtime do not change: the
-# kept-form method is more specific than the forwarder, so a box and a wrapper reach the method as they are, and
-# a plain member reaches it boxed. A trait without the default takes a plain member as it is (Julia's rule).
+# For a trait that erases by default (`@default_dynamic`, and `Callable`, whose default is Julia's), one method
+# definition `f(t::X, …)` makes two methods, as a positional default makes a second one: the method as written
+# at the two kept forms, `Union{Dynamic{<:X}, Compiled{<:X}}`, and a forwarder at the signature as written,
+# which takes a plain member and passes `Dynamic{X}(t)` on. The runtime asks the library at each method
+# definition whose signature names a set (the expansion hook, compiler §10.1), before the method is made: whether
+# an argument erases is known only once the signature's types exist. Dispatch and the runtime do not change: the
+# kept-form method is more specific than the forwarder, so a box and a wrapper reach the method as they are, and a
+# plain member reaches it boxed. A trait without the default takes a plain member as it is (Julia's rule).
 #
-# The macro `@erasing` stands for a change in lowering: written at a method definition, it makes the methods
-# that the definition would make by itself, as a positional default makes a second method. It decides by the
-# traits' declarations when the definition is expanded; the runtime's method definition could decide by the
-# evaluated signature instead, with nothing written.
+# The forwarder is Julia's `@nospecialize` method at the trait: compiled once, its argument at the declared type
+# `X`, so the box's field test holds by the declared type and the box is made with no test and no heap of its own.
+# Where a caller that knows the member's type inlines it, the test holds through the membership's entry, which
+# inference records (compiler §4.8). Where the trait's parameters are the method's variables (`X{T}`), the
+# forwarder is compiled per member type (`@specialize`), so that the box's parameters are known.
 
 """
     erases(X) -> Bool
 
-Whether a plain member passed at an argument typed by `X` is boxed by the forwarder `@erasing` makes: `X` is a
-trait that declares `@default_dynamic`, or `Callable` (its default is `Dynamic`), or an intersection with such a
-component.
+Whether a plain member passed at an argument typed by `X` is boxed by the forwarder that the method's definition
+makes: `X` is a trait that declares `@default_dynamic`, or `Callable` (its default is `Dynamic`), or an
+intersection with such a component.
 """
 function erases(@nospecialize(X))
     u = Base.unwrap_unionall(X)
@@ -31,292 +36,235 @@ function erases(@nospecialize(X))
     return ccall(:jl_get_default_attribute, Cint, (Any,), u) >= 2      # a set of Julia's own: `Callable`
 end
 
-# The forwarder's box. The forwarder's own signature has already matched the argument at the trait, so the box is
-# made without the constructor's membership test (a run-time subtype query: some 500 ns for a trait, a method
-# lookup for a `Callable`, E-402): the struct is made directly. A kept form reaches a forwarder only where the
-# kept-form method could not take it (a wrapper of a function without a method at a `Callable`'s signature,
-# a member of every `Callable` by its own call method): the constructor decides then, and refuses it.
+# The forwarder's box. The forwarder's own signature has matched the argument at the trait, so the box is made by
+# `new`, with no constructor: its field test holds by the argument's declared type, or, where a caller inlines the
+# forwarder, through the membership's entry, which inference records. A kept form reaches a forwarder only where
+# the kept-form method could not take it (a wrapper of a function without a method at a `Callable`'s signature, a
+# member of every `Callable` by its own call method): the constructor decides then, and refuses it.
 @inline _box(::Type{D}, @nospecialize(x)) where {D<:Dynamic} = x isa Union{Dynamic, Compiled} ? D(x) : _new_box(D, x)
-# the runtime's constructor of a struct from its fields, which tests no field's type (`new` would test the member
-# against the trait when it runs: a membership query, some 90 ns on this build, E-402)
-@inline _new_box(::Type{D}, @nospecialize(x)) where {D<:Dynamic} = ccall(:jl_new_struct, Any, (Any, Any...), D, x)::D
+@eval @inline _new_box(::Type{D}, @nospecialize(x)) where {D<:Dynamic} = $(Expr(:new, :D, :x))
 # a kept form passes as it is; a plain member is boxed at the trait (a forwarder of several trait arguments)
-_box_plain(@nospecialize(X::Type), @nospecialize(x)) = x isa Union{Dynamic, Compiled} ? x : _new_box(Dynamic{X}, x)
+@inline _box_plain(::Type{D}, @nospecialize(x)) where {D<:Dynamic} = x isa Union{Dynamic, Compiled} ? x : _new_box(D, x)
+
+# a trait's own method reads its receiver through `_fwd` (lowering §2); no other method does
+_code_names_fwd(src::Core.CodeInfo) = any(_names_fwd, src.code)
+_names_fwd(@nospecialize(a)) = (a isa GlobalRef && a.mod === TraitWorld && a.name === :_fwd) ||
+                               (a isa Expr && any(_names_fwd, a.args))
+
+"whether `m` is a forwarder that a method's definition made"
+function _is_forwarder(m::Method)
+    src = try Base.uncompressed_ast(m) catch; return false end
+    return _has_forwarder_meta(src)
+end
+_has_forwarder_meta(src::Core.CodeInfo) = _has_meta(src, :erasing_forwarder)
+function _has_meta(src::Core.CodeInfo, name::Symbol)
+    for st in src.code
+        Meta.isexpr(st, :meta) && length(st.args) == 1 && st.args[1] === name && return true
+    end
+    return false
+end
+
+# The trait a declared argument type erases at, where the box can be formed there: every parameter given (`X`,
+# `X{A, B}`, `X{T}` with `T` the method's variable, `All{X{A}, Y}`); a trait written bare or with a `<:`
+# parameter (`Column`, `Column{<:Real}`) leaves the instance open, and the argument takes a plain member as it is.
+function _erasing_trait(@nospecialize(T))
+    T isa DataType || return nothing
+    erases(T) || return nothing
+    return T
+end
+
+_kept_forms(@nospecialize(X)) = Union{Dynamic{<:X}, Compiled{<:X}}
+
+# `t` with the variable `v` replaced by `x`
+function _subst(@nospecialize(t), v::TypeVar, @nospecialize(x))
+    t === v && return x
+    (t isa Type || t isa TypeVar) && any(w -> w === v, _free_vars(t)) || return t
+    return (UnionAll(v, t)){x}
+end
+function _subst_vararg(@nospecialize(t), v::TypeVar, @nospecialize(x))
+    t isa Core.TypeofVararg || return _subst(t, v, x)
+    T = isdefined(t, :T) ? _subst(t.T, v, x) : Any
+    return isdefined(t, :N) ? Vararg{T, t.N isa TypeVar ? _subst(t.N, v, x) : t.N} : Vararg{T}
+end
 
 """
-    @erasing function f(t::X, …) … end
-    @erasing begin … end
+    _expand_definition(argdata, code, mod) -> nothing or svec of (argdata, code) pairs
 
-The trait's default at a method (W-151): for each argument typed by a trait that erases by default (`erases`),
-the method is defined at the two kept forms, `Dynamic{<:X}` and `Compiled{<:X}`, and one forwarder takes a plain
-member and passes `Dynamic{X}(t)` on (per positional arity; compiled per member type, a box and a call). In the body the argument is the kept form, not the object: `typeof(t)` is
-the box's or the wrapper's type. An argument typed by a `where` variable bounded by such a trait (`t::C` with
-`C <: X`) is treated so, with `C` the kept form's type. A trait whose parameters the signature leaves open
-(`t::Column`, `t::Column{<:Real}`) cannot be boxed there: the argument takes a plain member as it is. Applied to a
-block, each method definition in it.
+The expansion hook (compiler §10.1): for a definition whose signature has an argument at a trait that erases by
+default, the method as written at the kept forms, then the forwarder at the signature as written. `nothing`
+otherwise, and for a forwarder's own definition.
 """
-macro erasing(ex)
-    return esc(_erasing(__module__, __source__, ex))
-end
-
-const _LIB = @__MODULE__
-_g(s::Symbol) = GlobalRef(_LIB, s)
-
-function _erasing(mod::Module, src::LineNumberNode, @nospecialize(ex))
-    if Meta.isexpr(ex, :block) || Meta.isexpr(ex, :toplevel)
-        out = Any[]
-        for a in ex.args
-            a isa LineNumberNode && (src = a)
-            push!(out, _erasing(mod, src, a))
+function _expand_definition(argdata::Core.SimpleVector, code::Core.CodeInfo, mod::Module)
+    atypes = argdata[1]::Core.SimpleVector
+    tvars = argdata[2]::Core.SimpleVector
+    loc = argdata[3]
+    _has_forwarder_meta(code) && return nothing
+    _has_meta(code, :no_forwarder) && return nothing   # a method `@trait` makes (a default, lowering §2)
+    _code_names_fwd(code) && return nothing             # likewise, a trait's method of an image made before the meta
+    n = length(atypes)
+    pos = Int[]                       # the erasing arguments
+    traits = Any[]                    # the trait each erases at
+    vias = Any[]                      # the `where` variable that types it, or nothing
+    for i in 2:n
+        T = atypes[i]
+        T isa Core.TypeofVararg && continue
+        via = nothing
+        if T isa TypeVar && any(v -> v === T, tvars)
+            via = T
+            T = T.ub
         end
-        return Expr(ex.head, out...)
+        X = _erasing_trait(T)
+        X === nothing && continue
+        _box_formable(X, i, via, atypes) || continue
+        push!(pos, i); push!(traits, X); push!(vias, via)
     end
-    if Meta.isexpr(ex, :macrocall)
-        # a docstring: the definition it documents
-        if ex.args[1] === GlobalRef(Core, Symbol("@doc")) || ex.args[1] === Symbol("@doc")
-            out = copy(ex)
-            out.args[end] = _erasing(mod, src, ex.args[end])
-            return out
+    isempty(pos) && return nothing
+    # the method as written, at the kept forms: an argument's type, or a `where` variable's bound
+    katypes = Any[atypes...]
+    ktvars = Any[tvars...]
+    for (k, i) in enumerate(pos)
+        v = vias[k]
+        if v === nothing
+            katypes[i] = _kept_forms(traits[k])
+        else
+            v = v::TypeVar
+            nv = TypeVar(v.name, v.lb, _kept_forms(traits[k]))
+            for j in 1:n
+                katypes[j] = _subst_vararg(katypes[j], v, nv)
+            end
+            for j in eachindex(ktvars)
+                w = ktvars[j]::TypeVar
+                if w === v
+                    ktvars[j] = nv
+                elseif Base.has_free_typevars(w.ub) || Base.has_free_typevars(w.lb)
+                    ktvars[j] = TypeVar(w.name, _subst(w.lb, v, nv), _subst(w.ub, v, nv))
+                end
+            end
         end
-        # another macro at the definition (`@unbounded`, `@inline`, `Base.@nospecializeinfer`): its expansion
-        ex2 = macroexpand(mod, ex; recursive = false)
-        ex2 isa Expr && _split_def(ex2) !== nothing && return _erasing(mod, src, ex2)
-        return ex
     end
-    d = _split_def(ex)
-    d === nothing && return ex
-    return _erasing_def(mod, src, ex, d)
+    kept = Core.svec(Core.svec(katypes...), Core.svec(ktvars...), loc)
+    fwd = _forwarder_code(atypes, tvars, loc, code, pos, traits, mod)
+    fwd === nothing && return nothing
+    return Core.svec(Core.svec(kept, code), Core.svec(argdata, fwd))
 end
 
-# f(args…; kws…)::R where {W…} → its parts, or nothing where `ex` is no method definition
-function _split_def(@nospecialize(ex))
-    (Meta.isexpr(ex, :function) || Meta.isexpr(ex, :(=))) && length(ex.args) == 2 || return nothing
-    sig = ex.args[1]
-    wheres = Any[]
-    while Meta.isexpr(sig, :where)
-        append!(wheres, sig.args[2:end])            # the outer variables first
-        sig = sig.args[1]
+# Whether the box `Dynamic{X}` can be formed at argument `i` once a call's types are known. A variable of `X` is
+# bound by dispatch: by another argument, or by the member's own membership (`X{T}` at a member of `X{Int}`); not
+# for a component `Callable{A, S}`, which a function's type does not fix, so its variables must be bound by another
+# argument. A `where` variable that types the argument must occur nowhere else (a struct's constructor
+# `T{F}(f::F)`): the call fixes it to the member's type, which the box is not.
+function _box_formable(@nospecialize(X), i::Int, @nospecialize(via), atypes)
+    others = TypeVar[]
+    for j in 2:length(atypes)
+        j == i && continue
+        _collect_vars_deep!(others, atypes[j])
     end
-    rtype = nothing
-    if Meta.isexpr(sig, :(::)) && length(sig.args) == 2
-        rtype = sig.args[2]
-        sig = sig.args[1]
+    _collect_vars_deep!(others, atypes[1])
+    via isa TypeVar && any(v -> v === via, others) && return false
+    for C in _components(X)      # classify.jl
+        _is_callable(C) || continue
+        for v in _free_vars(C)
+            any(w -> w === v, others) || return false
+        end
     end
-    Meta.isexpr(sig, :call) || return nothing
-    return (call = sig, rtype = rtype, wheres = wheres)
+    via isa TypeVar && any(v -> v === via, _free_vars(X)) && return false
+    return true
+end
+_is_callable(@nospecialize(C)) = (u = Base.unwrap_unionall(C); u isa DataType && u.name === Base.unwrap_unionall(Core.Callable).name)
+# the variables of `t`, with those their bounds name
+function _collect_vars_deep!(vs, @nospecialize(t))
+    for v in _free_vars(t)
+        any(w -> w === v, vs) && continue
+        push!(vs, v)
+        _collect_vars_deep!(vs, v.ub); _collect_vars_deep!(vs, v.lb)
+    end
+    return vs
 end
 
-# one positional argument as written
-struct _Arg
-    name::Any            # a Symbol; a gensym where the argument is unnamed
-    named::Bool
-    type::Any            # the type expression, or nothing
-    default::Any         # the default's expression, or nothing
-    hasdefault::Bool
-    vararg::Bool
-    nospec::Bool
+function _free_vars(@nospecialize(t))
+    vs = TypeVar[]
+    _collect_vars!(vs, t)
+    return vs
+end
+function _collect_vars!(vs, @nospecialize(t))
+    if t isa TypeVar
+        any(v -> v === t, vs) || push!(vs, t)
+    elseif t isa UnionAll
+        _collect_vars!(vs, t.var.lb); _collect_vars!(vs, t.var.ub); _collect_vars!(vs, t.body)
+    elseif t isa Union
+        _collect_vars!(vs, t.a); _collect_vars!(vs, t.b)
+    elseif t isa DataType
+        for p in t.parameters
+            _collect_vars!(vs, p)
+        end
+    elseif t isa Core.TypeofVararg
+        isdefined(t, :T) && _collect_vars!(vs, t.T)
+        isdefined(t, :N) && _collect_vars!(vs, t.N)
+    end
+    return vs
 end
 
-function _parse_arg(@nospecialize(a))
-    nospec = false
-    if Meta.isexpr(a, :macrocall) && (a.args[1] === Symbol("@nospecialize") || a.args[1] == GlobalRef(Base, Symbol("@nospecialize")))
-        nospec = true
-        a = a.args[end]
+# The forwarder's code: `return #self#(box(a2), a3, …)`, made by lowering a
+# definition of the same arguments with the method's variables (so the box's type reads them as static
+# parameters, in the method's order) and taking its code. The forwarder's line is the definition's.
+function _forwarder_code(atypes, tvars, loc, code::Core.CodeInfo, pos, traits, mod::Module)
+    n = length(atypes)
+    names = Symbol[]
+    for i in 2:n
+        s = i <= length(code.slotnames) ? code.slotnames[i] : Symbol("#unused#")
+        nm = string(s)
+        push!(names, (isempty(nm) || startswith(nm, "#") || s in names) ? Symbol("#a", i) : s)
     end
-    default, hasdefault, vararg = nothing, false, false
-    if Meta.isexpr(a, :kw)
-        default, hasdefault = a.args[2], true
-        a = a.args[1]
+    vnames = Symbol[Symbol("#sp", k) for k in 1:length(tvars)]
+    single = length(pos) == 1
+    fargs, cargs = Any[], Any[]
+    for i in 2:n
+        nm = names[i - 1]
+        if atypes[i] isa Core.TypeofVararg
+            push!(fargs, Expr(:..., nm)); push!(cargs, Expr(:..., nm))
+            continue
+        end
+        k = findfirst(==(i), pos)
+        if k === nothing
+            push!(fargs, nm); push!(cargs, nm)
+        else
+            D = Dynamic{traits[k]}
+            vs = TypeVar[v for v in tvars if any(w -> w === v, _free_vars(D))]
+            # compiled once where the box's trait is fixed; per member type where the call's types fix it
+            push!(fargs, Expr(:macrocall, GlobalRef(Base, isempty(vs) ? Symbol("@nospecialize") : Symbol("@specialize")), loc, nm))
+            Dexpr = if isempty(vs)
+                QuoteNode(D)
+            else
+                UA = D
+                for v in reverse(vs)
+                    UA = UnionAll(v, UA)
+                end
+                Expr(:call, GlobalRef(Core, :apply_type), QuoteNode(UA),
+                     Any[vnames[findfirst(w -> w === v, collect(tvars))] for v in vs]...)
+            end
+            push!(cargs, Expr(:call, GlobalRef(TraitWorld, single ? :_box : :_box_plain), Dexpr, nm))
+        end
     end
-    if Meta.isexpr(a, :...)
-        vararg = true
-        a = a.args[1]
-    end
-    a isa Symbol && return _Arg(a, true, nothing, default, hasdefault, vararg, nospec)
-    if Meta.isexpr(a, :(::)) && length(a.args) == 2
-        return _Arg(a.args[1], true, a.args[2], default, hasdefault, vararg, nospec)
-    elseif Meta.isexpr(a, :(::)) && length(a.args) == 1
-        return _Arg(gensym(:arg), false, a.args[1], default, hasdefault, vararg, nospec)
+    body = Expr(:block, loc, Expr(:meta, :erasing_forwarder), Expr(:meta, :bounded, false),
+                Expr(:return, Expr(:call, Symbol("#self#"), cargs...)))
+    sig = Expr(:call, Symbol("#forwarder#"), fargs...)
+    isempty(vnames) || (sig = Expr(:where, sig, vnames...))
+    lowered = Meta.lower(mod, Expr(:function, sig, body))
+    lowered isa Expr && lowered.head === :thunk || return nothing
+    for st in (lowered.args[1]::Core.CodeInfo).code
+        if Meta.isexpr(st, :method) && length(st.args) == 3 && st.args[3] isa Core.CodeInfo
+            return st.args[3]::Core.CodeInfo
+        end
     end
     return nothing
 end
 
-_where_name(@nospecialize(w)) = w isa Symbol ? w : Meta.isexpr(w, :<:) || Meta.isexpr(w, :>:) ? w.args[1] :
-    Meta.isexpr(w, :comparison) ? w.args[3] : w
-_where_bound(@nospecialize(w)) = Meta.isexpr(w, :<:) ? w.args[2] : Meta.isexpr(w, :comparison) ? w.args[5] : nothing
+"""
+    @erasing def
 
-# the value a type expression's head names in `mod`, where it is a name or a module path; else nothing
-function _head_value(mod::Module, @nospecialize(h), wnames)
-    (h isa Symbol && !(h in wnames)) || (Meta.isexpr(h, :.) && h.args[1] isa Symbol && !(h.args[1] in wnames)) ||
-        h isa GlobalRef || return nothing
-    try
-        return Core.eval(mod, h)
-    catch
-        return nothing
-    end
-end
-
-# The trait an argument's type names, as the box's type parameter, where it erases by default and the box can
-# be formed there: `(X, via)` with `via` the `where` variable that types the argument, or nothing.
-function _erasing_trait(mod::Module, @nospecialize(T), wheres::Vector{Any})
-    wnames = Any[_where_name(w) for w in wheres]
-    via = nothing
-    if T isa Symbol && T in wnames
-        via = T
-        T = _where_bound(wheres[findfirst(==(T), wnames)])
-        T === nothing && return nothing
-    end
-    _box_formable(mod, T, wnames) || return nothing
-    return (T, via)
-end
-
-# whether `T` names a trait (or an intersection) that erases, with every parameter given (`X`, `X{A, B}`,
-# `All{X{A}, Y}`): a parameter `<: B` or a parametric trait written bare leaves the instance open
-function _box_formable(mod::Module, @nospecialize(T), wnames)
-    h = Meta.isexpr(T, :curly) ? T.args[1] : T
-    v = _head_value(mod, h, wnames)
-    v isa Type || return false
-    if v === Core.All
-        Meta.isexpr(T, :curly) || return false
-        comps = T.args[2:end]
-        any(c -> _box_formable(mod, c, wnames), comps) || return false
-        return all(c -> _params_given(mod, c, wnames), comps)
-    end
-    erases(v) || return false
-    return _params_given(mod, T, wnames)
-end
-function _params_given(mod::Module, @nospecialize(T), wnames)
-    h = Meta.isexpr(T, :curly) ? T.args[1] : T
-    v = _head_value(mod, h, wnames)
-    v isa Type || return false
-    n = v isa UnionAll ? length(Base.unwrap_unionall(v).parameters) : 0
-    given = Meta.isexpr(T, :curly) ? T.args[2:end] : Any[]
-    length(given) == n || return false
-    return !any(p -> Meta.isexpr(p, :<:) || Meta.isexpr(p, :>:), given)
-end
-
-_kept_forms(@nospecialize(X)) = Expr(:curly, GlobalRef(Core, :Union),
-    Expr(:curly, _g(:Dynamic), Expr(:<:, X)), Expr(:curly, _g(:Compiled), Expr(:<:, X)))
-
-_mentions_any(@nospecialize(ex), names) = any(n -> _mentions(ex, n), names)
-
-function _erasing_def(mod::Module, src::LineNumberNode, @nospecialize(ex), d)
-    callee = d.call.args[1]
-    rest = d.call.args[2:end]
-    params = filter(a -> Meta.isexpr(a, :parameters), rest)
-    pos = filter(a -> !Meta.isexpr(a, :parameters), rest)
-    args = _Arg[]
-    for a in pos
-        p = _parse_arg(a)
-        p === nothing && return ex                       # a form this macro does not read: unchanged
-        push!(args, p)
-    end
-    erasing = Any[]                                      # per argument: (X, via) or nothing
-    for a in args
-        push!(erasing, (a.type === nothing || a.vararg) ? nothing : _erasing_trait(mod, a.type, d.wheres))
-    end
-    all(isnothing, erasing) && return ex
-    # the method at the kept forms: an argument's type, or the bound of the `where` variable that types it
-    wheres = copy(d.wheres)
-    newpos = Any[]
-    for (i, a) in enumerate(pos)
-        e = erasing[i]
-        if e === nothing || e[2] !== nothing
-            push!(newpos, a)
-        else
-            push!(newpos, _retype_arg(a, _kept_forms(e[1])))
-        end
-    end
-    for e in erasing
-        (e === nothing || e[2] === nothing) && continue
-        k = findfirst(w -> _where_name(w) === e[2], wheres)
-        wheres[k] = Expr(:<:, e[2], _kept_forms(e[1]))
-    end
-    kept = _rebuild(ex, Expr(:call, callee, params..., newpos...), d.rtype, wheres)
-    # the forwarder, one per positional arity that holds an erasing argument
-    fwds = Any[]
-    fname = callee
-    fcallee = callee
-    if Meta.isexpr(callee, :(::)) && length(callee.args) == 1          # `(::Type{T})(…)`: named for the call
-        fname = gensym(:self)
-        fcallee = Expr(:(::), fname, callee.args[1])
-    elseif Meta.isexpr(callee, :(::))
-        fname = callee.args[1]
-    end
-    nreq = count(a -> !a.hasdefault && !a.vararg, args)
-    hasva = !isempty(args) && args[end].vararg
-    nfix = hasva ? length(args) - 1 : length(args)
-    kws = isempty(params) ? nothing : gensym(:kws)
-    nerase = count(!isnothing, erasing)
-    for n in nreq:nfix
-        idx = Int[i for i in 1:n]
-        hasva && n == nfix && push!(idx, length(args))
-        any(i -> erasing[i] !== nothing, idx) || continue
-        fargs, cargs, types = Any[], Any[], Any[]
-        for i in idx
-            a = args[i]
-            nm = a.name
-            ty = a.type
-            ty === nothing || push!(types, ty)
-            fa = ty === nothing ? nm : Expr(:(::), nm, ty)
-            if a.vararg
-                push!(fargs, Expr(:..., fa)); push!(cargs, Expr(:..., nm))
-            elseif erasing[i] !== nothing
-                # compiled per member type, a box and a call: on this build `@nospecialize` at a trait argument takes
-                # the attribute's run-time path at every call (91 ns, E-402); `@specialize` keeps a set's default bit
-                # (`Callable`'s, Julia's own) from compiling it once. The kept-form method is compiled once
-                X = erasing[i][1]
-                push!(fargs, Expr(:macrocall, GlobalRef(Base, Symbol("@specialize")), src, fa))
-                push!(cargs, nerase == 1 ? Expr(:call, _g(:_box), Expr(:curly, _g(:Dynamic), X), nm) :
-                                           Expr(:call, _g(:_box_plain), X, nm))
-            else
-                push!(fargs, fa); push!(cargs, nm)
-            end
-        end
-        fsig = Expr(:call, fcallee, (kws === nothing ? () : (Expr(:parameters, Expr(:..., kws)),))..., fargs...)
-        fcall = Expr(:call, fname, (kws === nothing ? () : (Expr(:parameters, Expr(:..., kws)),))..., cargs...)
-        # the `where` variables this arity's types name, with the variables their bounds name
-        used = Any[]
-        for w in reverse(d.wheres)
-            nm = _where_name(w)
-            if _mentions_any(Expr(:block, types...), (nm,)) || any(u -> _mentions(u, nm), used)
-                pushfirst!(used, w)
-            end
-        end
-        body = Expr(:block, src, Expr(:meta, :bounded, false), Expr(:meta, :erasing_forwarder), fcall)
-        sig = isempty(used) ? fsig : Expr(:where, fsig, used...)
-        push!(fwds, Expr(:function, sig, body))
-    end
-    # the method at the kept forms first: a definition that waits for this name (a `bounded` method that calls it) is
-    # read again with it in place
-    return Expr(:block, src, Expr(:macrocall, GlobalRef(Core, Symbol("@__doc__")), src, kept), fwds..., nothing)
-end
-
-# a positional argument as written, with its type replaced
-function _retype_arg(@nospecialize(a), @nospecialize(T))
-    if Meta.isexpr(a, :macrocall)
-        b = copy(a); b.args[end] = _retype_arg(a.args[end], T); return b
-    elseif Meta.isexpr(a, :kw)
-        return Expr(:kw, _retype_arg(a.args[1], T), a.args[2])
-    elseif Meta.isexpr(a, :(::)) && length(a.args) == 2
-        return Expr(:(::), a.args[1], T)
-    elseif Meta.isexpr(a, :(::))
-        return Expr(:(::), T)
-    end
-    return a
-end
-
-function _rebuild(@nospecialize(ex), call::Expr, @nospecialize(rtype), wheres::Vector{Any})
-    sig = rtype === nothing ? call : Expr(:(::), call, rtype)
-    isempty(wheres) || (sig = Expr(:where, sig, wheres...))
-    return Expr(ex.head, sig, ex.args[2])
-end
-
-"whether `m` is a forwarder `@erasing` made"
-function _is_forwarder(m::Method)
-    src = try Base.uncompressed_ast(m) catch; return false end
-    for st in src.code
-        Meta.isexpr(st, :meta) && length(st.args) == 1 && st.args[1] === :erasing_forwarder && return true
-    end
-    return false
+Nothing to write: a method at a trait that erases by default makes its forwarder where it is defined. Kept as the
+definition itself, for code written for the prototype (W-151); it leaves with the attribute's machinery.
+"""
+macro erasing(ex)
+    return esc(ex)
 end

@@ -5,37 +5,42 @@ using TraitWorld, Test
 
 module Models                                # the trait's package
 using TraitWorld
-@trait Model begin
-    @default_dynamic
+@trait Model begin                           # no default: the attribute's casts and `keep` decide
     rhs(m::Model, u::Float64)::Float64
 end
 kind(m::Model) = keep(m) isa Dynamic ? :dynamic : :compiled
 solve(m::Model, u0::Float64) = rhs(m, u0) + u0
-# the trait's default as generated methods (W-151): the method at the kept forms, a forwarder that boxes
-@erasing form(m::Model) = m isa Dynamic ? :box : m isa Compiled ? :wrapper : :plain
-@erasing esolve(m::Model, u0::Float64) = rhs(m, u0) + u0
+@trait EModel begin                          # erases by default: a method at it makes its forwarder
+    @default_dynamic
+    erate(m::EModel, u::Float64)::Float64
 end
-using .Models: Model, rhs, solve
+form(m::EModel) = m isa Dynamic ? :box : m isa Compiled ? :wrapper : :plain
+esolve(m::EModel, u0::Float64) = erate(m, u0) + u0
+end
+using .Models: Model, rhs, solve, EModel, erate
 
 module UserModels                            # a user's members
 using TraitWorld
-import ..Model, ..rhs
+import ..Model, ..rhs, ..EModel, ..erate
 struct Decay; k::Float64; end
 rhs(d::Decay, u::Float64) = -d.k * u
 @implement Model Decay
+erate(d::Decay, u::Float64) = -d.k * u
+@implement EModel Decay
 struct Growth; k::Float64; end
 rhs(g::Growth, u::Float64) = g.k * u
 @implement Model Growth
+erate(g::Growth, u::Float64) = g.k * u
+@implement EModel Growth
 end
 using .UserModels: Decay, Growth
 
 @testset "the trait's default" begin
-    # `@default_dynamic` makes the forwarders of `@erasing` (W-151): a plain member is boxed, a box and a wrapper
-    # pass as they are; it no longer sets the compiler's step 4, so a method written without `@erasing` takes a
-    # plain member as it is
+    # `@default_dynamic`: a method at the trait makes its forwarder where it is defined (W-160): a plain member is
+    # boxed, a box and a wrapper pass as they are. A trait without the default takes a plain member as it is
     @test Models.form(Decay(1.0)) === :box && Models.form(Growth(1.0)) === :box
     @test Models.form(TraitWorld.ByType.compiled_for(Decay(1.0))) === :wrapper
-    @test Models.form(Dynamic{Model}(Growth(2.0))) === :box
+    @test Models.form(Dynamic{EModel}(Growth(2.0))) === :box
     @test Models.esolve(Decay(0.5), 2.0) == 1.0 && Models.esolve(TraitWorld.ByType.compiled_for(Growth(0.5)), 2.0) == 3.0
     @test Models.kind(Decay(1.0)) === :compiled
     @test solve(Decay(0.5), 2.0) == 1.0 && solve(Growth(0.5), 2.0) == 3.0
@@ -55,10 +60,11 @@ end
     store(m::Model) = (k = keep(m); Prob{typeof(k)}(k))
     p = store(with_dynamic(Decay(1.0)))                   # the cast: compiled once
     @test p isa Prob{Dynamic{Model}} && unwrap(p.m) === Decay(1.0)
-    # the same struct from a method at the kept forms (W-151): the value carries its form
-    @erasing kstore(m::Model) = Prob{typeof(m)}(m)
-    @test kstore(Decay(1.0)) isa Prob{Dynamic{Model}}
-    @test kstore(TraitWorld.ByType.compiled_for(Decay(1.0))) isa Prob{Compiled{Decay}}
+    # the same struct from a method at a trait that erases by default (W-160): the value carries its form
+    struct EProb{M <: EModel}; m::M; end
+    kstore(m::EModel) = EProb{typeof(m)}(m)
+    @test kstore(Decay(1.0)) isa EProb{Dynamic{EModel}}
+    @test kstore(TraitWorld.ByType.compiled_for(Decay(1.0))) isa EProb{Compiled{Decay}}
     q = store(compiled_for(Decay(1.0)))
     @test q isa Prob{Decay}
 end

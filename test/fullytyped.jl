@@ -66,9 +66,9 @@ using TraitWorld
 end
 struct Kept{K}; k::K; end
 # the trait's default as generated methods (W-151): a plain member is boxed by the forwarder
-@erasing inner(m::Model, u::Float64) = Kept(m)
-@erasing outer(m::Model, u::Float64) = inner(m, u)            # passes the kept form on
-@erasing withkw(m::Model, u::Float64; scale = 1.0) = Kept(m)  # a keyword method: its forwarder passes the keywords on
+inner(m::Model, u::Float64) = Kept(m)
+outer(m::Model, u::Float64) = inner(m, u)            # passes the kept form on
+withkw(m::Model, u::Float64; scale = 1.0) = Kept(m)  # a keyword method: its forwarder passes the keywords on
 end
 struct Decay; k::Float64; end
 OnceLib.rate(d::Decay, u::Float64) = -d.k * u

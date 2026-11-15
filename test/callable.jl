@@ -18,9 +18,9 @@ first_of(f::Callable{Tuple{Float64}, Float64}, v::Vector{Float64}) = f(v[1])
     # the result checked on return
     @test_throws TypeError first_of(x -> "s", [1.0])
     @test first_of(x -> 2x, [1.0]) == 2.0
-    # Callable's default is Dynamic, but not for a function Julia defines
+    # Callable erases by default, a function Julia defines included: a plain function is boxed by the forwarder
     @test kind(x -> 2x) === :dynamic
-    @test kind(abs2) === :compiled
+    @test kind(abs2) === :dynamic
     # Dynamic{Callable{A, S}}: a member of Callable{A, S}, its call checked at both ends
     d = Dynamic{Callable{Tuple{Float64}, Float64}}(x -> 3x)
     @test d isa Callable{Tuple{Float64}, Float64}

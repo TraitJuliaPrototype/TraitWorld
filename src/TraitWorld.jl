@@ -86,6 +86,7 @@ export HasLength, Iterable, Indexable, MutableIndexable, Resizable, Keyed, Solva
 precompile(_strict_at_load!, (Base.PkgId,))
 precompile(_member_hook, (Any, Any))
 precompile(_definition_hook, (Method, Bool))
+precompile(_expand_definition, (Core.SimpleVector, Core.CodeInfo, Module))
 precompile(_image_methods_hook, (Vector{Any}, String))
 precompile(_module_end_hook, (Module,))
 precompile(_deletion_hook, (Method,))
@@ -102,6 +103,9 @@ function __init__()
     ccall(:jl_set_member_hook, Cvoid, (Any,), _member_hook)
     # the definition and module-end hooks (compiler §10.1): the override rule, a missing `@implement`
     ccall(:jl_set_method_definition_hook, Cvoid, (Any,), _definition_hook)
+    # the expansion hook (compiler §10.1; lowering §5): a method at a trait that erases by default is defined at
+    # the kept forms, with a forwarder that boxes a plain member
+    ccall(:jl_set_method_expansion_hook, Cvoid, (Any,), _expand_definition)
     ccall(:jl_set_module_end_hook, Cvoid, (Any,), _module_end_hook)
     ccall(:jl_set_image_methods_hook, Cvoid, (Any,), _image_methods_hook)
     _ENTRY_CURSOR[] = 0                  # the image's records are made again from the runtime's list
