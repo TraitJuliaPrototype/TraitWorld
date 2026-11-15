@@ -135,13 +135,15 @@ function _trait_hints!(lines, @nospecialize(f), args, world::UInt)
     return lines
 end
 
-# a function that is not a member of the Callable{A, S} a method takes: its methods (lowering §9)
+# a function with no method at the signature of the Callable{A, S} a method takes: its methods (traits §9; lowering §9)
 function _callable_hint!(lines, @nospecialize(d), @nospecialize(v))
     dd = Base.unwrap_unionall(d isa TypeVar ? d.ub : d)
     (dd isa DataType && dd.name === Base.unwrap_unionall(Core.Callable).name) || return
-    v isa (d isa TypeVar ? d.ub : d) && return
     A = dd.parameters[1]
-    A isa Type || return
+    (A isa DataType && !Base.has_free_typevars(A)) || return
+    v isa Dynamic && (v = getfield(v, :object))
+    v isa Compiled && (v = getfield(v, :object))
+    hasmethod(v, A) && return
     ms = try collect(methods(v)) catch; Method[] end
     sigs = String[]
     for m in first(ms, 3)
@@ -150,6 +152,6 @@ function _callable_hint!(lines, @nospecialize(d), @nospecialize(v))
         push!(sigs, "(" * join(("::" * _tstr(t) for t in sig.parameters[2:end]), ", ") * ")")
     end
     name = v isa Function ? string(nameof(v)) : _tstr(typeof(v))
-    push!(lines, "`$name` is not a `$(replace(_tstr(d), "Core.Callable" => "Callable"))`: none of its methods takes `$(_tstr(A))`" *
+    push!(lines, "`$name` is given at `$(replace(_tstr(d), "Core.Callable" => "Callable"))`, and none of its methods takes `$(_tstr(A))`" *
                  (isempty(sigs) ? "" : "; its methods take " * join(sigs, ", ") * (length(ms) > 3 ? ", …" : "")))
 end

@@ -1,10 +1,14 @@
-# Callable (traits §9; lowering §9; W-113): membership by a function's own methods, dispatch by
-# signature, the result checked on return, `Dynamic{Callable{A, S}}`'s call, the default `Dynamic`.
+# Callable (traits §9; lowering §9; D-2): every function is a member of every Callable{A, S}; the signature is
+# checked where the function is boxed, the result on every call of the box; neither A nor S selects a method;
+# `Dynamic{Callable{A, S}}`'s call; the default `Dynamic`.
 using TraitWorld, Test
 
 colmap(f::Callable{Tuple{Float64}, Float64}, v::Vector{Float64}) = [f(x) for x in v]
-apply(f::Callable{Tuple{Int}, Int}, x) = "an integer map"
-apply(f::Callable{Tuple{String}, <:AbstractString}, x) = "a string map"
+# a method that branches on a function's signature tests it in its body (traits §9)
+apply(f::Callable, x) = hasmethod(f, Tuple{Int}) ? "an integer map" : "a string map"
+# two methods that differ only in A tie for every function
+tie(f::Callable{Tuple{Int}, Int}) = 1
+tie(f::Callable{Tuple{String}, String}) = 2
 kind(f::Callable{Tuple{Float64}, Float64}) = keep(f) isa Dynamic ? :dynamic : :compiled
 # the check is at a call through the value as declared; a closure that captures it (a comprehension)
 # knows it by its own type, as `map` does
@@ -14,7 +18,9 @@ first_of(f::Callable{Tuple{Float64}, Float64}, v::Vector{Float64}) = f(v[1])
     @test colmap(x -> 2x, [1.0, 2.0]) == [2.0, 4.0]
     @test apply(abs, 1) == "an integer map"
     @test apply(uppercase, "a") == "a string map"
-    @test abs isa Callable{Tuple{Int}, Int} && !(uppercase isa Callable{Tuple{Int}, Int})
+    @test abs isa Callable{Tuple{Int}, Int} && uppercase isa Callable{Tuple{Int}, Int}   # every function
+    @test_throws MethodError tie(abs)                       # ambiguous: dispatch does not pick by signature
+    @test_throws MethodError colmap(uppercase, [1.0])       # no method at A: refused where it is boxed
     # the result checked on return
     @test_throws TypeError first_of(x -> "s", [1.0])
     @test first_of(x -> 2x, [1.0]) == 2.0

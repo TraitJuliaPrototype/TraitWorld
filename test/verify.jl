@@ -27,8 +27,11 @@ sloppy(v::Vector{Any}) = sum(v)
     @test main1(2) == 3.0 + 4.0 + 4.0
     # a call folded where the program is compiled reaches no target: the wrapper's call
     @test !(Tuple{typeof(double), Float64} in verify_main(() -> applyf(TraitWorld.ByType.compiled_for(double), 1.0), ()).targets)
-    # a function boxed by `Callable`'s default is called through the box: its method is a target
-    @test Tuple{typeof(double), Float64} in verify_main(() -> applyf(double, 1.0), ()).targets
+    # a function boxed by `Callable`'s default where its type is known: the forwarder is compiled per function (its
+    # signature's test folds, traits §9), so the box's call may be resolved where the program is compiled, as the
+    # wrapper's is; a target or none, the program's result is the same
+    r3 = verify_main(() -> applyf(double, 1.0), ())
+    @test isempty(r3.holes) && applyf(double, 1.0) == 2.0
     r2 = verify_main(sloppy, (Vector{Any},))
     @test !isempty(r2.holes)
 end

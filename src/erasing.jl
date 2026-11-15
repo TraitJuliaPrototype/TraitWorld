@@ -153,7 +153,65 @@ function _expand_definition(argdata::Core.SimpleVector, code::Core.CodeInfo, mod
     fwd = _forwarder_code(fatypes, ftvars, loc, code, pos, traits, mod)
     fwd === nothing && return nothing
     fdata = length(ftvars) == length(tvars) ? argdata : Core.svec(Core.svec(fatypes...), Core.svec(ftvars...), loc)
-    return Core.svec(Core.svec(kept, code), Core.svec(fdata, fwd))
+    entry = _wrapper_entry(atypes, katypes, ktvars, loc, code, pos, traits, vias, fatypes, mod)
+    entry === nothing && return Core.svec(Core.svec(kept, code), Core.svec(fdata, fwd))
+    return Core.svec(Core.svec(kept, code), entry, Core.svec(fdata, fwd))
+end
+
+# A wrapper given at a `Callable{A, S}` argument is checked where it enters (traits §9; compiler §6.3, §7.4): a
+# method at the wrapper's form of that argument, more specific than the method as written, tests the wrapper's
+# function at `A` (and its result inferred there against `S`), then invokes the method as written, which is compiled
+# for the wrapper's type. Made where one argument has a `Callable` component, its trait given as written, in a
+# method that is not a keyword method's body; elsewhere the wrapper is not tested at entry (traits T-156).
+function _wrapper_entry(atypes, katypes, ktvars, loc, code::Core.CodeInfo, pos, traits, vias, fatypes, mod::Module)
+    n = length(atypes)
+    (n >= 2 && atypes[1] !== typeof(Core.kwcall)) || return nothing
+    ks = [k for k in eachindex(pos) if any(_is_callable, _components(traits[k]))]
+    length(ks) == 1 || return nothing
+    k = only(ks); i = pos[k]
+    (vias[k] === nothing && fatypes[i] === atypes[i]) || return nothing
+    X = traits[k]
+    any(t -> t isa Core.TypeofVararg, katypes[2:end-1]) && return nothing
+    Z = TypeVar(:Z, X)
+    eatypes = Any[katypes...]
+    eatypes[i] = UnionAll(Z, Compiled{Z})
+    names = Symbol[]
+    for j in 2:n
+        sl = j <= length(code.slotnames) ? code.slotnames[j] : Symbol("#unused#")
+        nm = string(sl)
+        push!(names, (isempty(nm) || startswith(nm, "#") || sl in names) ? Symbol("#a", j) : sl)
+    end
+    va = katypes[end] isa Core.TypeofVararg
+    fargs = Any[(va && j == n) ? Expr(:..., names[j - 1]) : names[j - 1] for j in 2:n]
+    vnames = Symbol[Symbol("#sp", j) for j in 1:length(ktvars)]
+    vs = TypeVar[v for v in ktvars if any(w -> w === v, _free_vars(X))]
+    Xexpr = if isempty(vs)
+        QuoteNode(X)
+    else
+        UA = X
+        for v in reverse(vs)
+            UA = UnionAll(v, UA)
+        end
+        Expr(:call, GlobalRef(Core, :apply_type), QuoteNode(UA), Any[vnames[findfirst(w -> w === v, ktvars)] for v in vs]...)
+    end
+    invsig = Tuple{katypes[2:end]...}
+    for v in reverse(ktvars)
+        any(w -> w === v, _free_vars(invsig)) && (invsig = UnionAll(v, invsig))
+    end
+    body = Expr(:block, loc, Expr(:meta, :erasing_forwarder), Expr(:meta, :bounded, false),
+                Expr(:call, GlobalRef(TraitWorld, :_callable_entry_check), Xexpr,
+                     Expr(:call, GlobalRef(Core, :getfield), names[i - 1], QuoteNode(:object)), Symbol("#self#"), Expr(:tuple, fargs...)),
+                Expr(:return, Expr(:call, GlobalRef(Core, :invoke), Symbol("#self#"), QuoteNode(invsig), fargs...)))
+    sig = Expr(:call, Symbol("#entry#"), fargs...)
+    isempty(vnames) || (sig = Expr(:where, sig, vnames...))
+    lowered = Meta.lower(mod, Expr(:function, sig, body))
+    lowered isa Expr && lowered.head === :thunk || return nothing
+    for st in (lowered.args[1]::Core.CodeInfo).code
+        if Meta.isexpr(st, :method) && length(st.args) == 3 && st.args[3] isa Core.CodeInfo
+            return Core.svec(Core.svec(Core.svec(eatypes...), Core.svec(ktvars...), loc), st.args[3]::Core.CodeInfo)
+        end
+    end
+    return nothing
 end
 
 # Whether a member's type determines every parameter a trait's type leaves open (`Column`, `Column{<:Real}`): each
@@ -284,6 +342,7 @@ function _forwarder_code(atypes, tvars, loc, code::Core.CodeInfo, pos, traits, m
     single = length(pos) == 1
     KF = QuoteNode(Union{Dynamic, Compiled})
     fargs, cargs, boxes = Any[], Any[], Any[]
+    origargs = Any[atypes[i] isa Core.TypeofVararg ? Expr(:..., names[i - 1]) : names[i - 1] for i in 2:n]
     for i in 2:n
         nm = names[i - 1]
         if atypes[i] isa Core.TypeofVararg
@@ -298,7 +357,9 @@ function _forwarder_code(atypes, tvars, loc, code::Core.CodeInfo, pos, traits, m
         D = Dynamic{traits[k]}
         vs = TypeVar[v for v in tvars if any(w -> w === v, _free_vars(D))]
         others = _others_vars(atypes, i)
-        once = single && all(v -> any(w -> w === v, others), vs)
+        # a `Callable` argument is compiled per function: its signature's test then folds (traits §9)
+        callable = any(_is_callable, _components(traits[k]))
+        once = single && !callable && all(v -> any(w -> w === v, others), vs)
         push!(fargs, Expr(:macrocall, GlobalRef(Base, once ? Symbol("@nospecialize") : Symbol("@specialize")), loc, nm))
         Dexpr = if isempty(vs)
             QuoteNode(D)
@@ -313,7 +374,10 @@ function _forwarder_code(atypes, tvars, loc, code::Core.CodeInfo, pos, traits, m
         Dn, bn = Symbol("#D", i), Symbol("#b", i)
         push!(boxes, Expr(:(=), Dn, Dexpr))
         kept = single ? Expr(:call, GlobalRef(Core, :typeassert), Expr(:call, Dn, nm), Dn) : nm
-        push!(boxes, Expr(:(=), bn, Expr(:if, Expr(:call, GlobalRef(Core, :isa), nm, KF), kept, Expr(:new, Dn, nm))))
+        # a function boxed at `Callable{A, S}` has a method at `A`, or the call that passes it raises (traits §9)
+        plain = callable ? Expr(:block, Expr(:call, GlobalRef(TraitWorld, :_callable_box_check), Dn, nm, Symbol("#self#"),
+                                             Expr(:tuple, origargs...)), Expr(:new, Dn, nm)) : Expr(:new, Dn, nm)
+        push!(boxes, Expr(:(=), bn, Expr(:if, Expr(:call, GlobalRef(Core, :isa), nm, KF), kept, plain)))
         push!(cargs, bn)
     end
     body = Expr(:block, loc, Expr(:meta, :erasing_forwarder), Expr(:meta, :bounded, false), boxes...,

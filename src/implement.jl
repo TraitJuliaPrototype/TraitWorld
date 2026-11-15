@@ -102,6 +102,11 @@ function _implement_vars!(mod::Module, traits::Vector{Any}, @nospecialize(body),
 end
 
 function _implement!(mod::Module, traits::Vector{Any}, @nospecialize(member), by::Union{Nothing,Symbol}, block)
+    if any(X -> X === Core.Callable, traits)
+        (length(traits) == 1 && by === nothing && block === nothing) ||
+            throw(ArgumentError("@implement Callable T: alone, with no block and no forwarding field"))
+        return _implement_callable!(mod, member)
+    end
     how = How(by)
     pirates = Base.IdSet{Any}()                         # the traits this membership is a pirate's at
     for X in traits
@@ -716,6 +721,8 @@ Check the member `T` of a pattern's membership in `X` (lowering §4), once: the 
 a failure too, and raised at every later use.
 """
 function check_first_use(@nospecialize(T), @nospecialize(X))
+    # `Callable` has no contract to check at a member: its signature is checked at the box (traits §9)
+    bare(X) === Core.Callable && return nothing
     key = (T, bare(X))
     r = get(_CHECKED, key, missing)
     if r === missing

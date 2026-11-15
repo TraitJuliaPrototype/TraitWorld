@@ -36,7 +36,7 @@ onlyfloat(x::Float64) = x
 
 @testset "hints" begin
     m = msg(() -> applyc(onlyfloat, 1))
-    @test occursin("`onlyfloat` is not a `Callable{Tuple{Int64}, Int64}`: none of its methods takes `Tuple{Int64}`; its methods take (::Float64)", m)
+    @test occursin("`onlyfloat` is given at `Callable{Tuple{Int64}, Int64}`, and none of its methods takes `Tuple{Int64}`; its methods take (::Float64)", m)
     m = msg(() -> colmean(Circle(1.0), 1))
     @test occursin("`Circle` is not a member of `ColTable`", m) && occursin("@implement ColTable Circle", m)
     @test occursin("its declared members: Tab", m)

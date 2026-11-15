@@ -1,15 +1,17 @@
-# Callable{A, S} (traits §9; lowering §9; compiler §7.4): Julia's `Core.Callable`, a set whose
-# memberships the functions' own methods decide. The library declares one membership for it,
-# `Dynamic{Z}`'s, and `Dynamic{Callable{A, S}}`'s call, which asserts the arguments to `A` and the
-# result to `S`.
+# Callable{A, S} (traits §9; lowering §9; compiler §7.4): Julia's `Core.Callable`, a contract at the box. Every
+# function is a member of every instance (Base declares `Function`'s entry); a callable type that is no `Function`
+# joins by `@implement Callable T`. The library declares the kept forms' memberships, checks the signature where a
+# function is boxed or a wrapper enters, and defines `Dynamic{Callable{A, S}}`'s call, which asserts the arguments
+# to `A` and the result to `S`.
 
 """
     Callable{A, S}
 
-The trait of functions called with arguments of the tuple type `A` and returning an `S`: a function is
-a member where it has a method for a call at `A`, whatever `S` is. Dispatch picks by the arguments'
-signature; a call through a value known as a `Callable{A, S}` has the result type `S`, checked on
-return. Its default attribute is `Dynamic`.
+The trait of functions called with arguments of the tuple type `A` and returning an `S`. Every function is a
+member of every `Callable{A, S}`; the signature is checked where the function is boxed or enters (a method at
+`A`, else the `MethodError` a call at `A` would raise), the result asserted to `S` on every call of the box.
+Neither `A` nor `S` selects a method. It erases by default. A callable type that is no `Function` joins by
+`@implement Callable T`.
 """
 const Callable = Core.Callable
 
@@ -57,4 +59,47 @@ function _signatures_of(@nospecialize(u))
     end
     u.name === Base.unwrap_unionall(Core.Callable).name && length(u.parameters) >= 2 && return ((u.parameters[1], u.parameters[2]),)
     return ()
+end
+
+# The signature check (traits §9): `f` has a method at each `Callable` signature of the trait `Z` (a `Callable`, or
+# an intersection with such components). A fact where `f`'s type is known: `hasmethod` at a declared signature folds,
+# with its edge to `f`'s dispatch there.
+@inline function _callable_met(::Type{Z}, @nospecialize(f)) where {Z}
+    for (A, _) in _signatures(Z)
+        hasmethod(f, A) || return false
+    end
+    return true
+end
+# where the function is boxed by a forwarder: the MethodError of the call that passes it (the method's own call)
+@inline _callable_box_check(::Type{Dynamic{Z}}, @nospecialize(f), @nospecialize(self), args::Tuple) where {Z} =
+    (_callable_met(Z, f) || throw(MethodError(self, args)); nothing)
+# where a wrapper enters a method at `Callable{A, S}`: the same test, and (GT-24 (b), mine) a function whose result
+# inferred at `A` is outside `S` is refused there too, by the TypeError a call's result would raise
+@inline function _callable_entry_check(::Type{Z}, @nospecialize(f), @nospecialize(self), args::Tuple) where {Z}
+    _callable_met(Z, f) || throw(MethodError(self, args))
+    for (A, S) in _signatures(Z)
+        rt = Core.Compiler.return_type(Tuple{Core.Typeof(f), (A::DataType).parameters...})
+        (rt === Union{} || typeintersect(rt, S) !== Union{}) ||
+            throw(TypeError(:Callable, "the result of the function at $(A) infers as $(rt)", S, f))
+    end
+    return nothing
+end
+
+# `Dynamic{Callable{A, S}}(f)` written out: the signature checked, the MethodError of a call at `A` (traits §9)
+function (::Type{D})(f::Function) where {Z <: Core.Callable, D <: Dynamic{Z}}
+    D isa DataType || throw(ArgumentError("Dynamic{X} needs the trait's parameters"))
+    for (A, _) in _signatures(Z)
+        hasmethod(f, A) || throw(MethodError(f, A))
+    end
+    return _new_box(D, f)
+end
+
+# A callable type that is no `Function` joins `Callable` (traits §9; lowering §9): one entry whose instance,
+# `Callable` itself, leaves both inputs free, by the type's owner.
+function _implement_callable!(mod::Module, @nospecialize(member))
+    member isa Type && member <: Function &&
+        throw(ArgumentError("$member is a Function: a member of every Callable already"))
+    _check_membership_owner(mod, Core.Callable, member)
+    _declare_checked!(member, Core.Callable, mod, nothing, :self)
+    return nothing
 end
