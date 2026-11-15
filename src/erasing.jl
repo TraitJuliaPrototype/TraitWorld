@@ -130,19 +130,12 @@ function _expand_definition(argdata::Core.SimpleVector, code::Core.CodeInfo, mod
         if v === nothing
             katypes[i] = _kept_forms(traits[k])
         else
-            v = v::TypeVar
-            nv = TypeVar(v.name, v.lb, _kept_forms(traits[k]))
-            for j in 1:n
-                katypes[j] = _subst_vararg(katypes[j], v, nv)
-            end
-            for j in eachindex(ktvars)
-                w = ktvars[j]::TypeVar
-                if w === v
-                    ktvars[j] = nv
-                elseif Base.has_free_typevars(w.ub) || Base.has_free_typevars(w.lb)
-                    ktvars[j] = TypeVar(w.name, _subst(w.lb, v, nv), _subst(w.ub, v, nv))
-                end
-            end
+            # the variable as it stands now (an earlier replacement may have rebuilt it), with its bound replaced
+            vi = findfirst(w -> w === v, collect(tvars))::Int
+            cur = ktvars[vi]::TypeVar
+            X = traits[k]
+            X = foldl((t, j) -> ktvars[j] === tvars[j] ? t : _subst(t, tvars[j]::TypeVar, ktvars[j]), eachindex(ktvars); init = X)
+            _replace_var!(katypes, ktvars, cur, TypeVar(cur.name, cur.lb, _kept_forms(X)))
         end
     end
     kept = Core.svec(Core.svec(katypes...), Core.svec(ktvars...), loc)
@@ -168,6 +161,23 @@ function _box_formable(@nospecialize(X), i::Int, @nospecialize(via), atypes)
     via isa TypeVar && any(v -> v === via, _free_vars(X)) && return false
     return true
 end
+# `old` replaced by `new` in the argument types and the variables' bounds; a variable whose bound names `old` is
+# rebuilt, and replaced in turn
+function _replace_var!(katypes::Vector{Any}, ktvars::Vector{Any}, old::TypeVar, new::TypeVar)
+    for j in eachindex(katypes)
+        katypes[j] = _subst_vararg(katypes[j], old, new)
+    end
+    for j in eachindex(ktvars)
+        w = ktvars[j]::TypeVar
+        if w === old
+            ktvars[j] = new
+        elseif any(x -> x === old, _free_vars(w.ub)) || any(x -> x === old, _free_vars(w.lb))
+            _replace_var!(katypes, ktvars, w, TypeVar(w.name, _subst(w.lb, old, new), _subst(w.ub, old, new)))
+        end
+    end
+    return nothing
+end
+
 # the variables the arguments other than `i` bind, with those their bounds name
 function _others_vars(atypes, i::Int)
     others = TypeVar[]
