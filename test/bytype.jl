@@ -39,8 +39,9 @@ scaled(s::Shape; by = 1.0) = by * area(s)
 typed(s::C) where {C <: Shape} = C
 pair(a::Shape, b::Shape) = (form(a), form(b))
 first2(c::Col{T}) where {T} = (form(c), cget(c, 1))
-bare(c::Col) = form(c)                               # a parametric trait written bare: the box cannot be formed
-bare2(c::Col{<:Real}) = form(c)                      # nor with a parameter left open
+bare(c::Col) = form(c)                               # a parametric trait written bare: boxed at the member's instance
+bare2(c::Col{<:Real}) = form(c)                      # with a parameter left open, the same
+anyf(f::Callable, x) = (form(f), f(x))               # an input left open (Callable's): the plain member as it is
 plainkind(n::Named) = form(n)                        # a trait without the default
 apply(f::Callable{Tuple{Float64}, Float64}, x::Float64) = (form(f), f(x))
 struct Prob{S <: Shape}; s::S; end                   # Julia's default outer constructor forwards too
@@ -73,7 +74,9 @@ end
     @test BT.typed(c) === Dynamic{Shape} && BT.typed(compiled_for(c)) === Compiled{Circle}
     @test BT.pair(c, compiled_for(Sq(1.0))) === (:box, :wrapper) && BT.pair(c, c) === (:box, :box)
     @test BT.first2(FC([4.0])) === (:box, 4.0) && BT.first2(compiled_for(FC([4.0]))) === (:wrapper, 4.0)
-    @test BT.bare(FC([1.0])) === :plain && BT.bare2(FC([1.0])) === :plain   # no instance to box at
+    @test BT.bare(FC([1.0])) === :box && BT.bare2(FC([1.0])) === :box       # boxed at Col{Float64} (open issue 204)
+    @test BT.bare(compiled_for(FC([1.0]))) === :wrapper
+    @test BT.anyf(sin, 0.0) === (:plain, 0.0)                               # Callable's inputs: no forwarder
     @test BT.plainkind(c) === :plain && BT.plainkind(compiled_for(c)) === :wrapper
     @test BT.apply(x -> 2x, 1.5) === (:box, 3.0) && BT.apply(compiled_for(x -> 2x), 1.5) === (:wrapper, 3.0)
     # one forwarder per arity that holds the trait argument; the method at the kept forms, documented

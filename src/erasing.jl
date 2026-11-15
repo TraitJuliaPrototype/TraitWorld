@@ -61,8 +61,9 @@ function _has_meta(src::Core.CodeInfo, name::Symbol)
 end
 
 # The trait a declared argument type erases at, where the box can be formed there: every parameter given (`X`,
-# `X{A, B}`, `X{T}` with `T` the method's variable, `All{X{A}, Y}`); a trait written bare or with a `<:`
-# parameter (`Column`, `Column{<:Real}`) leaves the instance open, and the argument takes a plain member as it is.
+# `X{A, B}`, `X{T}` with `T` the method's variable, `All{X{A}, Y}`). A trait written bare or with a `<:` parameter
+# (`Column`, `Column{<:Real}`) is given here with its open parameters lifted into the forwarder's own variables
+# (`_expand_definition`).
 function _erasing_trait(@nospecialize(T))
     T isa DataType || return nothing
     erases(T) || return nothing
@@ -98,11 +99,28 @@ function _expand_definition(argdata::Core.SimpleVector, code::Core.CodeInfo, mod
     _has_meta(code, :no_forwarder) && return nothing   # a method `@trait` makes (a default, lowering §2)
     _code_names_fwd(code) && return nothing             # likewise, a trait's method of an image made before the meta
     n = length(atypes)
-    pos = Int[]                       # the erasing arguments
-    traits = Any[]                    # the trait each erases at
-    vias = Any[]                      # the `where` variable that types it, or nothing
+    # an argument at a trait with its parameters left open (`c::Column`, `c::Column{<:Real}`; traits §7.8): the
+    # forwarder takes their variables as static parameters of its own (`c::Column{T} where T`, the same
+    # signature), so that its box names the instance the member is in. The method as written keeps the type as
+    # written at the kept forms. Where an open parameter is an input (`Callable`'s, `HasProperty`'s name), the member
+    # does not determine it: the argument takes the plain member as it is.
+    fatypes = Any[atypes...]
+    ftvars = Any[tvars...]
     for i in 2:n
         T = atypes[i]
+        (T isa UnionAll && _erasing_trait(Base.unwrap_unionall(T)) !== nothing && _member_fixes_open(T)) || continue
+        while T isa UnionAll
+            v = TypeVar(Symbol("#", T.var.name, i), T.var.lb, T.var.ub)
+            push!(ftvars, v)
+            T = T{v}
+        end
+        fatypes[i] = T
+    end
+    pos = Int[]                       # the erasing arguments
+    traits = Any[]                    # the trait each erases at (in the forwarder's variables)
+    vias = Any[]                      # the `where` variable that types it, or nothing
+    for i in 2:n
+        T = fatypes[i]
         T isa Core.TypeofVararg && continue
         via = nothing
         if T isa TypeVar && any(v -> v === T, tvars)
@@ -111,7 +129,7 @@ function _expand_definition(argdata::Core.SimpleVector, code::Core.CodeInfo, mod
         end
         X = _erasing_trait(T)
         X === nothing && continue
-        _box_formable(X, i, via, atypes) || continue
+        _box_formable(X, i, via, fatypes) || continue
         push!(pos, i); push!(traits, X); push!(vias, via)
     end
     isempty(pos) && return nothing
@@ -121,7 +139,7 @@ function _expand_definition(argdata::Core.SimpleVector, code::Core.CodeInfo, mod
     for (k, i) in enumerate(pos)
         v = vias[k]
         if v === nothing
-            katypes[i] = _kept_forms(traits[k])
+            katypes[i] = _kept_forms(fatypes[i] === atypes[i] ? traits[k] : atypes[i])
         else
             # the variable as it stands now (an earlier replacement may have rebuilt it), with its bound replaced
             vi = findfirst(w -> w === v, collect(tvars))::Int
@@ -132,9 +150,36 @@ function _expand_definition(argdata::Core.SimpleVector, code::Core.CodeInfo, mod
         end
     end
     kept = Core.svec(Core.svec(katypes...), Core.svec(ktvars...), loc)
-    fwd = _forwarder_code(atypes, tvars, loc, code, pos, traits, mod)
+    fwd = _forwarder_code(fatypes, ftvars, loc, code, pos, traits, mod)
     fwd === nothing && return nothing
-    return Core.svec(Core.svec(kept, code), Core.svec(argdata, fwd))
+    fdata = length(ftvars) == length(tvars) ? argdata : Core.svec(Core.svec(fatypes...), Core.svec(ftvars...), loc)
+    return Core.svec(Core.svec(kept, code), Core.svec(fdata, fwd))
+end
+
+# Whether a member's type determines every parameter a trait's type leaves open (`Column`, `Column{<:Real}`): each
+# member is in one instance of a trait but at its inputs (compiler §4.6), so an open parameter that is no input is
+# fixed by the member's membership. `Callable`'s parameters are inputs: a function's type fixes none of them.
+function _member_fixes_open(T::UnionAll)
+    B = Base.unwrap_unionall(T)
+    B isa DataType || return false
+    vars = TypeVar[]
+    t = T
+    while t isa UnionAll
+        push!(vars, t.var)
+        t = t.body
+    end
+    ins = _input_positions(B)
+    for (k, p) in enumerate(B.parameters)
+        k in ins || continue
+        any(v -> any(w -> w === v, _free_vars(p)), vars) && return false
+    end
+    return true
+end
+function _input_positions(B::DataType)
+    _is_callable(B) && return 1:length(B.parameters)
+    c = contract(B)
+    c === nothing && return Int[]
+    return Int[findfirst(==(s), c.params)::Int for s in c.inputs]
 end
 
 # Whether the box `Dynamic{X}` can be formed at argument `i` once a call's types are known. A variable of `X` is
