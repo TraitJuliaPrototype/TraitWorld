@@ -53,6 +53,7 @@ include("callable.jl")
 include("fullytyped.jl")
 include("hints.jl")
 include("strict.jl")
+include("report.jl")
 include("ahead.jl")
 include("build.jl")
 include("buildbase.jl")
@@ -84,6 +85,8 @@ export HasLength, Iterable, Indexable, MutableIndexable, Resizable, Keyed, Solva
 # The hooks the runtime and Base call through `invokelatest` or `jl_apply`: precompiled, so that no session
 # compiles them at its first package load (W-121, E-286: `_strict_at_load!` took half of TraitWorld's load)
 precompile(_strict_at_load!, (Base.PkgId,))
+precompile(_report_at_load!, (Base.PkgId,))
+precompile(_report_endings!, (Vector{Any},))
 precompile(_member_hook, (Any, Any))
 precompile(_definition_hook, (Method, Bool))
 precompile(_image_methods_hook, (Vector{Any}, String))
@@ -111,6 +114,8 @@ function __init__()
     Base.Experimental.register_error_hint(_method_error_hint, MethodError)
     # strict mode (traits §12.3): JULIA_TW_STRICT=1, the report after each package load
     _strict_init!()
+    # the pirate's report (traits §12.2): by default, after a definition, a declaration and a load
+    _report_init!()
     ccall(:jl_set_method_deletion_hook, Cvoid, (Any,), _deletion_hook)
 end
 
