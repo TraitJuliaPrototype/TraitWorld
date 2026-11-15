@@ -89,6 +89,10 @@ end
 
 # code compiled by facts: Julia's own owner, the facts policy bit in its flags (compiler §2.3)
 _facts_code(ci::Core.CodeInstance) = ci.owner === nothing && (ci.flags & 0x20) != 0
+# the deep class, which strict mode secures (facts §11.2): the G2 bit, set where the code and every
+# callee it rests on, at any depth, rest on facts, bindings and memberships (compiler §3.2). Code
+# outside the class could be ended by an unrelated load, and so could everything above it.
+_deep(ci::Core.CodeInstance) = (ci.flags & 0x10) != 0
 
 "Whether `definer` is a stakeholder of the signature `s`: it owns, or is a joint owner of, a part of it."
 _stakeholder(@nospecialize(definer), @nospecialize(s)) = any(o -> owns(definer, o), sig_owners(s))
@@ -113,6 +117,7 @@ function _winning_fact(m::Method, @nospecialize(isig), accept)
     seen = Base.IdSet{Any}()
     function check(@nospecialize(s), @nospecialize(caller))
         caller isa Core.CodeInstance && caller.max_world == typemax(UInt) || return nothing
+        _deep(caller) || return nothing                      # outside the deep class: followed (facts §11.2)
         if _facts_code(caller)
             return CC.is_fact_sig(s) && _would_win(m, isig, s, world) && accept(s) ? caller : nothing
         end
@@ -164,7 +169,7 @@ function _winning_fact(m::Method, @nospecialize(isig), accept)
     return nothing
 end
 
-"The first valid CodeInstance compiled by facts that rests on `ci` through its callers' backedges, or `nothing`."
+"The first valid CodeInstance compiled by facts in the deep class that rests on `ci` through its callers' backedges, through code in the class, or `nothing`."
 function _facts_dependent(ci::Core.CodeInstance, seen::Base.IdSet{Any})
     stack = Any[ci]
     while !isempty(stack)
@@ -172,6 +177,7 @@ function _facts_dependent(ci::Core.CodeInstance, seen::Base.IdSet{Any})
         c in seen && continue
         push!(seen, c)
         c.max_world == typemax(UInt) || continue
+        _deep(c) || continue                                 # what rests on it is outside the class too
         _facts_code(c) && return c
         mi = CC.get_ci_mi(c)
         isdefined(mi, :backedges) || continue
@@ -243,7 +249,7 @@ function _strict_log_hit(log::Vector, @nospecialize(definer))
         if hit === nothing && x isa Core.MethodInstance && isdefined(x, :cache)
             ci = x.cache
             while true
-                if _facts_code(ci) && ci.max_world < w && ci.max_world + 2 >= w
+                if _facts_code(ci) && _deep(ci) && ci.max_world < w && ci.max_world + 2 >= w
                     hit = ci; break
                 end
                 isdefined(ci, :next) || break
@@ -287,7 +293,7 @@ function _absence_fact(@nospecialize(msig))
             s, caller = v[j], v[j+1]
             caller isa Core.CodeInstance && caller.max_world == typemax(UInt) || continue
             typeintersect(s, msig) === Union{} && continue
-            c = _facts_code(caller) ? caller : _facts_dependent(caller, seen)
+            c = _facts_dependent(caller, seen)
             c === nothing || return (s, c)
         end
     end
@@ -448,7 +454,7 @@ function _load_pirates(log::Vector{Any})
         tag = log[k]
         (tag isa String && tag == "insert_backedges_callee" && k + 1 <= length(log)) || continue
         edge, ci = log[k-1], log[k+1]
-        ci isa Core.CodeInstance && _facts_code(ci) || continue
+        ci isa Core.CodeInstance && _facts_code(ci) && _deep(ci) || continue
         s = edge isa Core.MethodInstance ? edge.specTypes : edge isa Type ? edge : continue
         ms = Base._methods_by_ftype(s, nothing, 1, world, false, Ref{UInt}(typemin(UInt)), Ref{UInt}(typemax(UInt)), Ptr{Int32}(C_NULL))
         (ms isa Vector && length(ms) == 1) || continue
@@ -566,7 +572,7 @@ function _deletion_hook(m::Method)
         seen = Base.IdSet{Any}()
         for x in mi.backedges
             x isa Core.CodeInstance || continue
-            c = _facts_code(x) ? x : _facts_dependent(x, seen)
+            c = _facts_dependent(x, seen)
             c === nothing && continue
             throw(PirateError(m, owner(m.module), mi.specTypes, c, false))
         end
