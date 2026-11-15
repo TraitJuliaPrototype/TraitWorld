@@ -63,8 +63,9 @@ using .MsgLib: MShape, marea, mname, mdouble
                  end))
     @test e isa TraitWorld.TraitUseError && occursin("the field `mass` is no declared field of", msg(e))   # read at the box (D-3)
 
-    m = only(m for m in methods(marea) if m.sig == Tuple{typeof(marea), MShape})
-    @test endswith(string(m.file), "messages.jl")
+    # the code a declaration makes lies at the declaration: the kept forms' forwarding methods (lowering §2)
+    ms = [m for m in methods(marea) if TraitWorld._is_trait_method(m)]
+    @test length(ms) == 2 && all(m -> endswith(string(m.file), "messages.jl"), ms)
 end
 
 @testset "a signature prints as a call" begin
@@ -79,9 +80,12 @@ end
     e = try getindex(nothing, 1); nothing catch err; err end
     m = sprint(showerror, e)
     @test e isa MethodError && !occursin("Indexable", m) && !occursin("Keyed", m)
-    # an operation of the trait's own module keeps its hints
-    e = try marea(1, 2); nothing catch err; err end
+    # an operation of the trait's own module keeps its hints, where the argument at its receiver's position is a
+    # member (traits §11.4)
+    e = try marea(MOk(1.0), 2); nothing catch err; err end
     @test occursin("`marea` is declared", sprint(showerror, e))
+    e = try marea(1, 2); nothing catch err; err end
+    @test e isa MethodError && !occursin("`marea` is declared", sprint(showerror, e))
     e = try mdouble(3); nothing catch err; err end
     @test occursin("is not a member of `MShape`", sprint(showerror, e))
 end
@@ -123,12 +127,14 @@ struct MSC; end
 mscale(::MSC, k::Float64) = k
 @implement MScalable MSC
 
+# an operation is an entry of the contract and no method at the trait (traits §4.1): a call outside its declared
+# signature is Julia's MethodError, with the contract's hint (traits §11.4)
 @testset "an operation called outside its declared signature" begin
     e = try mscale(MSC(), 2); nothing catch err; err end
-    @test e isa OperationError
+    @test e isa MethodError
     m = msg(e)
-    @test occursin("no method of `mscale` takes (::MSC, ::Int64)", m)
+    @test occursin("no method matching mscale(::MSC, ::$Int)", m)
     @test occursin("`mscale` is declared `mscale(s::MScalable, k::Float64)::Float64` by MScalable", m)
-    @test occursin("MSC's methods of `mscale`: mscale(::MSC, ::Float64)", m)
-    @test !occursin("manually thrown", m)
+    @test occursin("mscale(::MSC, ::Float64)", m)                 # Julia's closest candidate: the member's method
+    @test isempty([mm for mm in methods(mscale) if mm.sig isa DataType && mm.sig.parameters[2] === MScalable])
 end

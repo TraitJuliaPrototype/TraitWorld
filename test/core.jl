@@ -232,10 +232,14 @@ sz_branch(w, b::Bool) = b ? sz_twice(w) : 0
 @testset "first use" begin
     @test W2(1.0) isa Sized2                       # memberships only grow: isa stays true
     @test sz(W2(1)) == 1                           # its own method: no use through the trait
-    # at dispatch
-    e = try Base.invokelatest(sz, W2(1.0)); nothing catch err; err end
+    # a call of the operation at a member with no method of it: Julia's MethodError, with the contract's hint (an
+    # operation is no method at the trait, traits §4.1, §11.4)
+    e0 = try Base.invokelatest(sz, W2(1.0)); nothing catch err; err end
+    @test e0 isa MethodError && occursin("`sz` is declared `sz(x::Sized2)::Int` by Sized2", sprint(showerror, e0))
+    # at dispatch to a method at the trait: the member's first use
+    e = try Base.invokelatest(sz_twice, W2(1.0)); nothing catch err; err end
     @test e isa ImplementError && occursin("sz", sprint(showerror, e))
-    e2 = try Base.invokelatest(sz, W2(2.0)); nothing catch err; err end
+    e2 = try Base.invokelatest(sz_twice, W2(2.0)); nothing catch err; err end
     @test e2 === e                                 # the kept failure, raised at every use
     # in compiled code: checked before the code runs (compiler §10.4)
     e3 = try sz_compiled(W2(0x01)); nothing catch err; err end

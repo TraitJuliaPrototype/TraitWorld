@@ -77,27 +77,37 @@ function _trait(mod::Module, head, body)
     for op in items.ops
         op.fname isa Symbol && push!(out.args, Expr(:function, op.fname))
     end
-    # 4. the trait's method for each operation
+    # 4. a method at the trait for each default, at each arity it is declared at (traits §4.2; lowering §2). An
+    # operation without a default is an entry of the contract and no method (traits §4.1): each member serves it by
+    # a method of its own type, and the kept forms by their forwarding methods (4b)
     arities = Dict{Tuple{Any,Int},Int}()
     for op in items.ops
         k = (op.fname, length(op.args))
         arities[k] = get(arities, k, 0) + 1
     end
     for op in items.ops
+        op.body === nothing && continue
         push!(out.args, _trait_method(name, params, bounds, op, arities[(op.fname, length(op.args))] > 1, items.inputs))
-        # its declared result, covering every member (compiler §6.8). A bare `Self` at a receiver typed
-        # by the trait is a member of the trait at the receiver's parameters: each member's method is
-        # checked to return its own type (traits §5.10). Another result that names Self records none.
-        rt = op.result
-        if _mentions(rt, :Self)
-            rty = op.args[op.receiver][2]
-            (rt === :Self && (rty === nothing || rty === :Self || rty === name)) || continue
-            rt = isempty(params) ? name : Expr(:curly, name, params...)
-        end
-        push!(out.args, Expr(:latestworld),
-              :($(lib(:_set_declared!))($(op.fname), $mod, $(length(op.args) + 1), $(QuoteNode(rt)))))
     end
     push!(out.args, Expr(:latestworld))
+    # 4b. the kept forms' forwarding methods for each operation without a default (lowering §2, §7): at
+    # `Dynamic{<:X}`, the operation called on the box's object, a value typed by the set (an operation's call,
+    # compiler §7.1); at `Compiled{<:X}`, on the wrapper's object, a static call of its own method
+    seen = Set{Any}()
+    for op in items.ops
+        op.body === nothing || continue
+        overloaded = arities[(op.fname, length(op.args))] > 1
+        key = (op.fname, length(op.args), op.vararg, overloaded ? Any[ty for (_, ty) in op.args] : nothing)
+        key in seen && continue
+        push!(seen, key)
+        append!(out.args, _kept_forwarders(name, params, bounds, op, overloaded))
+    end
+    push!(out.args, Expr(:latestworld))
+    # 4c. the operations as entries the compiler reads (compiler §4.1): the function, the declared signature and
+    # result as types in the trait's and the operation's variables, the default's method or nothing
+    entries = Any[_operation_entry(name, params, op, mod) for op in items.ops]
+    push!(out.args, Expr(:let, Expr(:block, tvdefs...),
+        :($(lib(:_set_operations!))($name, Any[$(entries...)]))))
     # 5. the contract on the TypeName
     opdecls = Any[:($(lib(:OperationDecl))($(QuoteNode(_opname(op.fname))), $(op.fname),
                      Pair{Symbol,Any}[$([:($(QuoteNode(a)) => $(QuoteNode(ty))) for (a, ty) in op.args]...)],
@@ -298,10 +308,9 @@ _mentions(ex, s::Symbol) = ex === s || (ex isa Expr && any(a -> _mentions(a, s),
 
 _subst(ex, s::Symbol, by) = ex === s ? by : ex isa Expr ? Expr(ex.head, Any[_subst(a, s, by) for a in ex.args]...) : ex
 
-# The trait's method for an operation (lowering §2): a method at the trait with the declared
-# signature and result. `Dynamic{X}` gets the operation called on its object, as a member that
-# forwards does for an operation with a default (a required operation's forwarding is a method at
-# the member); one that a default serves, the default's body; any other member was refused at its check.
+# The trait's method for an operation with a default (lowering §2): a method at the trait with the declared
+# signature and result. A kept form and a member that forwards get the operation called on the object or the
+# field; any other member, the default's body.
 #
 # Its further arguments are untyped, so that a member's own method, written at the member's type,
 # is more specific and wins (traits §4.2) however it types them. An argument keeps its declared
@@ -354,9 +363,7 @@ function _trait_method(trait::Symbol, params::Vector{Symbol}, bounds::Vector{Any
     resultself && (fwdcall = :($fwdcall::typeof($fwd)))
     plainargs = Any[nm for nm in names]
     op.vararg && (plainargs[end] = Expr(:..., plainargs[end]))
-    serve = op.body === nothing ?
-        :(throw($(lib(:OperationError))($(op.fname), ($(plainargs...),), $trait))) :
-        _subst(op.body, :Self, :(typeof($rname)))
+    serve = _subst(op.body, :Self, :(typeof($rname)))
     # a method `@trait` makes is not forwarded where its trait erases by default (compiler §6.3): a plain member
     # served by a default runs it as itself
     body = quote
@@ -370,3 +377,93 @@ function _trait_method(trait::Symbol, params::Vector{Symbol}, bounds::Vector{Any
     end
     return Expr(:function, sig, body)
 end
+
+# The kept forms' forwarding methods for an operation without a default (lowering §2, §7): the receiver at
+# `Dynamic{<:R}` and at `Compiled{<:R}`, `R` the declared receiver type, its object read through `_fwd` as a trait's
+# method reads it (so the library's readers take them as the contract's own: not checked at the box, no forwarder).
+# A further argument keeps its declared type where that type names neither the trait's parameters, nor `Self`, nor
+# the operation's own variables (`io::IO`, `i::Int`), so that the method is more specific than one of the function
+# that types those arguments and takes any receiver (Base's `show(io::IO, x)`); the others are untyped, but where
+# two declarations at one arity differ in them.
+function _kept_forwarders(trait::Symbol, params::Vector{Symbol}, bounds::Vector{Any}, op, overloaded::Bool)
+    lib(s) = GlobalRef(@__MODULE__, s)
+    full = isempty(params) ? trait : Expr(:curly, trait, params...)
+    rname, rty = op.args[op.receiver]
+    selfy = rty === nothing || rty === :Self || rty === trait
+    recty = selfy ? trait : _subst(rty, :Self, full)
+    wnames = Symbol[w isa Symbol ? w : w.args[1] for w in op.wherevars]
+    out = Any[]
+    for K in (:Dynamic, :Compiled)
+        sigargs = Any[]
+        for (i, (nm, ty)) in enumerate(op.args)
+            a = if i == op.receiver
+                Expr(:(::), nm, Expr(:curly, lib(K), Expr(:<:, recty)))
+            elseif ty !== nothing && (overloaded || !_mentions_any(ty, vcat(params, Symbol[:Self], wnames)))
+                Expr(:(::), nm, _subst(ty, :Self, full))
+            else
+                nm
+            end
+            (op.vararg && i == length(op.args)) && (a = Expr(:..., a))
+            push!(sigargs, a)
+        end
+        callargs = Any[i == op.receiver ? :($(lib(:_fwd))($rname, $trait)) : nm for (i, (nm, _)) in enumerate(op.args)]
+        op.vararg && (callargs[end] = Expr(:..., callargs[end]))
+        sig = Expr(:call, op.fname, sigargs...)
+        sigex = Expr(:block, sigargs...)
+        wheres = Any[]
+        for (i, p) in enumerate(params)
+            _mentions(sigex, p) || continue
+            push!(wheres, bounds[i] === nothing ? p : Expr(:<:, p, bounds[i]))
+        end
+        for w in op.wherevars
+            wn = w isa Symbol ? w : w.args[1]
+            _mentions(sigex, wn) && push!(wheres, w)
+        end
+        isempty(wheres) || (sig = Expr(:where, sig, wheres...))
+        # (a line of this file: `_at_source!` puts the user's `@trait` there)
+        body = Expr(:block, LineNumberNode(@__LINE__, Symbol(@__FILE__)), Expr(:meta, :no_forwarder),
+                    Expr(:call, op.fname, callargs...))
+        push!(out, Expr(:function, sig, body))
+    end
+    return out
+end
+
+# An operation's entry for the compiler (compiler §4.1), as an expression evaluated with the trait's parameters
+# bound to their type variables: `(f, sig, rt, default, vars)`, the declared signature and result built with the
+# operation's own `where` variables, `Self` the trait at its parameters. A result that names `Self` inside another
+# type declares none: the entry is left out.
+function _operation_entry(trait::Symbol, params::Vector{Symbol}, op, mod::Module)
+    lib(s) = GlobalRef(@__MODULE__, s)
+    full = isempty(params) ? trait : Expr(:curly, trait, params...)
+    rname, rty = op.args[op.receiver]
+    selfy = rty === nothing || rty === :Self || rty === trait
+    tys = Any[]
+    for (i, (nm, ty)) in enumerate(op.args)
+        t = i == op.receiver ? (selfy ? full : _subst(rty, :Self, full)) :
+            ty === nothing ? :Any : _subst(ty, :Self, full)
+        (op.vararg && i == length(op.args)) && (t = :(Vararg{$t}))
+        push!(tys, t)
+    end
+    rt = op.result
+    if _mentions(rt, :Self)
+        (rt === :Self && selfy) || return :nothing
+        rt = full
+    end
+    wdefs = Any[]
+    wnames = Any[]
+    for w in op.wherevars
+        if w isa Symbol
+            push!(wdefs, :($w = Core.TypeVar($(QuoteNode(w)))))
+            push!(wnames, w)
+        elseif Meta.isexpr(w, :<:)
+            push!(wdefs, :($(w.args[1]) = Core.TypeVar($(QuoteNode(w.args[1])), $(w.args[2]))))
+            push!(wnames, w.args[1])
+        end
+    end
+    default = op.body === nothing ? :nothing :
+        :($(lib(:_default_method))($(op.fname), $mod, $(length(op.args) + 1)))
+    return Expr(:let, Expr(:block, wdefs...),
+        :(($(op.fname), Tuple{typeof($(op.fname)), $(tys...)}, $rt, $default, Any[$(params...), $(wnames...)])))
+end
+
+_mentions_any(ex, names::Vector{Symbol}) = any(n -> _mentions(ex, n), names)

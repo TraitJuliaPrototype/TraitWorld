@@ -27,26 +27,31 @@ end
 "whether `X` is a trait: an open set"
 istrait(@nospecialize(X)) = (dt = Base.unwrap_unionall(X); dt isa DataType && ccall(:jl_is_open_set, Cint, (Any,), dt) != 0)
 
-# The trait's method for an operation carries the operation's declared result, with the flag that
-# it covers every member: each member's serving method is checked to infer within it (compiler
-# §6.8; traits §5.10). The method is the trait's method of `f` defined last in `mod` at this arity;
-# the result is evaluated with the method's own type variables.
-function _set_declared!(@nospecialize(f), mod::Module, nargs::Int, @nospecialize(resultex))
+# The default's method of an operation: the trait's method of `f` defined last in `mod` at this arity.
+function _default_method(@nospecialize(f), mod::Module, nargs::Int)
     best = nothing
     for m in methods(f)
         (m.module === mod && Int(m.nargs) == nargs && _is_trait_method(m)) || continue
         (best === nothing || m.primary_world > best.primary_world) && (best = m)
     end
-    best === nothing && return nothing
-    vars = TypeVar[]
-    s = best.sig
-    while s isa UnionAll
-        push!(vars, s.var)
-        s = s.body
+    return best
+end
+
+# A trait's operations for the compiler (compiler §4.1): each entry `(f, sig, rt, default, vars)` with the
+# signature and result in the variables `vars`, wrapped in those that occur. Written once, at the declaration.
+function _set_operations!(@nospecialize(X), entries::Vector{Any})
+    out = Any[]
+    for e in entries
+        e === nothing && continue
+        f, sig, rt, default, vars = e
+        (rt isa Type || rt isa TypeVar) || continue
+        for v in reverse(vars)
+            v isa TypeVar || continue
+            any(w -> w === v, _free_vars(sig)) && (sig = UnionAll(v, sig))
+        end
+        push!(out, Core.svec(f, sig, rt, default))
     end
-    rt = Core.eval(mod, Expr(:let, Expr(:block, Any[:($(v.name) = $v) for v in vars]...), resultex))
-    (rt isa Type || rt isa TypeVar) || return nothing
-    ccall(:jl_method_set_declared_result, Cvoid, (Any, Any, Cint), best, rt, 1)
+    ccall(:jl_set_contract_operations, Cvoid, (Any, Any), X, Core.svec(out...))
     return nothing
 end
 

@@ -1,6 +1,6 @@
 # Hints on Julia's `MethodError` where a trait is involved (traits §11.4; lowering §11): a value that
 # is not a member, a member at other parameter values, a broken shared variable, a call of an
-# operation outside its declared signature. An ambiguity between two traits: Julia's own message names
+# operation outside its declared signature, read from the contract. An ambiguity between two traits: Julia's own message names
 # the joint method to define, `f(::All{X, Y})`.
 
 function _method_error_hint(io::IO, ex::MethodError, @nospecialize(argtypes), @nospecialize(kwargs))
@@ -37,28 +37,62 @@ end
 members_of(@nospecialize(X)) = collect(Any, ccall(:jl_candidates_of, Any, (Any,), bare(X)))
 _members_of(@nospecialize(X)) = members_of(X)
 
-function _trait_hints!(lines, @nospecialize(f), args, world::UInt)
-    n = length(args)
-    ms = try methods(f) catch; return end
-    seen_ops = Set{Any}()
-    for m in ms
-        sig = Base.unwrap_unionall(m.sig)
-        sig isa DataType || continue
-        # an operation that is another owner's function (Base's `getindex`, for BaseTraits' `Indexable`):
-        # a failed call of it says nothing of the trait, so the trait's own method gives no hint
-        _is_trait_method(m) && (try owner(parentmodule(f)) != owner(m.module) catch; false end) && continue
-        ps = sig.parameters
-        # a call of an operation: its declared signature
-        for i in 2:length(ps)
-            X = _declared_trait(ps[i])
-            X === nothing && continue
+# The traits a type is a member of, from the entries in force on its TypeName and its supertypes', with the
+# sets those join (supertraits): each trait's bare type, whose contract the hints read.
+function _traits_of(@nospecialize(T))
+    out = Any[]
+    d = Base.unwrap_unionall(T)
+    while d isa DataType && d !== Any
+        _sets_of!(out, d.name, T)
+        d = d.super
+    end
+    return out
+end
+function _sets_of!(out, tn::Core.TypeName, @nospecialize(T), depth::Int = 0)
+    depth > 8 && return out
+    for en in getfield(tn, :memberships, :acquire)
+        getfield(en, :max_world, :acquire) == typemax(UInt64) || continue
+        sn = getfield(en, :set)
+        X = sn.wrapper
+        any(x -> x === X, out) && continue
+        T <: X || continue
+        push!(out, X)
+        _sets_of!(out, sn, T, depth + 1)          # its supertraits: the set's own entries
+    end
+    return out
+end
+
+# A call of an operation's function outside its declared signature (traits §11.4): where an argument at an
+# operation's receiver position is a member of its trait, the declared signature read from the contract. Not at
+# an operation that is another owner's function (Base's `getindex` for BaseTraits' `Indexable`): a failed call of
+# it says nothing of the trait.
+function _operation_hints!(lines, @nospecialize(f), args)
+    seen = Set{Any}()
+    for (i, a) in enumerate(args)
+        for X in _traits_of(typeof(a))
             c = contract(X)
+            c === nothing && continue
             for op in c.operations
-                (op.f === f && !(op in seen_ops)) || continue
-                push!(seen_ops, op)
+                (op.f === f && op.receiver == i && !(op in seen)) || continue
+                (try owner(parentmodule(f)) != owner(c.mod) catch; false end) && continue
+                push!(seen, op)
                 push!(lines, "`$(op.name)` is declared `$(_declared(op, c))` by $(_tstr(bare(X)))")
             end
         end
+    end
+    return lines
+end
+
+function _trait_hints!(lines, @nospecialize(f), args, world::UInt)
+    n = length(args)
+    _operation_hints!(lines, f, args)
+    ms = try methods(f) catch; return end
+    for m in ms
+        sig = Base.unwrap_unionall(m.sig)
+        sig isa DataType || continue
+        # a default's method of another owner's function: a failed call of it says nothing of the trait
+        _is_trait_method(m) && (try owner(parentmodule(f)) != owner(m.module) catch; false end) && continue
+        ps = sig.parameters
         (m.isva ? n >= length(ps) - 2 : n == length(ps) - 1) || continue
         names = Base.method_argnames(m)
         shared = Dict{TypeVar,Vector{Tuple{Symbol,Any}}}()

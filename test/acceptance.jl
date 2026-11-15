@@ -110,12 +110,15 @@ end
 struct Fam3{P}; x::P; end
 sz3(w::Fam3{Int}) = 1
 @implement Sized3 Fam3{P} where {P}
+twice3(x::Sized3) = 2 * sz3(x)                       # a method at the trait: a use of the membership
 @testset "F10: a family's member is checked at its first use" begin
     @test Fam3(1.0) isa Sized3
-    @test Base.invokelatest(sz3, Fam3(1)) == 1
-    @test_throws ImplementError Base.invokelatest(sz3, Fam3(1.0))
-    @test_throws ImplementError Base.invokelatest(sz3, Fam3(2.0))
-    @test Fam3(1.0) isa Sized3                        # memberships only grow
+    @test Base.invokelatest(twice3, Fam3(1)) == 2
+    @test_throws ImplementError Base.invokelatest(twice3, Fam3(1.0))
+    @test_throws ImplementError Base.invokelatest(twice3, Fam3(2.0))
+    # the operation itself is no method at the trait (traits §4.1): a direct call is Julia's dispatch
+    @test_throws MethodError Base.invokelatest(sz3, Fam3(1.0))
+    @test Fam3(1.0) isa Sized3
 end
 
 @trait Sized4 begin
@@ -125,12 +128,13 @@ end
 struct Fam4{P}; x::P; end
 sz4(w::Fam4{Int}) = 1
 nm4(w::Fam4{Int}) = 2
-nm4(x) = 0                                            # takes any receiver: not a serving method
+nm4(x) = 0                                            # takes any receiver: it serves (traits §4.1)
 @implement Sized4 Fam4{P} where {P}
-@testset "F10b (compiler C-71): a failed member's other operations raise its failure" begin
-    @test_throws ImplementError Base.invokelatest(sz4, Fam4(1.0))
-    @test_throws ImplementError Base.invokelatest(nm4, Fam4(1.0))
-    @test_throws ImplementError Base.invokelatest(sz4, Fam4(1.0))
+both4(x::Sized4) = sz4(x) + nm4(x)
+@testset "F10b (compiler C-71): a failed member's uses through the trait raise its failure" begin
+    @test_throws ImplementError Base.invokelatest(both4, Fam4(1.0))
+    @test_throws ImplementError Base.invokelatest(both4, Fam4(1.0))
+    @test Base.invokelatest(nm4, Fam4(1.0)) == 0      # a direct call: Julia's dispatch, the untyped method
 end
 
 @trait Indexable{T} begin

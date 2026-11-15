@@ -98,15 +98,17 @@ end
     @test width(true) >= length(string(true))
 end
 
-# an operation that is an existing function whose only method there takes any receiver (`show(io, x)`):
-# the trait's method, more specific, would hide it, so the membership is refused (open issue 150)
+# an operation that is an existing function whose only method there takes any receiver (`show(io, x)`): an
+# operation is no method at the trait, so nothing hides the fallback, and it serves (traits §4.1, §5.10)
 @trait Showy begin
     Base.show(io::IO, x::Showy)::Nothing
 end
 struct Plain1 end
-@testset "BaseTraits: a fallback the trait's method would hide" begin
+@testset "BaseTraits: a fallback that takes any receiver serves" begin
     e = try @eval(@implement Showy Plain1); nothing catch err; err end
-    @test e isa ImplementError && occursin("takes any receiver", sprint(showerror, e))
+    @test e === nothing
+    @test Plain1() isa Showy && sprint(show, Plain1()) == sprint(show, Plain1())
+    @test isempty([m for m in methods(show) if m.sig isa DataType && length(m.sig.parameters) == 3 && m.sig.parameters[3] === Showy])
 end
 
 # HasProperty{N, R}: a type joins at each name (traits §3.2, §10.1; compiler §4.6, §7.1; C-32, T-103)
@@ -170,7 +172,8 @@ end
     filter!(p -> p[1].name !== :implements, amb)
     recv(m) = string(nameof(Base.unwrap_unionall(Base.unwrap_unionall(m.sig).parameters[2])))
     pairs = unique!(sort!([string(a.name, ": ", join(sort!([recv(a), recv(b)]), ", ")) for (a, b) in amb]))
-    # `getindex` by position and by key: no one answer is right for every type in both, so each
-    # common member defines its own (as `Dict` does)
-    @test pairs == ["getindex: Indexable, Keyed"]
+    # `getindex` by position and by key: no one answer is right for every type in both, so each common member
+    # defines its own (as `Dict` does), and a kept form of both (a box of their intersection, a wrapper of a common
+    # member) has none: the kept forms' forwarding methods of the two operations tie (lowering §2)
+    @test pairs == ["getindex: Compiled, Compiled", "getindex: Dynamic, Dynamic"]
 end

@@ -196,21 +196,7 @@ function _check_contract!(problems, c::Contract, env, @nospecialize(S), @nospeci
             m = _serving_method(op, tt)
             if m === nothing
                 op.hasdefault && continue        # a default serves the operation at S
-
-                h = _hidden_method(op, tt)
-                if h !== nothing
-                    push!(problems, "$(op.name)'s method $(h.sig) takes any receiver, so the trait's method, more specific, " *
-                                    "would hide it: define $(op.name) at $S")
-                else
-                    push!(problems, "no method serves $(_declared(op, c)) at $S$(_near(op, R))")
-                end
-                continue
-            end
-            if _untyped_receiver(m, op)
-                # a method that takes any receiver loses to the trait's method, or is ambiguous with it,
-                # once S is a member (traits §6.2; open issue 150)
-                push!(problems, "$(op.name)'s method $(_callform(m.sig)) takes any receiver, so the trait's method, more specific, " *
-                                "would hide it: define $(op.name) at $S")
+                push!(problems, "no method serves $(_declared(op, c)) at $S$(_near(op, R))")
                 continue
             end
             own = true
@@ -306,12 +292,16 @@ function _call_types(c::Contract, op::OperationDecl, env, @nospecialize(R))
     return Tuple{ts...}
 end
 
-# The method that serves the operation at the call types, other than the trait's own method. At a further
-# argument declared abstract (an iteration state), a method that meets the declared signature serves:
-# the member's own state is narrower (traits §5.10)
+# The method that serves the operation at the call types (traits §5.10): for an operation without a default,
+# the method dispatch selects, a method that takes any receiver included (`mul!(C, A, B)`): no method at the trait
+# hides it (traits §4.1). For one with a default, a method more specific than the default; one that takes any
+# receiver is less specific, and the default serves. At a further argument declared abstract (an iteration
+# state), a method that meets the declared signature serves: the member's own state is narrower.
 function _serving_method(op::OperationDecl, @nospecialize(tt))
     open = _open_further(op, tt)
-    return _first_serving(Tuple{Core.Typeof(op.f), tt.parameters...}, Base.get_world_counter(), !open)
+    m = _first_serving(Tuple{Core.Typeof(op.f), tt.parameters...}, Base.get_world_counter(), !open)
+    m !== nothing && op.hasdefault && _untyped_receiver(m, op) && return nothing
+    return m
 end
 # whether an argument other than the receiver is declared abstract (a loop: a closure over `tt` would be
 # compiled per call type, E-322)
@@ -331,14 +321,6 @@ function _untyped_receiver(m::Method, op::OperationDecl)
     p isa TypeVar && (p = p.ub)
     return p === Any
 end
-# A method untyped at the receiver (a function's fallback, `mul!(C, A, B)`) that would serve the
-# operation but that the trait's method, more specific there, hides (open issue 150)
-function _hidden_method(op::OperationDecl, @nospecialize(tt))
-    ps = Any[tt.parameters...]
-    op.receiver <= length(ps) || return nothing
-    ps[op.receiver] = Any
-    return _first_serving(Tuple{Core.Typeof(op.f), ps...}, Base.get_world_counter())
-end
 function _first_serving(@nospecialize(T), world::UInt, covers::Bool = true)
     ms = Base._methods_by_ftype(T, -1, world)
     ms isa Vector || return nothing
@@ -351,7 +333,8 @@ function _first_serving(@nospecialize(T), world::UInt, covers::Bool = true)
     return nothing
 end
 
-# a trait's method calls _fwd on its receiver (lowering §2); no other method does
+# a trait's own method calls _fwd on its receiver: a default's method at the trait, a kept form's forwarding
+# method (lowering §2); no other method does
 const _IS_TRAIT_METHOD = IdDict{Method,Bool}()
 _is_trait_method(m::Method) = get!(_IS_TRAIT_METHOD, m) do
     any(s -> s isa GlobalRef && s.mod === TraitWorld && s.name === :_fwd, _code_refs(m))
