@@ -31,11 +31,20 @@ function _box_trait(@nospecialize(p))
     return _trait_of(p)
 end
 
-# a trait with open parameters, closed at Float64 where its bounds allow (the reading needs a concrete box)
+# a free variable's stand-in: the first of a few common concrete types its bounds allow
+const _STAND_INS = (Float64, Int, Symbol, String)
+function _stand_in(v::TypeVar, @nospecialize(ub))
+    for T in _STAND_INS
+        (v.lb <: T && T <: ub) && return T
+    end
+    return ub isa Type && isconcretetype(ub) ? ub : nothing
+end
+# a trait with open parameters, closed at a stand-in where its bounds allow (the reading needs a concrete box)
 function _close_params(@nospecialize(X))
     while X isa UnionAll
-        Float64 <: X.var.ub || return nothing
-        X = X{Float64}
+        T = _stand_in(X.var, X.var.ub)
+        T === nothing && return nothing
+        X = X{T}
     end
     return X
 end
@@ -46,8 +55,8 @@ _substv(@nospecialize(t), v::TypeVar, @nospecialize(x)) =
     box_signature(m::Method) -> Type or nothing
 
 `m`'s signature with `Dynamic{X}` in place of each argument at a trait `X` (a trait, an intersection, a kept
-form of `@erasing`, a `where` variable bounded by one); a free variable is given `Float64` where its bound allows,
-else its bound where that is concrete. `nothing` where no argument is at a trait, or the box cannot be formed.
+form of `@erasing`, a `where` variable bounded by one); a free variable is given the first of `Float64`, `Int`,
+`Symbol`, `String` its bounds allow, else its bound where that is concrete. `nothing` where no argument is at a trait, or the box cannot be formed.
 """
 function box_signature(m::Method)
     sig = m.sig
@@ -68,12 +77,10 @@ function box_signature(m::Method)
             Xc = _close_params(X)
             Xc === nothing && return nothing
             try Dynamic{Xc} catch; return nothing end
-        elseif Float64 <: ub && v.lb === Union{}
-            Float64
-        elseif ub isa Type && isconcretetype(ub)
-            ub
         else
-            return nothing
+            T = _stand_in(v, ub)
+            T === nothing && return nothing
+            T
         end
         push!(vals, val)
     end
