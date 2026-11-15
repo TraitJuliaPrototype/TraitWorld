@@ -690,9 +690,10 @@ function _patterns_for(@nospecialize(T), @nospecialize(X))
             getfield(en, :max_world, :acquire) == typemax(UInt64) || continue
             pat, inst = getfield(en, :member), getfield(en, :instance)
             _is_pattern(pat) || continue
-            # not a pattern `@implement` declared: `Dynamic{X}`'s membership, a trait's supertraits
+            # not a pattern `@implement` declared: `Dynamic{X}`'s and `Compiled`'s memberships, a trait's supertraits
             core = Base.unwrap_unionall(pat)
-            (core isa DataType && (core.name === Base.unwrap_unionall(Dynamic).name || istrait(core))) && continue
+            (core isa DataType && (core.name === Base.unwrap_unionall(Dynamic).name ||
+                                   core.name === Base.unwrap_unionall(Compiled).name || istrait(core))) && continue
             _has_pattern(out, pat, inst) && continue
             by = getfield(en, :by)
             push!(out, (pat, inst, How(by isa Symbol ? by : nothing)))

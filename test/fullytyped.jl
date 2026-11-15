@@ -65,9 +65,10 @@ using TraitWorld
     rate(m::Model, u::Float64)::Float64
 end
 struct Kept{K}; k::K; end
-inner(m::Model, u::Float64) = Kept(keep(m))
-outer(m::Model, u::Float64) = inner(m, u)                     # passes the trait argument on
-withkw(m::Model, u::Float64; scale = 1.0) = Kept(keep(m))     # a keyword method: its wrapper passes it on
+# the trait's default as generated methods (W-151): a plain member is boxed by the forwarder
+@erasing inner(m::Model, u::Float64) = Kept(m)
+@erasing outer(m::Model, u::Float64) = inner(m, u)            # passes the kept form on
+@erasing withkw(m::Model, u::Float64; scale = 1.0) = Kept(m)  # a keyword method: its forwarder passes the keywords on
 end
 struct Decay; k::Float64; end
 OnceLib.rate(d::Decay, u::Float64) = -d.k * u
@@ -79,7 +80,8 @@ once_kw() = OnceLib.withkw(DECAY, 1.0; scale = 2.0)
 @testset "fully typed mode" begin
     # a trait with a `Dynamic` default: in a session its methods are compiled once, and a call that passes
     # the argument on is made when it runs; a build compiles for the type the call knows (compiler §7.6)
-    @test once_outer() isa OnceLib.Kept{Dynamic{OnceLib.Model}}            # the session: compiled once
+    @test once_outer() isa OnceLib.Kept{Dynamic{OnceLib.Model}}            # the box, by the forwarder
+    @test once_kw() isa OnceLib.Kept{Dynamic{OnceLib.Model}}
     @test isfullytyped(fully_typed(once_outer, ())) && isfullytyped(fully_typed(once_kw, ()))
     r = fully_typed(total, (Holder,))
     @test !isfullytyped(r)

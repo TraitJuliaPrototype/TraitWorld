@@ -20,7 +20,8 @@ export @trait, @implement, Dynamic, unwrap, Kept, kept_call, isdynamic, like, wi
        detect_dynamic_fallbacks, detect_unused_casts, detect_kept_storage, Callable,
        @enforce_fully_typed, @warn_not_fully_typed, fully_typed, isfullytyped, FullyTypedReport,
        NotFullyTypedError, AbstractTypeError, @enforce_concrete_only, @warn_on_abstract,
-       OwnershipError, @joint_owners, PirateError, verify_main, VerifyReport, add_entrypoints, make_executable, make_library, BuildError
+       OwnershipError, @joint_owners, PirateError, verify_main, VerifyReport, add_entrypoints, make_executable, make_library, BuildError,
+       Compiled, @erasing, erases, check_at_box
 
 # the casts and `keep` (traits §7.6, §7.8): Julia's own, re-exported. A call written with a cast is the
 # cast's where the name is bound to these; a package's own function of the name is called as any other
@@ -38,12 +39,15 @@ include("runtime.jl")
 include("errors.jl")
 include("ownership.jl")
 include("dynamic.jl")
+include("compiled.jl")
 include("kept.jl")
 include("trait.jl")
 include("check.jl")
 include("implement.jl")
 include("like.jl")
 include("classify.jl")
+include("erasing.jl")
+include("atbox.jl")
 include("scope.jl")
 include("callable.jl")
 include("fullytyped.jl")
@@ -52,6 +56,24 @@ include("strict.jl")
 include("ahead.jl")
 include("build.jl")
 include("buildbase.jl")
+
+"""
+    TraitWorld.ByType
+
+The prototype's names that a module binds explicitly, since the library exports the cast of the same name
+(W-151; traits §7.6: the names are bound, not reserved): `using TraitWorld.ByType: compiled_for`. Then
+`compiled_for(x)` is an ordinary function that returns the wrapper `Compiled(x)`, a value made in plain code.
+"""
+module ByType
+import ..TraitWorld: Compiled
+"""
+    compiled_for(x)
+
+`x` kept so that code for it is compiled for its type: the wrapper `Compiled(x)`, a member of every trait `x`
+is a member of. On a `Dynamic{X}`, the wrapper of the object it holds.
+"""
+compiled_for(x) = Compiled(x)
+end
 
 # BaseTraits (traits §10): a module of the library, its names exported with the library's
 include("BaseTraits.jl")

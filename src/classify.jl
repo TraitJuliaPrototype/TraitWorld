@@ -373,21 +373,26 @@ end
 """
     check_definitions(M::Module) -> Vector{String}
 
-The methods of `M` at trait arguments that are unbounded, each with its uses outside the contract
-(traits §11.2); empty where every one is fully bounded. Methods marked `@unbounded` are skipped.
+The methods of `M` at trait arguments (and at the kept forms of `@erasing`) that are not bounded, each with its
+faults, read at the box (traits §11.2; W-151, D-3): the method's instance at `Dynamic{X}` in place of each trait
+argument, inferred by the facts rule, where a call that takes a value at the box finds no method or is left to run
+time outside the contract. Each fault names the line of the method that passes the value and what the call reaches.
+Empty where every method is bounded. Methods marked `@unbounded` and the forwarders `@erasing` makes are skipped.
 """
 function check_definitions(M::Module)
     problems = String[]
     for name in names(M; all = true)
         isdefined(M, name) || continue
         f = try getglobal(M, name) catch; continue end
-        f isa Function || continue
+        (f isa Function || f isa Type) || continue
         for m in methods(f)
             m.module === M || continue
-            _trait_arguments(m) || continue
+            _at_box_checked(m) || continue
             _bounded_option(m) === false && continue
-            for u in classify(m)
-                push!(problems, "$(m.name) at $(m.file):$(u.line): $(u.what) is not in the contract of $(u.trait)")
+            fs = check_at_box(m)
+            fs === nothing && continue
+            for u in fs
+                push!(problems, "$(m.name) at $(m.file):$(u.line): $(u.what)")
             end
         end
     end
@@ -429,25 +434,35 @@ const _PENDING_BOUNDED = Tuple{Method, Vector{Symbol}}[]
 
 function _check_bounded(m::Method)
     _check_pending_bounded(m.module, m.name)
-    _trait_arguments(m) || return nothing
+    _at_box_checked(m) || return nothing
     _bounded(m) || return nothing
     return _decide_bounded(m)
 end
 
-# classifies `m` now: refuses it where a use is outside the contract, keeps it waiting where a call
-# reaches no method yet. At its module's end (`final`) a call that still reaches no method counts.
+# reads `m` at the box now (D-3): refuses it where a fault is found; keeps it waiting where its body names a
+# global not yet defined, or where its only faults are calls of the module's own functions that find no method
+# yet. At its module's end (`final`) every fault counts.
 function _decide_bounded(m::Method; final::Bool = false)
-    st = _classify(m)
-    uses = final ? vcat(st.uses, st.pending) : st.uses
-    if isempty(uses)
-        final || isempty(st.waits_for) || push!(_PENDING_BOUNDED, (m, st.waits_for))
-        return nothing
+    if !final
+        waits = _names_undefined!(Symbol[], m)
+        isempty(waits) || (push!(_PENDING_BOUNDED, (m, waits)); return nothing)
+    end
+    fs = check_at_box(m)
+    (fs === nothing || isempty(fs)) && return nothing
+    if !final
+        own = Symbol[]
+        for u in fs
+            (u.kind === :nomethod && u.callee isa Function && parentmodule(u.callee) === m.module) || break
+            push!(own, nameof(u.callee))
+        end
+        length(own) == length(fs) && (push!(_PENDING_BOUNDED, (m, own)); return nothing)
     end
     # the refused method goes; while an image is built a method cannot be deleted, and the error
     # fails the build
     ccall(:jl_generating_output, Cint, ()) == 0 && Base.delete_method(m)
-    lines = ["$(u.what) at line $(u.line) is not in the contract of $(u.trait)" for u in uses]
-    throw(TraitUseError("$(m.name) is declared bounded, and is unbounded:\n  " * join(lines, "\n  ")))
+    X = box_signature(m)
+    lines = [_fault_line(u) for u in fs]
+    throw(TraitUseError("$(m.name) is declared bounded, and is not bounded at the box ($X):\n  " * join(lines, "\n  ")))
 end
 
 # the module's end (the module-end hook): its waiting methods are classified a last time

@@ -110,10 +110,11 @@ function _trait(mod::Module, head, body)
         Any[$(QuoteNode.(supers)...)], $(lib(:OperationDecl))[$(opdecls...)],
         $(lib(:FieldDecl))[$(fielddecls...)], Pair{Symbol,Any}[$(eqs...)], $(QuoteNode(items.attribute)),
         Pair{Symbol,Symbol}[$([:($(QuoteNode(n)) => $(QuoteNode(l))) for (n, l) in items.concrete]...)]))))
-    # the trait's default attribute (traits §4.6), read by the compiler at a trait argument (§6.3)
-    items.attribute === :none ||
-        push!(out.args, :(ccall(:jl_set_default_attribute, Cvoid, (Any, Cint), $name,
-                                $(items.attribute === :dynamic ? 2 : 1))))
+    # the trait's default (traits §4.6): `@default_dynamic` is recorded on the contract, where `@erasing` reads it
+    # to make the forwarders (W-151); the compiler's step 4 is not set for it. `@default_compiled` sets the
+    # compiler's bit, read at a trait argument (compiler §6.3)
+    items.attribute === :compiled &&
+        push!(out.args, :(ccall(:jl_set_default_attribute, Cvoid, (Any, Cint), $name, 1)))
     # the declared fields' names and types, read by inference (compiler §7.1)
     isempty(items.fields) || push!(out.args, :($(lib(:_set_declared_fields!))($name, $mod,
         Symbol[$([QuoteNode(f[1]) for f in items.fields]...)], Any[$([QuoteNode(f[2]) for f in items.fields]...)],
@@ -123,6 +124,12 @@ function _trait(mod::Module, head, body)
                    init = :(Core.UnionAll($Z, $(lib(:Dynamic)){$Z})))
     push!(out.args, Expr(:let, Expr(:block, tvdefs..., :($Z = Core.TypeVar($(QuoteNode(:Z)), $T))),
         :($(lib(:_declare_checked!))($dynpat, $T, $mod, :object, :field))), Expr(:latestworld))
+    # 7. the wrapper's membership (W-151): Compiled{Z} where {P…, Z <: X{P…}}, forwarding by `object`, so that
+    # the wrapper of a member of X is a member of X
+    wpat = foldr((p, acc) -> :(Core.UnionAll($p, $acc)), params;
+                 init = :(Core.UnionAll($Z, $(lib(:Compiled)){$Z})))
+    push!(out.args, Expr(:let, Expr(:block, tvdefs..., :($Z = Core.TypeVar($(QuoteNode(:Z)), $T))),
+        :($(lib(:_declare_checked!))($wpat, $T, $mod, :object, :field))), Expr(:latestworld))
     # a docstring written before `@trait` documents the trait's binding
     push!(out.args, :(Core.@__doc__ $name))
     push!(out.args, nothing)

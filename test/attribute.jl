@@ -11,6 +11,9 @@ using TraitWorld
 end
 kind(m::Model) = keep(m) isa Dynamic ? :dynamic : :compiled
 solve(m::Model, u0::Float64) = rhs(m, u0) + u0
+# the trait's default as generated methods (W-151): the method at the kept forms, a forwarder that boxes
+@erasing form(m::Model) = m isa Dynamic ? :box : m isa Compiled ? :wrapper : :plain
+@erasing esolve(m::Model, u0::Float64) = rhs(m, u0) + u0
 end
 using .Models: Model, rhs, solve
 
@@ -27,8 +30,14 @@ end
 using .UserModels: Decay, Growth
 
 @testset "the trait's default" begin
-    @test Models.kind(Decay(1.0)) === :dynamic         # a user's member: compiled once
-    @test Models.kind(Growth(1.0)) === :dynamic
+    # `@default_dynamic` makes the forwarders of `@erasing` (W-151): a plain member is boxed, a box and a wrapper
+    # pass as they are; it no longer sets the compiler's step 4, so a method written without `@erasing` takes a
+    # plain member as it is
+    @test Models.form(Decay(1.0)) === :box && Models.form(Growth(1.0)) === :box
+    @test Models.form(TraitWorld.ByType.compiled_for(Decay(1.0))) === :wrapper
+    @test Models.form(Dynamic{Model}(Growth(2.0))) === :box
+    @test Models.esolve(Decay(0.5), 2.0) == 1.0 && Models.esolve(TraitWorld.ByType.compiled_for(Growth(0.5)), 2.0) == 3.0
+    @test Models.kind(Decay(1.0)) === :compiled
     @test solve(Decay(0.5), 2.0) == 1.0 && solve(Growth(0.5), 2.0) == 3.0
 end
 
@@ -44,8 +53,12 @@ end
 @testset "keep" begin
     struct Prob{M <: Model}; m::M; end
     store(m::Model) = (k = keep(m); Prob{typeof(k)}(k))
-    p = store(Decay(1.0))                                 # the trait's default: compiled once
+    p = store(with_dynamic(Decay(1.0)))                   # the cast: compiled once
     @test p isa Prob{Dynamic{Model}} && unwrap(p.m) === Decay(1.0)
+    # the same struct from a method at the kept forms (W-151): the value carries its form
+    @erasing kstore(m::Model) = Prob{typeof(m)}(m)
+    @test kstore(Decay(1.0)) isa Prob{Dynamic{Model}}
+    @test kstore(TraitWorld.ByType.compiled_for(Decay(1.0))) isa Prob{Compiled{Decay}}
     q = store(compiled_for(Decay(1.0)))
     @test q isa Prob{Decay}
 end

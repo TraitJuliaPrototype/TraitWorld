@@ -18,6 +18,11 @@ let A = TypeVar(:A, Tuple), S = TypeVar(:S), Z = TypeVar(:Z, Core.Callable{A, S}
     pattern = UnionAll(A, UnionAll(S, UnionAll(Z, Dynamic{Z})))
     _declare!(pattern, Core.Callable{A, S}, @__MODULE__, :object, :field)
 end
+# and the wrapper's (W-151): Compiled{Z} where {A, S, Z <: Callable{A, S}}
+let A = TypeVar(:A, Tuple), S = TypeVar(:S), Z = TypeVar(:Z, Core.Callable{A, S})
+    pattern = UnionAll(A, UnionAll(S, UnionAll(Z, Compiled{Z})))
+    _declare!(pattern, Core.Callable{A, S}, @__MODULE__, :object, :field)
+end
 
 # Dynamic{Callable{A, S}}'s call: the arguments at A, the result checked against S. Kept at several signatures
 # (`Dynamic{All{Callable{A, S}, Callable{B, S}}}`, traits §7.7), the call takes the one its arguments match.

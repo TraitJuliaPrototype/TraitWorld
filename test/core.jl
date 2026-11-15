@@ -427,15 +427,19 @@ end
     @test isempty(classify(only(methods(C.viahelper))))
     @test !isempty(classify(only(methods(C.leak))))
     @test !isempty(classify(only(methods(C.wide))))
+    # the definition-time check reads the method at the box (W-151, D-3): `typeof(t)` acts on the box and is bounded;
+    # `length(t)` finds no method there
     ps = check_definitions(C)
-    @test length(ps) == 2 && any(p -> occursin("leak", p), ps) && any(p -> occursin("wide", p), ps)
-    e = try Core.eval(C, :(@bounded leak2(t::CTable) = typeof(t))); nothing catch err; err end
-    @test e isa TraitUseError
-    @test !isdefined(C, :leak2) || isempty(methods(getglobal(C, :leak2)))
-    Core.eval(C, :(@unbounded leak3(t::CTable) = typeof(t)))
+    @test length(ps) == 1 && occursin("wide", ps[1]) && occursin(r"length\((Core\.)?Dynamic\{", ps[1]) && occursin(":$(only(methods(C.wide)).line):", ps[1])
+    Core.eval(C, :(@bounded leak2(t::CTable) = typeof(t)))
+    @test Base.invokelatest(getglobal(C, :leak2), C.CT([[1.0]])) === C.CT
+    e = try Core.eval(C, :(@bounded wide2(t::CTable) = length(t))); nothing catch err; err end
+    @test e isa TraitUseError && occursin(r"length\((Core\.)?Dynamic\{", sprint(showerror, e))
+    @test !isdefined(C, :wide2) || isempty(methods(getglobal(C, :wide2)))
+    Core.eval(C, :(@unbounded wide3(t::CTable) = length(t)))
     Core.eval(C, :(@bounded ok2(t::CTable) = ncols(t)))
     @test Base.invokelatest(getglobal(C, :ok2), C.CT([[1.0]])) == 1
-    @test length(check_definitions(C)) == 2                         # @unbounded is skipped
+    @test length(check_definitions(C)) == 1                         # @unbounded is skipped
 end
 
 ## the classification's further rules (traits §7.3), found by W-104's third slice: a declared field written,

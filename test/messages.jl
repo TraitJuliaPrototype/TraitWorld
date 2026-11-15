@@ -61,7 +61,7 @@ using .MsgLib: MShape, marea, mname, mdouble
                  end
                  mdensity(b::MBox) = b.mass / mvol(b)
                  end))
-    @test e isa TraitWorld.TraitUseError && occursin("the field `mass` of a", msg(e))
+    @test e isa TraitWorld.TraitUseError && occursin("the field `mass` is no declared field of", msg(e))   # read at the box (D-3)
 
     m = only(m for m in methods(marea) if m.sig == Tuple{typeof(marea), MShape})
     @test endswith(string(m.file), "messages.jl")
