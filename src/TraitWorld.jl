@@ -100,4 +100,10 @@ function __init__()
     ccall(:jl_set_method_deletion_hook, Cvoid, (Any,), _deletion_hook)
 end
 
+# A trimmed build (traits §16; compiler §7.6) defines its program while it loads it, as a session does, but Julia
+# runs every package's `__init__` only when the binary starts (an output that is not incremental). The library's
+# hooks, which make a definition's methods (the kept forms, the forwarders) and check it, are installed at its load
+# there too.
+Base.JLOptions().trim != 0 && ccall(:jl_generating_output, Cint, ()) == 1 && __init__()
+
 end # module
