@@ -45,8 +45,8 @@ falls short of them, the references' Deviations tables say so.
 
 ```sh
 source env.sh
-julia-unified/julia --startup-file=no --project=TraitWorld-unified TraitWorld-unified/test/runtests.jl
+julia-unified/julia --startup-file=no --project=TraitWorld TraitWorld/test/runtests.jl
 ```
 
 The workloads that gate the first slice are in the experiments repository,
-`experiments/unification/workloads/`.
+`experiments/implementation/workloads/`.

@@ -1,5 +1,5 @@
 # `make_executable` and `make_library` (traits §16): what they take and refuse before a build. The
-# builds themselves run in `experiments/unification/w139/make.jl` (E-364): each is a process of its own.
+# builds themselves run in `experiments/implementation/w139/make.jl` (E-364): each is a process of its own.
 using TraitWorld, Test
 
 @testset "make_executable, make_library: the checks before a build" begin
