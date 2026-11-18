@@ -32,7 +32,7 @@ struct Contract
     operations::Vector{OperationDecl}
     fields::Vector{FieldDecl}
     equations::Vector{Pair{Symbol,Any}}  # a parameter => an expression of `Self`
-    attribute::Symbol             # :none, :dynamic or :compiled (traits §4.6; W-111)
+    attribute::Symbol             # :none, or :dynamic for a trait that erases by default (traits §4.6)
     concrete::Vector{Pair{Symbol,Symbol}}  # a parameter or :Self => :enforce or :warn (traits §14)
 end
 

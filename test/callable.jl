@@ -9,7 +9,7 @@ apply(f::Callable, x) = hasmethod(f, Tuple{Int}) ? "an integer map" : "a string 
 # two methods that differ only in A tie for every function
 tie(f::Callable{Tuple{Int}, Int}) = 1
 tie(f::Callable{Tuple{String}, String}) = 2
-kind(f::Callable{Tuple{Float64}, Float64}) = keep(f) isa Dynamic ? :dynamic : :compiled
+kind(f::Callable{Tuple{Float64}, Float64}) = f isa Dynamic ? :dynamic : f isa Compiled ? :compiled : :plain
 # the check is at a call through the value as declared; a closure that captures it (a comprehension)
 # knows it by its own type, as `map` does
 first_of(f::Callable{Tuple{Float64}, Float64}, v::Vector{Float64}) = f(v[1])
@@ -27,6 +27,7 @@ first_of(f::Callable{Tuple{Float64}, Float64}, v::Vector{Float64}) = f(v[1])
     # Callable erases by default, a function Julia defines included: a plain function is boxed by the forwarder
     @test kind(x -> 2x) === :dynamic
     @test kind(abs2) === :dynamic
+    @test kind(compiled_for(abs2)) === :compiled                 # the wrapper passes as it is
     # Dynamic{Callable{A, S}}: a member of Callable{A, S}, its call checked at both ends
     d = Dynamic{Callable{Tuple{Float64}, Float64}}(x -> 3x)
     @test d isa Callable{Tuple{Float64}, Float64}

@@ -121,10 +121,7 @@ function _trait(mod::Module, head, body)
         $(lib(:FieldDecl))[$(fielddecls...)], Pair{Symbol,Any}[$(eqs...)], $(QuoteNode(items.attribute)),
         Pair{Symbol,Symbol}[$([:($(QuoteNode(n)) => $(QuoteNode(l))) for (n, l) in items.concrete]...)]))))
     # the trait's default (traits §4.6): `@default_dynamic` is recorded on the contract, where the expansion hook
-    # reads it to make the forwarders (erasing.jl); the compiler's step 4 is not set for it. `@default_compiled` sets the
-    # compiler's bit, read at a trait argument (compiler §6.3)
-    items.attribute === :compiled &&
-        push!(out.args, :(ccall(:jl_set_default_attribute, Cvoid, (Any, Cint), $name, 1)))
+    # reads it to make the forwarders (erasing.jl)
     # the declared fields' names and types, read by inference (compiler §7.1)
     isempty(items.fields) || push!(out.args, :($(lib(:_set_declared_fields!))($name, $mod,
         Symbol[$([QuoteNode(f[1]) for f in items.fields]...)], Any[$([QuoteNode(f[2]) for f in items.fields]...)],
@@ -220,7 +217,8 @@ function _parse_body(name::Symbol, params::Vector{Symbol}, body)
                 elseif m === Symbol("@default_dynamic")
                     attribute = :dynamic
                 elseif m === Symbol("@default_compiled")
-                    attribute = :compiled
+                    error("@trait $name: a trait without `@default_dynamic` takes a plain member as it is, compiled for ",
+                          "its type (traits §4.6, §7.5); `@default_compiled` is not an item of a trait's body")
                 else
                     error("@trait $name: $m is not an item of a trait's body")
                 end

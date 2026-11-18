@@ -1,5 +1,5 @@
-# Dynamic{X}: a member of X kept with the attribute `Dynamic` (traits §7.7; lowering §7). The struct
-# is Julia's `Core.Dynamic`, so that the compiler can make one for `keep`; the library declares its
+# Dynamic{X}: the box, a member of X held so that code for it is compiled once (traits §7.7; lowering §7). The
+# struct is Julia's `Core.Dynamic` (compiler §6.9); the library declares its
 # memberships (each trait's, at `@trait`) and defines its methods here.
 
 """

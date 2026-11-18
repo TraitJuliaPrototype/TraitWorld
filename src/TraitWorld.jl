@@ -15,17 +15,12 @@ isdefined(Core, :MembershipEntry) ||
 # image holds the code its run-time sites reach whatever the values (compiler §9; E-326).
 Base.Experimental.@compiler_options facts = true
 
-export @trait, @implement, Dynamic, unwrap, Kept, kept_call, isdynamic, like, withfields, ImplementError, TraitUseError,
-       @bounded, @unbounded, check_definitions, classify, @trait_module, compiled_for, with_dynamic, keep,
-       detect_dynamic_fallbacks, detect_unused_casts, detect_kept_storage, Callable,
+export @trait, @implement, Dynamic, unwrap, like, withfields, ImplementError, TraitUseError,
+       @bounded, @unbounded, check_definitions, classify, @trait_module, compiled_for, Callable,
        @enforce_fully_typed, @warn_not_fully_typed, fully_typed, isfullytyped, FullyTypedReport,
        NotFullyTypedError, AbstractTypeError, @enforce_concrete_only, @warn_on_abstract,
        OwnershipError, @joint_owners, @owner_only, delete_membership, PirateError, verify_main, VerifyReport, add_entrypoints, make_executable, make_library, BuildError,
        Compiled, @erasing, erases, check_at_box
-
-# the casts and `keep` (traits §7.6, §7.8): Julia's own, re-exported. A call written with a cast is the
-# cast's where the name is bound to these; a package's own function of the name is called as any other
-import Core: compiled_for, with_dynamic, keep
 
 # Intersections All{X, Y, …} (traits §3.6): Core does not export the name, and the library does,
 # so a module that also uses DataAPI's `All` qualifies one of them (open issue 148)
@@ -40,7 +35,6 @@ include("errors.jl")
 include("ownership.jl")
 include("dynamic.jl")
 include("compiled.jl")
-include("kept.jl")
 include("trait.jl")
 include("check.jl")
 include("implement.jl")
@@ -58,24 +52,6 @@ include("delete.jl")
 include("ahead.jl")
 include("build.jl")
 include("buildbase.jl")
-
-"""
-    TraitWorld.ByType
-
-The prototype's names that a module binds explicitly, since the library exports the cast of the same name
-(W-151; traits §7.6: the names are bound, not reserved): `using TraitWorld.ByType: compiled_for`. Then
-`compiled_for(x)` is an ordinary function that returns the wrapper `Compiled(x)`, a value made in plain code.
-"""
-module ByType
-import ..TraitWorld: Compiled
-"""
-    compiled_for(x)
-
-`x` kept so that code for it is compiled for its type: the wrapper `Compiled(x)`, a member of every trait `x`
-is a member of. On a `Dynamic{X}`, the wrapper of the object it holds.
-"""
-compiled_for(x) = Compiled(x)
-end
 
 # BaseTraits (traits §10): a module of the library, its names exported with the library's
 include("BaseTraits.jl")

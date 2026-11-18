@@ -36,7 +36,7 @@ function (d::Dynamic{Core.Callable{A, S}})(args...) where {A, S}
     r isa S || throw(TypeError(:Callable, S === Nothing ? "end the function with `nothing`" : "", S, r))
     return r::S
 end
-# Kept at several signatures (`Dynamic{All{Callable{A, S}, Callable{B, S}}}`, traits §7.7), the call takes the one
+# Boxed at several signatures (`Dynamic{All{Callable{A, S}, Callable{B, S}}}`, traits §7.7), the call takes the one
 # its arguments match.
 function (d::Dynamic{Z})(args...) where {A, S, Z <: Core.Callable{A, S}}
     args isa A && return _checked_result(getfield(d, :object)(args...), S)

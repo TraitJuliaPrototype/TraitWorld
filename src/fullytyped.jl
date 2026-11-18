@@ -235,73 +235,74 @@ function _scan!(sites, queue, extra, ir, mi, interp, world)
         ft = CC.widenconst(CC.argextype(stmt.args[1], ir))
         f = CC.singleton_type(CC.argextype(stmt.args[1], ir))
         kind = _site_kind(info, f, ft)
-        if kind === :resolved
+        if kind !== :none && _wrapper_targets!(extra, queue, ir, stmt, f)
+            # the wrapper of a value known only by its trait: its targets at the declared members
+        elseif kind === :resolved
             for T in _callee_sigs(info)
                 push!(queue, T)
             end
             _callable_targets!(extra, queue, info, ir, stmt)
         elseif kind === :none
             _operation_targets!(extra, queue, info, ir, stmt, f)
-        elseif kind === :dispatch && _cast_targets!(extra, queue, ir, stmt, f)
-            # a cast on a value known only by its trait: the declared members are its targets
         else
             push!(sites, _site(kind, ir, mi, i, stmt, interp, world))
         end
     end
 end
 
-# the trait a `compiled_for` cast's operand is known by, where `a` is such a cast's result
-function _cast_trait(ir, @nospecialize(a))
+# the trait a value is known by where `a` is the wrapper of it, `compiled_for(x)` or `Compiled(x)` of a value known
+# only by its trait (traits §7.6, §16)
+function _wrapped_trait(ir, @nospecialize(a))
     a isa Core.SSAValue || return nothing
     stmt = ir.stmts[a.id][:stmt]
     (Meta.isexpr(stmt, :call) && length(stmt.args) == 2) || return nothing
-    CC.singleton_type(CC.argextype(stmt.args[1], ir)) === Core._cast_compiled || return nothing
+    _is_wrapping(CC.singleton_type(CC.argextype(stmt.args[1], ir))) || return nothing
     X = CC.widenconst(CC.argextype(stmt.args[2], ir))
     return _is_trait_arg(X) ? X : nothing
 end
+_is_wrapping(@nospecialize(f)) = f === compiled_for || f === Compiled
 
-# a call with `compiled_for` on a value known only by its trait: the callee at each declared member
-# (traits §16). True where the statement is such a call, or the cast itself, with its targets listed.
-function _cast_targets!(extra, queue, ir, stmt, @nospecialize(f))
+# the declared members of a trait that a wrapper of a value known by it can hold: concrete, and neither a box nor a
+# wrapper (the wrapper of either holds its object)
+_wrappable_members(@nospecialize(X)) =
+    Any[M for M in members_of(X) if M isa DataType && isconcretetype(M) && !(M <: Dynamic) && !(M <: Compiled)]
+
+# The wrapper of a value known only by its trait (traits §16): the wrapping itself, at each declared member, and a
+# call given such a wrapper, its callee at each declared member's wrapper. True where the statement is either, with
+# its targets listed.
+function _wrapper_targets!(extra, queue, ir, stmt, @nospecialize(f))
     args = (stmt::Expr).args
-    if f === Core._cast_compiled
-        (length(args) == 2 && _is_trait_arg(CC.widenconst(CC.argextype(args[2], ir)))) || return false
-        T = Tuple{typeof(Core._cast_compiled), Any}
-        T in extra || (push!(extra, T); push!(queue, T))
+    if _is_wrapping(f) && length(args) == 2
+        X = CC.widenconst(CC.argextype(args[2], ir))
+        _is_trait_arg(X) || return false
+        ms = _wrappable_members(X)
+        isempty(ms) && return false
+        for M in ms
+            T = Tuple{Core.Typeof(f), M}
+            T in extra || (push!(extra, T); push!(queue, T))
+        end
         return true
     end
-    (f === Core.attributed_call && length(args) >= 3) || return false
-    g = CC.singleton_type(CC.argextype(args[3], ir))
-    g === nothing && return false
+    f === nothing && return false
     choices = Vector{Any}[]
-    cast = false
-    for a in args[4:end]
-        X = _cast_trait(ir, a)
+    wrapped = false
+    for a in args[2:end]
+        X = _wrapped_trait(ir, a)
         if X === nothing
             t = CC.widenconst(CC.argextype(a, ir))
             ft_abstract(t) && return false
             push!(choices, Any[t])
         else
-            # (a `Dynamic{X}` is no target: the cast passes its object)
-            ms = Any[M for M in members_of(X) if M isa DataType && isconcretetype(M) && !(M <: Dynamic)]
+            ms = _wrappable_members(X)
             isempty(ms) && return false
-            push!(choices, ms)
-            cast = true
+            push!(choices, Any[Compiled{M} for M in ms])
+            wrapped = true
         end
     end
-    cast || return false
-    attr = CC.argextype(args[2], ir)
-    bits = attr isa CC.Const && attr.val isa Int ? reinterpret(UInt64, attr.val) : UInt64(0)
-    mask = bits % UInt32
-    dyn = (bits >> 32) % UInt32 & mask
-    world = Base.get_world_counter()
+    wrapped || return false
     for ts in Iterators.product(choices...)
-        T = Tuple{Core.Typeof(g), ts...}
+        T = Tuple{Core.Typeof(f), ts...}
         T in extra || (push!(extra, T); push!(queue, T))
-        # the instance the cast runs: compiled with the call's attributes (compiler §6.3)
-        mask == 0 && continue
-        mi = ccall(:jl_attributed_mi, Any, (Any, UInt32, UInt32, UInt), T, mask, dyn, world)
-        mi isa Core.MethodInstance && !(mi in extra) && push!(extra, mi)
     end
     return true
 end
@@ -778,7 +779,7 @@ function _concrete_method(mod::Module, args, level::Symbol)
         if n in wherevars
             push!(checks, :($lib($(QuoteNode(level)), $(QuoteNode(fname)), $(QuoteNode(n)), $n)))
         elseif n in argnames
-            push!(checks, :($libself($(QuoteNode(level)), $(QuoteNode(fname)), $(QuoteNode(n)), $(GlobalRef(Core, :keep))($n))))
+            push!(checks, :($libself($(QuoteNode(level)), $(QuoteNode(fname)), $(QuoteNode(n)), $n)))
         elseif n === :result
             continue
         else
@@ -810,7 +811,7 @@ struct VerifyReport
     entry::Any
     targets::Vector{Any}
     entrypoints::Vector{Any}    # the targets that no call in the code names: a build is told these;
-                                # a signature, or the method instance a cast runs
+                                # a signature, or a method instance
     holes::Vector{RuntimeSite}
     complete::Bool              # false where the walk stopped at its bound
 end
@@ -829,9 +830,8 @@ Every target a program reaches from `main` at `argtypes`, for `juliac --trim` (t
 its code resolves, a function passed at a `Callable` at its signature, every declared member as a
 target of an operation on a value known by its trait; and the calls left to run time. With
 `entrypoints = true`, the targets are signatures a build can compile. The report's `entrypoints` are
-the targets that no call in the code names (the members', the casts' and the `Callable`s'): the
-signatures to give the build as entry points, and for a cast's member the method instance the cast
-runs; `add_entrypoints(report)` gives them to a build. The walk stops after `bound` signatures; the report's
+the targets that no call in the code names (the members', the wrappers' and the `Callable`s'): the
+signatures to give the build as entry points; `add_entrypoints(report)` gives them to a build. The walk stops after `bound` signatures; the report's
 `complete` is then false.
 """
 function verify_main(@nospecialize(main), @nospecialize(argtypes::Tuple); entrypoints::Bool = true,

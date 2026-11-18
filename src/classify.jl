@@ -101,12 +101,6 @@ function _in_contract(interp::ClassifyInterp, @nospecialize(f), argtypes::Vector
     atype = CC.argtypes_to_type(argtypes)
     # an operation of the trait or a supertrait, or a declared field: the compiler's rule
     CC.declared_operation_result(interp, argtypes, atype) === nothing || return true
-    # a call with cast arguments (traits §7.6): the call it makes
-    if f === Core.attributed_call && length(argtypes) >= 3 && k >= 4
-        g = CC.singleton_type(CC.widenconst(argtypes[3]))
-        g === nothing && return false
-        return _in_contract(interp, g, argtypes[3:end], k - 2, X)
-    end
     # a struct's constructor storing it in a field typed by the trait or a supertype (traits §7.3): its `convert`
     # and `isa` against the field's type, which the struct's parameters make `Type{<:Y}` here
     if (f === convert && k == 3) || (f === isa && k == 2)
@@ -124,8 +118,6 @@ function _in_contract(interp::ClassifyInterp, @nospecialize(f), argtypes::Vector
     end
     # a keyword method's sorter reporting an unknown keyword (lowering's `kwerr`): an error, no use
     f === Base.kwerr && return true
-    # keeping it with its attribute (traits §7.8), or a cast's unwrapping of a `Dynamic{X}`
-    (f === Core.keep || f === Core._cast_compiled) && return true
     # storing it in a slot typed by the trait or a supertype (traits §7.3): a field, or an element of a
     # container
     _stores_in_slot(f, argtypes, k, X) && return true

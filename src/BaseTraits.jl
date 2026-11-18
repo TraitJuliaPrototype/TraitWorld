@@ -7,7 +7,6 @@
 module BaseTraits
 
 using ..TraitWorld
-using ..TraitWorld: keep
 import LinearAlgebra
 using LinearAlgebra: Factorization, ldiv!, mul!
 import Dates
@@ -252,8 +251,7 @@ Base.getindex(v::IndexableVector, i::Int) = v.c[firstindex(v.c) + i - 1]
 `x` as a read-only `AbstractVector{T}` for plain code, without a copy (an `IndexableVector`).
 """
 @unbounded function asvector(x::Indexable{T}) where {T}
-    k = keep(x)
-    return IndexableVector{T, typeof(k)}(k)
+    return IndexableVector{T, typeof(x)}(x)
 end
 
 """

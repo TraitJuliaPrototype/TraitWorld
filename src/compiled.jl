@@ -1,8 +1,7 @@
-# The wrapper: a member kept so that code for it is compiled for its type (W-151, the prototype of the
-# review's P1 as accepted, "values carry, by type"; open issue 186). The two kept forms of a member of a
-# trait `X` are the box `Dynamic{X}` (compiled once per trait instance) and `Compiled{T}` (compiled per
-# type `T` of the object). Each is a concrete type and a member of `X`, so the choice travels with the value:
-# through storage, untyped parameters and records made before a signature is known.
+# The wrapper (traits §7.4, §7.6): a member kept so that code for it is compiled for its type. The two kept forms
+# of a member of a trait `X` are the box `Dynamic{X}` (compiled once per trait instance) and `Compiled{T}`
+# (compiled per type `T` of the object). Each is a concrete type and a member of `X`, so the choice travels with
+# the value: through storage, untyped parameters and records made before a signature is known.
 
 """
     Compiled(x)
@@ -22,6 +21,15 @@ Compiled(w::Compiled) = w
 Compiled(d::Dynamic) = Compiled(getfield(d, :object))
 
 unwrap(w::Compiled) = getfield(w, :object)
+
+"""
+    compiled_for(x)
+
+`x` kept so that code for it is compiled for its type: the wrapper `Compiled{typeof(x)}`, a value made in plain
+code, a member of every trait `x` is a member of (traits §7.6). On a `Dynamic{X}`, the wrapper of the object it
+holds; on a wrapper, the wrapper itself. `unwrap(w)` is the object.
+"""
+compiled_for(x) = Compiled(x)
 
 # Every trait the wrapper is a member of forwards to its object (the trait's method for an operation reads
 # `_fwd`, trait.jl): resolved at the wrapper's type, so the operation's call is the object's own method.

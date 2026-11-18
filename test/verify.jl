@@ -26,7 +26,7 @@ sloppy(v::Vector{Any}) = sum(v)
     @test Tuple{typeof(total2), Vector{Shape2}} in r.targets
     @test main1(2) == 3.0 + 4.0 + 4.0
     # a call folded where the program is compiled reaches no target: the wrapper's call
-    @test !(Tuple{typeof(double), Float64} in verify_main(() -> applyf(TraitWorld.ByType.compiled_for(double), 1.0), ()).targets)
+    @test !(Tuple{typeof(double), Float64} in verify_main(() -> applyf(compiled_for(double), 1.0), ()).targets)
     # a function boxed by `Callable`'s default where its type is known: the forwarder is compiled per function (its
     # signature's test folds, traits §9), so the box's call may be resolved where the program is compiled, as the
     # wrapper's is; a target or none, the program's result is the same
@@ -36,19 +36,23 @@ sloppy(v::Vector{Any}) = sum(v)
     @test !isempty(r2.holes)
 end
 
-# a call with `compiled_for` on a value known only by its trait: the callee at each declared member
+# the wrapper of a value known only by its trait (traits §16): the instances its calls run, at every declared member
 scaled2(s::Shape2, k::Float64) = k * area2(s)
-castsum(xs::Vector{Shape2}) = (s = 0.0; for x in xs; s += scaled2(compiled_for(x), 2.0)::Float64; end; s)
+wrapsum(xs::Vector{Shape2}) = (s = 0.0; for x in xs; s += scaled2(compiled_for(x), 2.0)::Float64; end; s)
 
-@testset "verify_main: a cast's members" begin
-    r = verify_main(castsum, (Vector{Shape2},))
-    @test Tuple{typeof(scaled2), Circ, Float64} in r.targets && Tuple{typeof(scaled2), Sq, Float64} in r.targets
-    @test isempty(r.holes)
-    # the instance the cast runs at each member is an entry point
-    mis = [e for e in r.entrypoints if e isa Core.MethodInstance]
-    @test Set(mi.specTypes for mi in mis) == Set([Tuple{typeof(scaled2), Circ, Float64}, Tuple{typeof(scaled2), Sq, Float64}])
+@testset "verify_main: the wrapper's members" begin
+    r = verify_main(wrapsum, (Vector{Shape2},))
+    @test Tuple{typeof(scaled2), Compiled{Circ}, Float64} in r.targets && Tuple{typeof(scaled2), Compiled{Sq}, Float64} in r.targets
+    @test Tuple{typeof(compiled_for), Circ} in r.targets && Tuple{typeof(compiled_for), Sq} in r.targets
+    @test Tuple{typeof(area2), Compiled{Circ}} in r.targets                 # what the wrapper's calls reach
+    # the build's own check refuses the wrapping and the call it feeds: a closed build branches over the members for
+    # a cast, not for the wrapper's function (compiler C-114)
+    @test_broken isempty(r.holes)
+    @test length(r.holes) == 2 && all(h -> h.line == 41, r.holes)
+    # the instances the wrapper's calls run at each member are entry points: no call in the code names them
+    @test Tuple{typeof(scaled2), Compiled{Circ}, Float64} in r.entrypoints && Tuple{typeof(scaled2), Compiled{Sq}, Float64} in r.entrypoints
     @test add_entrypoints(r) === nothing
-    @test castsum(Shape2[Circ(1.0), Sq(2.0)]) == 2.0 * (3.0 + 4.0)
+    @test wrapsum(Shape2[Circ(1.0), Sq(2.0)]) == 2.0 * (3.0 + 4.0)
 end
 
 @testset "verify_main: entry points and the bound" begin

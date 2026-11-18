@@ -1,13 +1,12 @@
-# Values carry, by type (W-151; the review of 2026-11-15, P1 as accepted; open issue 186): the two kept forms, the
-# box `Dynamic{X}` and the wrapper `Compiled` that `compiled_for(x)` returns; a trait's default as methods made where
-# a method is defined (W-160: the method at the kept forms, a forwarder that boxes a plain member); `convert` into storage typed
-# `Dynamic{X}`; the definition-time check as a reading of the method at the box (D-3).
+# Values carry, by type (traits §7.4 to §7.8): the two kept forms, the box `Dynamic{X}` and the wrapper `Compiled`
+# that the library's `compiled_for(x)` returns; a trait's default as methods made where a method is defined (the
+# method at the kept forms, a forwarder that boxes a plain member); `convert` into storage typed `Dynamic{X}`; the
+# definition-time check as a reading of the method at the box.
 using Test, TraitWorld
-using TraitWorld.ByType: compiled_for
 
 module BT
 using TraitWorld
-@trait_module first_seen = false
+@trait_module
 @trait Shape begin
     @default_dynamic
     area(s::Shape)::Float64
@@ -51,6 +50,9 @@ end
 using .BT: Circle, Sq, FC, Shape, Named
 
 @testset "the wrapper" begin
+    # the library's exported `compiled_for` is the wrapper's function (traits §7.6), an ordinary function
+    @test compiled_for === TraitWorld.compiled_for && compiled_for isa Function && !isdefined(TraitWorld, :ByType)
+    @test compiled_for !== Core.compiled_for
     c = Circle(1.0)
     w = compiled_for(c)
     @test w isa Compiled{Circle} && unwrap(w) === c
@@ -107,7 +109,7 @@ end
     M = Module(:BTMistakes)
     code = quote
         using TraitWorld
-        @trait_module bounded = false first_seen = false
+        @trait_module bounded = false
         @trait T2 begin
             @default_dynamic
             n2(t::T2)::Int
