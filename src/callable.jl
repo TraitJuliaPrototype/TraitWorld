@@ -51,7 +51,8 @@ end
 end
 # the signatures of an intersection of `Callable`s, as (A, S) pairs: a constant of the type, so a call of a
 # `Dynamic{All{Callable…}}` at its second signature builds nothing (E-307)
-@generated _signatures(::Type{Z}) where {Z} = _signatures_of(Base.unwrap_unionall(Z))
+# `_signatures_of` stands before the generated function that calls it: a generator runs in the world of its
+# definition, so loaded from source it does not see a function defined after it.
 function _signatures_of(@nospecialize(u))
     u isa DataType || return ()
     if u.name === Base.unwrap_unionall(Core.All).name
@@ -60,6 +61,7 @@ function _signatures_of(@nospecialize(u))
     u.name === Base.unwrap_unionall(Core.Callable).name && length(u.parameters) >= 2 && return ((u.parameters[1], u.parameters[2]),)
     return ()
 end
+@generated _signatures(::Type{Z}) where {Z} = _signatures_of(Base.unwrap_unionall(Z))
 
 # The signature check (traits §9): `f` has a method at each `Callable` signature of the trait `Z` (a `Callable`, or
 # an intersection with such components). A fact where `f`'s type is known: `hasmethod` at a declared signature folds,
