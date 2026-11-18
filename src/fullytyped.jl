@@ -10,7 +10,7 @@ const CC = Base.Compiler
 
 "A call in the code that is dispatched when it runs (a run-time site), with its root cause."
 struct RuntimeSite
-    kind::Symbol            # :dispatch, :callee, :splat, :latest, :barrier
+    kind::Symbol            # :dispatch, :callee, :splat, :latest
     code::Any               # the MethodInstance whose code holds it
     file::Symbol
     line::Int
@@ -63,7 +63,6 @@ end
 
 const _NO_PARENTS = CC.TrimVerifier.ParentMap()
 const _BUILD_KINDS = (
-    "unresolved call (with its arguments' attributes)" => :barrier,
     "unresolved call to function" => :splat,
     "unresolved argument to call" => :splat,
     "builtin `Core.invokelatest`" => :latest,
@@ -309,9 +308,6 @@ end
 
 # a function passed at a `Callable{A, S}` argument: one target at its signature (traits §16)
 function _callable_targets!(extra, queue, @nospecialize(info), ir, stmt)
-    while info isa CC.AttributedCallInfo
-        info = info.info
-    end
     info isa CC.ConstCallInfo && (info = info.call)
     (info isa CC.MethodMatchInfo || info isa CC.UnionSplitInfo) || return
     argtypes = Any[CC.widenconst(CC.argextype(a, ir)) for a in stmt.args]
@@ -352,17 +348,7 @@ end
 # what a call statement is: :none (a builtin or a declared operation), :resolved (inferred, with its
 # callees), or the kind of run-time site
 function _site_kind(@nospecialize(info), @nospecialize(f), @nospecialize(ft))
-    dispatch = false
-    while true
-        if info isa CC.AttributedCallInfo
-            dispatch |= info.dispatch
-            info = info.info
-        else
-            break
-        end
-    end
-    dispatch && return :barrier
-    (info isa CC.DeclaredResultInfo || info isa CC.SplitCallInfo || info isa CC.KeepInfo) && return :none
+    (info isa CC.DeclaredResultInfo || info isa CC.SplitCallInfo) && return :none
     if f isa Core.Builtin
         if f === Core._apply_iterate
             return info isa CC.NoCallInfo ? :splat : :resolved
@@ -370,8 +356,6 @@ function _site_kind(@nospecialize(info), @nospecialize(f), @nospecialize(ft))
             return :latest
         elseif f === Core.invoke
             return info isa CC.InvokeCallInfo ? :resolved : :dispatch
-        elseif f === Core.attributed_call
-            return info isa CC.NoCallInfo ? :dispatch : :resolved
         end
         return :none
     end
@@ -383,9 +367,6 @@ end
 # the signatures a resolved call's callees are inferred at
 function _callee_sigs(@nospecialize(info))
     out = Any[]
-    while info isa CC.AttributedCallInfo
-        info = info.info
-    end
     if info isa CC.ApplyCallInfo
         info = info.call
     end
@@ -435,13 +416,10 @@ function _site(kind::Symbol, ir, mi, i, stmt, interp, world)
         push!(cause, "a splat of a collection whose length is not known when compiled")
     elseif kind === :latest
         push!(cause, "a call in the latest world, which is not known when compiled")
-    elseif kind === :barrier
-        push!(cause, "an argument compiled for its value's type, which the caller does not know (a function barrier)")
     end
     for k in 2:length(args)
-        (kind === :dispatch || kind === :barrier) || break
+        kind === :dispatch || break
         ft_abstract(types[k]) || continue
-        k == 2 && kind === :barrier && continue
         push!(cause, "argument $(k - 1) is " * _tstr(types[k]))
         append!(cause, _origin(ir, mi, args[k], interp, world, 0))
         break
@@ -472,9 +450,6 @@ function _origin(ir, mi, @nospecialize(v), interp, world, depth::Int)
         elseif Meta.isexpr(stmt, :call)
             f = CC.singleton_type(CC.argextype(stmt.args[1], ir))
             info = inst[:info]
-            while info isa CC.AttributedCallInfo
-                info = info.info
-            end
             if (f === getfield || f === getproperty) && length(stmt.args) >= 3
                 O = CC.widenconst(CC.argextype(stmt.args[2], ir))
                 name = CC.argextype(stmt.args[3], ir)
@@ -534,7 +509,6 @@ const _KIND_HINT = Dict(
     :callee   => "pass the function as a `Callable{A, S}`, or store it with a concrete type",
     :splat    => "pass a tuple, or the elements",
     :latest   => "a call in the latest world (`invokelatest`) is never fully typed",
-    :barrier  => "the caller does not know the argument's type: type it, or make the argument `Dynamic`",
     :build    => "a closed build cannot compile this call",
 )
 

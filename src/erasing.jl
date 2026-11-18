@@ -21,7 +21,7 @@
     erases(X) -> Bool
 
 Whether a plain member passed at an argument typed by `X` is boxed by the forwarder that the method's definition
-makes: `X` is a trait that declares `@default_dynamic`, or `Callable` (its default is `Dynamic`), or an
+makes: `X` is a trait that declares `@default_dynamic`, or `Callable` (whose erasing bit Core's build sets), or an
 intersection with such a component.
 """
 function erases(@nospecialize(X))
@@ -34,7 +34,7 @@ function erases(@nospecialize(X))
     istrait(u) || return false
     c = contract(u)
     c === nothing || return c.attribute === :dynamic
-    return ccall(:jl_get_default_attribute, Cint, (Any,), u) >= 2      # a set of Julia's own: `Callable`
+    return ccall(:jl_set_erases, Cint, (Any,), u) != 0                  # a set of Julia's own: `Callable`
 end
 
 # A box made by `new`, with no constructor (a box of a subtrait's box, `compiled.jl`): its field test holds by the
@@ -392,14 +392,4 @@ function _forwarder_code(atypes, tvars, loc, code::Core.CodeInfo, pos, traits, m
         end
     end
     return nothing
-end
-
-"""
-    @erasing def
-
-Nothing to write: a method at a trait that erases by default makes its forwarder where it is defined. Kept as the
-definition itself, for code written for the prototype (W-151); it leaves with the attribute's machinery.
-"""
-macro erasing(ex)
-    return esc(ex)
 end

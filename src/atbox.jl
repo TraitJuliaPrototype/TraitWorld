@@ -16,7 +16,7 @@ struct BoxFault
 end
 
 # the box's type parameter for a declared argument type, or nothing where the argument is not at a trait:
-# a trait or an intersection; a kept-form union `Union{Dynamic{<:X}, Compiled{<:X}}` (`@erasing`)
+# a trait or an intersection; a kept-form union `Union{Dynamic{<:X}, Compiled{<:X}}` (a forwarded method)
 function _box_trait(@nospecialize(p))
     p isa TypeVar && (p = p.ub)
     if p isa Union
@@ -55,7 +55,7 @@ _substv(@nospecialize(t), v::TypeVar, @nospecialize(x)) =
     box_signature(m::Method) -> Type or nothing
 
 `m`'s signature with `Dynamic{X}` in place of each argument at a trait `X` (a trait, an intersection, a kept
-form of `@erasing`, a `where` variable bounded by one); a free variable is given the first of `Float64`, `Int`,
+form of a forwarded method, a `where` variable bounded by one); a free variable is given the first of `Float64`, `Int`,
 `Symbol`, `String` its bounds allow, else its bound where that is concrete. `nothing` where no argument is at a trait, or the box cannot be formed.
 """
 function box_signature(m::Method)
@@ -254,8 +254,7 @@ end
 # Julia's own inference under the method's policy and cached with its edges, so that an image keeps it as code and a
 # later definition ends it as it ends any code. Run in the world Julia's inference runs in, as the classification
 # was. Its optimized code, or nothing where the cache keeps none, or where a box's call runs an instance at another
-# signature (the attribute's instance at the trait for a method of a trait without the default, compiler C-112):
-# the check then reads the box apart.
+# signature: the check then reads the box apart.
 function _box_instance(@nospecialize(sig), world::UInt)
     mi = try
         Base.method_instance(sig; world)
@@ -286,7 +285,7 @@ function _box_instance(@nospecialize(sig), world::UInt)
     return src
 end
 
-# whether a method is checked at the box: an argument at a trait, or a kept form of `@erasing`; not a trait's own
+# whether a method is checked at the box: an argument at a trait, or a kept form of a forwarded method; not a trait's own
 # method for an operation, not a forwarder
 function _at_box_checked(m::Method)
     _is_trait_method(m) && return false

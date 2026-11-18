@@ -69,23 +69,17 @@ end
 
 """
 Compile ahead for a membership, while a package image is written (lowering §12): at a method at the
-set, the instance a static call at `S` runs (compiler §6.3): compiled for `S`, or once at the set where
-the method's own attribute is `Dynamic`.
+set, the instance a static call at `S` runs (compiler §6.2): compiled for `S`, or once at the set where
+the argument is `@nospecialize` (a forwarder's).
 """
 function _compile_ahead!(@nospecialize(inst), @nospecialize(S))
     _ahead_on() || return 0
     n = 0
     world = Base.get_world_counter()
     for (T, bit) in ahead_requests(inst, S)
-        ok = if bit == 0
-            precompile(T)
-        else
-            m = Base._which(T; world).method
-            dyn = ccall(:jl_attribute_dynamic_bits, UInt32, (Any, Any, UInt32, UInt32), T, m, 0, 0) & bit
-            mi = ccall(:jl_attributed_mi, Any, (Any, UInt32, UInt32, UInt), T, bit, dyn, world)
-            mi isa Core.MethodInstance && precompile(mi)
-        end
-        n += ok ? 1 : 0
+        # the instance Julia's dispatch runs at `T`: compiled for `S`, or at the declared type where the
+        # argument is `@nospecialize` (a forwarder's)
+        n += precompile(T) ? 1 : 0
     end
     return n
 end

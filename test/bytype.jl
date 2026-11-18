@@ -52,7 +52,6 @@ using .BT: Circle, Sq, FC, Shape, Named
 @testset "the wrapper" begin
     # the library's exported `compiled_for` is the wrapper's function (traits §7.6), an ordinary function
     @test compiled_for === TraitWorld.compiled_for && compiled_for isa Function && !isdefined(TraitWorld, :ByType)
-    @test compiled_for !== Core.compiled_for
     c = Circle(1.0)
     w = compiled_for(c)
     @test w isa Compiled{Circle} && unwrap(w) === c

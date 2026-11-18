@@ -92,11 +92,9 @@ end
     @test ccall(:jl_get_module_facts, Cint, (Any,), Geometry) == 1
     @test Geometry.known(Geometry.Sq(2.0)) === :plain
     @test Geometry.unknown(Any[Geometry.Sq(2.0)]) === :plain
-    # the value's type decides (traits §7.5): a call whose caller does not know the type runs the code compiled for
-    # `Sq`, as Julia compiles any call
+    # the value's type decides (traits §7.5): a call whose caller does not know the type is compiled as Julia compiles
+    # any call (here the one method's body inlined behind a test of the type), and the member is passed as itself
     @test Geometry.unknown2(Any[Geometry.Sq(2.0)]) === :plain
-    specs = [mi.specTypes for mi in Base.specializations(only(methods(Geometry.kind2)))]
-    @test Tuple{typeof(Geometry.kind2), Geometry.Sq} in specs
     # no option decides how a trait argument is compiled (traits §13): `dynamic` and `first_seen` are refused,
     # with the design's forms named
     for opt in (:(dynamic = true), :(first_seen = false), :first_seen)

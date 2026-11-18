@@ -357,11 +357,11 @@ end
 """
     check_definitions(M::Module) -> Vector{String}
 
-The methods of `M` at trait arguments (and at the kept forms of `@erasing`) that are not bounded, each with its
+The methods of `M` at trait arguments (and at the kept forms of a forwarded method) that are not bounded, each with its
 faults, read at the box (traits §11.2; W-151, D-3): the method's instance at `Dynamic{X}` in place of each trait
 argument, inferred by the facts rule, where a call that takes a value at the box finds no method or is left to run
 time outside the contract. Each fault names the line of the method that passes the value and what the call reaches.
-Empty where every method is bounded. Methods marked `@unbounded` and the forwarders `@erasing` makes are skipped.
+Empty where every method is bounded. Methods marked `@unbounded` and the forwarders a definition makes are skipped.
 """
 function check_definitions(M::Module)
     problems = String[]
