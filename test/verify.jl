@@ -54,6 +54,38 @@ wrapsum(xs::Vector{Shape2}) = (s = 0.0; for x in xs; s += scaled2(compiled_for(x
     @test wrapsum(Shape2[Circ(1.0), Sq(2.0)]) == 2.0 * (3.0 + 4.0)
 end
 
+# more members than a union keeps (compiler §7.6): the wrapper of a value known only by its trait is known by its
+# members' wrappers, however many, and a call that takes it branches over them, each branch the call at `Compiled{M}`
+@trait Shape5 begin
+    area5(s::Shape5)::Float64
+end
+struct P1; a::Float64; end
+struct P2; a::Float64; end
+struct P3; a::Float64; end
+struct P4; a::Float64; end
+struct P5; a::Float64; end
+area5(s::P1) = 1.0 * s.a
+area5(s::P2) = 2.0 * s.a
+area5(s::P3) = 3.0 * s.a
+area5(s::P4) = 4.0 * s.a
+area5(s::P5) = 5.0 * s.a
+@implement Shape5 P1
+@implement Shape5 P2
+@implement Shape5 P3
+@implement Shape5 P4
+@implement Shape5 P5
+scaled5(s::Shape5, k::Float64) = k * area5(s)
+wrapsum5(xs::Vector{Shape5}) = (s = 0.0; for x in xs; s += scaled5(compiled_for(x), 2.0)::Float64; end; s)
+
+@testset "verify_main: the wrappers of five members" begin
+    r = verify_main(wrapsum5, (Vector{Shape5},))
+    @test all(P -> Tuple{typeof(scaled5), Compiled{P}, Float64} in r.targets, (P1, P2, P3, P4, P5))
+    # the build's own check: the call that takes the wrapper branches over the five members' wrappers
+    @test isempty(r.holes)
+    @test isfullytyped(fully_typed(wrapsum5, (Vector{Shape5},)))
+    @test wrapsum5(Shape5[P1(1.0), P2(1.0), P3(1.0), P4(1.0), P5(1.0)]) == 2.0 * 15.0
+end
+
 # a call that does not know its argument's member (compiler §7.6): at a method that is not at the trait, the
 # instance at the set runs; at one whose static parameter the value binds, the call branches over the members
 @noinline plainpair(x) = (x, area2(x))
