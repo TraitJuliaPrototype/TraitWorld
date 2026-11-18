@@ -22,7 +22,6 @@ The library's own code is compiled by facts, as a trait module's is.
 ## Where it deviates from the design
 
 - The wrapper is the library's `TraitWorld.Compiled`, not Julia's (compiler C-113).
-- `verify_main` lists the wrapper's targets at every declared member, but the build's own check refuses the wrapper of a value known only by its trait (compiler C-114), so `fully_typed` and `verify_main` report such a call as a hole.
 - Every deviation, with its ID: the Deviations tables of the design repository's references.
 
 ## Running

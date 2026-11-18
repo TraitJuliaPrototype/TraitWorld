@@ -45,14 +45,26 @@ wrapsum(xs::Vector{Shape2}) = (s = 0.0; for x in xs; s += scaled2(compiled_for(x
     @test Tuple{typeof(scaled2), Compiled{Circ}, Float64} in r.targets && Tuple{typeof(scaled2), Compiled{Sq}, Float64} in r.targets
     @test Tuple{typeof(compiled_for), Circ} in r.targets && Tuple{typeof(compiled_for), Sq} in r.targets
     @test Tuple{typeof(area2), Compiled{Circ}} in r.targets                 # what the wrapper's calls reach
-    # the build's own check refuses the wrapping and the call it feeds: a closed build branches over the members for
-    # a cast, not for the wrapper's function (compiler C-114)
-    @test_broken isempty(r.holes)
-    @test length(r.holes) == 2 && all(h -> h.line == 41, r.holes)
+    # the build's own check accepts the wrapping and the call it feeds: the wrapper's constructor, whose static
+    # parameter the value known by its trait binds, branches over the members (compiler §7.6)
+    @test isempty(r.holes)
     # the instances the wrapper's calls run at each member are entry points: no call in the code names them
     @test Tuple{typeof(scaled2), Compiled{Circ}, Float64} in r.entrypoints && Tuple{typeof(scaled2), Compiled{Sq}, Float64} in r.entrypoints
     @test add_entrypoints(r) === nothing
     @test wrapsum(Shape2[Circ(1.0), Sq(2.0)]) == 2.0 * (3.0 + 4.0)
+end
+
+# a call that does not know its argument's member (compiler §7.6): at a method that is not at the trait, the
+# instance at the set runs; at one whose static parameter the value binds, the call branches over the members
+@noinline plainpair(x) = (x, area2(x))
+plainuse(xs::Vector{Shape2}) = plainpair(xs[1])[2]
+@noinline typedpair(x::T) where {T} = (x, area2(x))
+typeduse(xs::Vector{Shape2}) = typedpair(xs[1])[2]
+
+@testset "verify_main: a value known only by its trait" begin
+    @test isempty(verify_main(plainuse, (Vector{Shape2},)).holes)
+    @test isempty(verify_main(typeduse, (Vector{Shape2},)).holes)
+    @test plainuse(Shape2[Sq(2.0)]) == typeduse(Shape2[Sq(2.0)]) == 4.0
 end
 
 @testset "verify_main: entry points and the bound" begin
