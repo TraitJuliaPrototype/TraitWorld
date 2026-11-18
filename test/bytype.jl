@@ -94,6 +94,72 @@ end
     @test isempty(detect_ambiguities(BT))
 end
 
+module BTEq
+using TraitWorld
+@trait_module bounded = true
+@trait Seq{T} begin                                  # T = eltype(Self): Base's function, which passes a value's type on
+    T = eltype(Self)
+    sget(s::Seq{T}, i::Int)::T
+end
+function dims end
+@trait Grid{N} begin                                 # a function of the module's own, with no method at a value
+    N = dims(Self)
+    npoints(g::Grid)::Int
+end
+@trait Grid2{N} <: Grid{N} begin                     # a second trait naming `dims`: it finds the wrapper's methods
+    N = dims(Self)
+    spacing(g::Grid2)::Float64
+end
+@trait Grid3{N} <: Grid2{N} begin                    # a subtrait that does not state the equation again
+    area3(g::Grid3)::Float64
+end
+struct Ones; n::Int; end
+Base.eltype(::Type{Ones}) = Float64
+sget(o::Ones, i::Int) = 1.0
+@implement Seq Ones
+struct G2; end
+dims(::Type{G2}) = 2
+dims(g::G2) = dims(typeof(g))
+npoints(g::G2) = 4
+spacing(g::G2) = 0.5
+area3(g::G2) = 1.0
+@implement Grid2 G2
+@implement Grid3{2} G2
+zfirst(s::Seq) = zero(eltype(s))                     # a call made with the equation's function: bounded
+newvec(s::Seq) = Vector{eltype(s)}(undef, 1)
+withT(s::Seq{T}) where {T} = (eltype(s), T)
+ndims_of(g::Grid) = dims(g)
+end
+
+@testset "a function of Self that an equation names, through the kept forms" begin
+    # traits §7.3, §7.4; lowering §2: `eltype(d)` of a box of `Iterable{Float64}` is `Float64`
+    v = [3.0, 1.0, 2.0]
+    for x in (v, Dynamic{Iterable{Float64}}(v), Dynamic{Indexable{Float64}}(v), compiled_for(v),
+              Dynamic{All{Iterable{Float64}, Indexable{Float64}}}(v))   # an intersection: its components, in order
+        @test eltype(x) === Float64 && eltype(typeof(x)) === Float64
+    end
+    @test eltype(Dynamic{Shape}(Circle(1.0))) === Any                     # no equation names it: Base's answer
+    d = Dict("a" => 1)
+    for x in (d, Dynamic{Keyed{String, Int}}(d), compiled_for(d))
+        @test keytype(x) === String && valtype(x) === Int && keytype(typeof(x)) === String
+    end
+    o = BTEq.Ones(2)
+    for x in (o, Dynamic{BTEq.Seq{Float64}}(o), compiled_for(o))
+        # a method that computes with `eltype(t)` gives the same type at the member, the box and the wrapper
+        @test BTEq.zfirst(x) === 0.0 && BTEq.newvec(x) isa Vector{Float64} && BTEq.withT(x) === (Float64, Float64)
+        @test Base.return_types(BTEq.zfirst, (typeof(x),)) == Any[Float64]
+    end
+    g = BTEq.G2()
+    for x in (g, Dynamic{BTEq.Grid{2}}(g), Dynamic{BTEq.Grid2{2}}(g), Dynamic{BTEq.Grid3{2}}(g), compiled_for(g))
+        @test BTEq.dims(x) === 2 && BTEq.dims(typeof(x)) === 2 && BTEq.ndims_of(x) === 2
+    end
+    # the wrapper's methods are one per function: a `Vector` is a member of `Iterable` and `Indexable`, whose
+    # equations both name `eltype`
+    @test length([m for m in methods(BTEq.dims) if m.sig == (Tuple{typeof(BTEq.dims), Type{Compiled{W}}} where W)]) == 1
+    @test isempty(check_definitions(BTEq))
+    @test isempty(detect_ambiguities(BTEq))
+end
+
 @testset "storage typed by the box" begin
     sc = BT.Scene(Dynamic{Shape}[])
     push!(sc.items, Circle(1.0)); push!(sc.items, compiled_for(Sq(2.0))); push!(sc.items, Dynamic{Shape}(Sq(1.0)))

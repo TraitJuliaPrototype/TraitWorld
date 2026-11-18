@@ -102,8 +102,15 @@ function _trait(mod::Module, head, body)
         push!(seen, key)
         append!(out.args, _kept_forwarders(name, params, bounds, op, overloaded))
     end
+    # 4c. the kept forms' methods of each equation's function (lowering §2; traits §7.3, §7.4): a function of `Self`
+    # that an equation names answers through a kept form as for its object
+    vm = _equation_value_method(name, params, bounds, supers, items.equations)
+    vm === nothing || push!(out.args, vm)
+    for (p, e) in items.equations
+        append!(out.args, _kept_equation(p, e))
+    end
     push!(out.args, Expr(:latestworld))
-    # 4c. the operations as entries the compiler reads (compiler §4.1): the function, the declared signature and
+    # 4d. the operations as entries the compiler reads (compiler §4.1): the function, the declared signature and
     # result as types in the trait's and the operation's variables, the default's method or nothing
     entries = Any[_operation_entry(name, params, op, mod) for op in items.ops]
     push!(out.args, Expr(:let, Expr(:block, tvdefs...),
@@ -424,6 +431,88 @@ function _kept_forwarders(trait::Symbol, params::Vector{Symbol}, bounds::Vector{
         push!(out, Expr(:function, sig, body))
     end
     return out
+end
+
+# The kept forms' methods of an equation's function, for an equation `P = f(Self)` of the trait (lowering §2; traits
+# §7.3, §7.4): `f` answers through a kept form as for its object. At the type, since the equation's `Self` is a type:
+# - the box: `f(::Type{Dynamic{Z}})` is the parameter's value at the box's trait instance `Z` (`_equation_value`): the
+#   box's object is a member of that instance, and the equation is what the parameter's value is. Where no equation
+#   of `Z` or a supertrait names `f`, `f`'s own method at `Type` answers;
+# - the wrapper: `f(::Type{Compiled{W}}) = f(W)`, the object's own answer, which for each trait the object is a
+#   member of is the parameter's value (its membership's check).
+# At the value too, where `f` has no method at `Any` of its own (Base's `eltype(x)` passes the value's type on;
+# `keytype` has none): `f(d::Dynamic) = f(typeof(d))`, `f(w::Compiled) = f(object)`.
+# One method per function and kept form, not per trait: methods per trait at `Dynamic{Z}` for `Z <: X{P…}` would meet
+# at the box of an intersection, and at the wrapper of a member of two traits whose equations name `f` (`Iterable{T}`,
+# `Indexable{T}`: a `Vector`), neither more specific. The first trait that names `f` defines them; a later one finds
+# them. An equation of another form (`N = length(fieldnames(Self))`) names no single function: none is made; nor for a
+# function not yet defined where the trait is declared.
+function _kept_equation(p::Symbol, e)
+    (Meta.isexpr(e, :call) && length(e.args) == 2 && e.args[2] === :Self) || return Any[]
+    lib(s) = GlobalRef(@__MODULE__, s)
+    f = e.args[1]
+    Z, W, T, v, x = gensym(:Z), gensym(:W), gensym(:T), gensym(:v), gensym(:x)
+    meta = Expr(:meta, :no_forwarder)
+    here() = LineNumberNode(@__LINE__, Symbol(@__FILE__))
+    fsig(args...) = Expr(:call, Expr(:(::), Expr(:call, :typeof, f)), args...)
+    boxtype = Expr(:function, Expr(:where, fsig(Expr(:(::), T, :(Type{$(lib(:Dynamic)){$Z}}))), Z), Expr(:block, here(), meta,
+        :(local $v = $(lib(:_equation_value))($f, $Z)),
+        :($v isa $(lib(:NoEquation)) ? invoke($f, Tuple{Type}, $T) : $v)))
+    wraptype = Expr(:function, Expr(:where, fsig(Expr(:(::), :(Type{$(lib(:Compiled)){$W}}))), W),
+        Expr(:block, here(), meta, Expr(:call, f, W)))
+    boxval = Expr(:function, fsig(Expr(:(::), x, lib(:Dynamic))), Expr(:block, here(), meta, Expr(:call, f, :(typeof($x)))))
+    wrapval = Expr(:function, fsig(Expr(:(::), x, lib(:Compiled))),
+        Expr(:block, here(), meta, Expr(:call, f, :(getfield($x, :object)))))
+    known = f isa Symbol ? Expr(:isdefined, f) : true     # a function the module defines after the trait: none
+    return Any[Expr(:if, :($known && !$(lib(:_kept_answers))($f)), Expr(:block, boxtype, wraptype,
+        Expr(:if, :(!hasmethod($f, Tuple{Any})), Expr(:block, boxval, wrapval))))]
+end
+
+# whether the kept forms' methods of the equation's function `f` are defined already (`_kept_equation`)
+function _kept_answers(@nospecialize(f))
+    sig = Tuple{typeof(f), Type{Dynamic{Z}}} where Z
+    return any(m -> m.sig == sig, methods(f))
+end
+
+"what `_equation_value` answers where no equation of the trait instance or a supertrait names the function"
+struct NoEquation end
+
+"""
+    _equation_value(f, X) -> the parameter's value, or NoEquation()
+
+The value at the trait instance `X` of the parameter that an equation `P = f(Self)` of `X` or of a supertrait defines.
+Each `@trait` adds its method at its exact instances, `Type{X{P…}}`, so the methods of two traits never meet; it
+compares `f` with its equations' functions and asks its supertraits' instances in order. An intersection asks its
+components in order. Every step is a call at constant types, so the value folds where the code is compiled.
+"""
+_equation_value(f::F, ::Type{X}) where {F, X} =
+    X isa DataType && X.name === _ALL_NAME ? _equation_value_first(f, X.parameters[1]) : NoEquation()
+const _ALL_NAME = Base.unwrap_unionall(Core.All).name     # (a signature at `All{C}` with `C` free is at `C`)
+_equation_value_first(f::F, ::Type{Tuple{}}) where {F} = NoEquation()
+function _equation_value_first(f::F, ::Type{C}) where {F, C <: Tuple}
+    v = _equation_value(f, fieldtype(C, 1))
+    return v isa NoEquation ? _equation_value_first(f, Base.tuple_type_tail(C)) : v
+end
+
+# a trait's method of `_equation_value`: its equations `P = f(Self)`, then its supertraits' instances
+function _equation_value_method(trait::Symbol, params::Vector{Symbol}, bounds::Vector{Any}, supers::Vector{Any},
+                                equations)
+    lib(s) = GlobalRef(@__MODULE__, s)
+    eqs = [(p, e.args[1]) for (p, e) in equations if Meta.isexpr(e, :call) && length(e.args) == 2 && e.args[2] === :Self]
+    (isempty(eqs) && isempty(supers)) && return nothing
+    full = isempty(params) ? trait : Expr(:curly, trait, params...)
+    F, f, v = gensym(:F), gensym(:f), gensym(:v)
+    body = Expr(:block, LineNumberNode(@__LINE__, Symbol(@__FILE__)), Expr(:meta, :no_forwarder))
+    for (p, g) in eqs
+        push!(body.args, :($f === $g && return $p))
+    end
+    for s in supers
+        push!(body.args, :(local $v = $(lib(:_equation_value))($f, $s)), :($v isa $(lib(:NoEquation)) || return $v))
+    end
+    push!(body.args, :(return $(lib(:NoEquation))()))
+    wheres = Any[F, (bounds[i] === nothing ? params[i] : Expr(:<:, params[i], bounds[i]) for i in eachindex(params))...]
+    sig = Expr(:where, Expr(:call, lib(:_equation_value), Expr(:(::), f, F), Expr(:(::), :(Type{$full}))), wheres...)
+    return Expr(:function, sig, body)
 end
 
 # An operation's entry for the compiler (compiler §4.1), as an expression evaluated with the trait's parameters
