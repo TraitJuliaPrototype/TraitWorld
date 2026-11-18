@@ -8,7 +8,7 @@ The library of trait-bound Julia. A trait is an open abstract type with a contra
   - `@trait X{P…} <: (A, …) begin … end`: operations with declared results, defaults, declared fields (`@const` for read-only), parameters by fields, equations of `Self`, `@input`, supertraits; `@default_dynamic` for a trait that erases by default.
   - `@implement X S`: a block of methods, `by f`, several traits, stated parameters, families (`S{T} where {T}`), closed abstract types and traits as members, `struct S <: X`.
 - **Checking:** the checks at a declaration (completeness, results, fields, parameters, supertraits), with `ImplementError`; a member of a pattern checked at its first use; bounded methods (`@bounded`, `@unbounded`, `check_definitions`, `classify`, `check_at_box`), with `TraitUseError` (`src/check.jl`, `src/classify.jl`, `src/atbox.jl`).
-- **The kept forms:** the box `Dynamic{X}`, `unwrap`, `like`, `withfields`; the wrapper `Compiled` that `compiled_for(x)` returns; a trait that erases by default gets its methods at the kept forms and a forwarder that boxes a plain member (`src/dynamic.jl`, `src/compiled.jl`, `src/erasing.jl`).
+- **The kept forms:** the box `Dynamic{X}` and the wrapper `Compiled` (Julia's `Core.Dynamic` and `Core.Compiled`), `compiled_for(x)` that makes the wrapper, `unwrap`, `like`, `withfields`; a trait that erases by default gets its methods at the kept forms and a forwarder that boxes a plain member (`src/dynamic.jl`, `src/compiled.jl`, `src/erasing.jl`).
 - **`Callable{A, S}`** and `Dynamic{Callable{A, S}}` (`src/callable.jl`); intersections `All{X, Y, …}`.
 - **Scopes:** `@trait_module`, with the options `facts`, `bounded`, `no_pirates`, `owner_only` (`src/scope.jl`).
 - **Ownership and strict mode:** `@joint_owners`, `@owner_only`, `OwnershipError`, `PirateError`, `delete_membership`; `TraitWorld.strict!` and `JULIA_TW_STRICT=1` (`src/ownership.jl`, `src/strict.jl`, `src/report.jl`, `src/delete.jl`).
@@ -21,7 +21,6 @@ The library's own code is compiled by facts, as a trait module's is.
 
 ## Where it deviates from the design
 
-- The wrapper is the library's `TraitWorld.Compiled`, not Julia's (compiler C-113).
 - Every deviation, with its ID: the Deviations tables of the design repository's references.
 
 ## Running

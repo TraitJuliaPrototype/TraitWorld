@@ -6,19 +6,14 @@
 """
     Compiled(x)
 
-`x` kept so that code for it is compiled for its type: what `compiled_for(x)` returns. A member of every
-trait `x` is a member of (each `@trait` declares the family `Compiled{Z} where {Z <: X}`); its
-operations forward to `x` statically, its declared fields are `x`'s. It is not `x`: a method at `x`'s own
-type of a function outside the contract needs `unwrap(w)`. `Compiled(d)` of a `Dynamic{X}` holds the
-object `d` holds; `Compiled` of a `Compiled` is itself.
+`x` kept so that code for it is compiled for its type: what `compiled_for(x)` returns. The struct is Julia's
+`Core.Compiled` (compiler §6.9), as the box is `Core.Dynamic`; the library declares its memberships (each
+`@trait` declares the family `Compiled{Z} where {Z <: X}`) and defines its methods here. Its operations forward
+to `x` statically, its declared fields are `x`'s. It is not `x`: a method at `x`'s own type of a function
+outside the contract needs `unwrap(w)`. `Compiled(d)` of a `Dynamic{X}` holds the object `d` holds; `Compiled`
+of a `Compiled` is itself (Core's constructors).
 """
-struct Compiled{T}
-    object::T
-    Compiled{T}(x) where {T} = new{T}(x)
-end
-Compiled(x::T) where {T} = Compiled{T}(x)
-Compiled(w::Compiled) = w
-Compiled(d::Dynamic) = Compiled(getfield(d, :object))
+const Compiled = Core.Compiled
 
 unwrap(w::Compiled) = getfield(w, :object)
 
@@ -54,14 +49,6 @@ function Base.show(io::IO, w::Compiled)
     show(io, getfield(w, :object))
     print(io, ")")
 end
-
-# A box of a wrapper holds the object: the wrapper's choice is erased there.
-(::Type{Dynamic{X}})(w::Compiled) where {X} = Dynamic{X}(getfield(w, :object))
-# A box of the same trait is itself, and a box of a subtrait holds its object at the trait: neither tests the
-# membership again. (Julia's constructor, compiled once for any value, makes a new box and tests the object
-# against the trait when it runs: a run-time membership query at each re-boxing, E-403.)
-(::Type{Dynamic{X}})(d::Dynamic{X}) where {X} = d
-(::Type{Dynamic{X}})(d::Dynamic{Y}) where {X, Y <: X} = _new_box(Dynamic{X}, getfield(d, :object))
 
 # Storage typed `Dynamic{X}` converts what is assigned to it: a member is boxed, a wrapper's object boxed, a
 # box of another trait boxed again at `X` (the review's addendum, the storage table). A method of `convert`
