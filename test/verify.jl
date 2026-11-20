@@ -106,3 +106,45 @@ end
     @test !(Tuple{typeof(total2), Vector{Shape2}} in r.entrypoints)      # a call in the code names it
     @test !verify_main(main1, (Int,); bound = 2).complete
 end
+
+# a call at a value known only by its trait (a box's object) where the member's type chooses the method (compiler
+# §7.6): a method at a type that is no set (a struct, a family) takes some members; the call branches over the members
+@trait Shape6 begin
+    area6(s::Shape6)::Float64
+end
+@trait Named6 begin
+    name6(s::Named6)::String
+end
+struct Sq6; a::Float64; end
+struct Ci6; r::Float64; end
+struct Rec6{F}; f::F; end
+area6(s::Sq6) = s.a^2
+area6(c::Ci6) = 3.0 * c.r^2
+area6(r::Rec6) = 1.0
+name6(s::Sq6) = "square"
+@implement Shape6 Sq6
+@implement Shape6 Ci6
+@implement Shape6 Rec6{F} where {F}
+@implement Named6 Sq6
+describe6(@nospecialize(x)) = "a shape"
+describe6(x::Named6) = name6(x)                   # at a trait: taken at the set instance, once
+kind6(@nospecialize(x)) = 1
+kind6(x::Ci6) = 2                                 # at a concrete type
+inner6(@nospecialize(x)) = 0.0
+inner6(r::Rec6) = Float64(length(string(r.f)))    # at a family, reading the object's field
+report6(d::Dynamic{Shape6}) = (describe6(unwrap(d)), kind6(unwrap(d)), inner6(unwrap(d)) + area6(d))
+function choice6(n::Int)
+    s = 0.0; k = 0; t = ""
+    for d in Dynamic{Shape6}[Dynamic{Shape6}(Sq6(Float64(n))), Dynamic{Shape6}(Ci6(1.0))]
+        a, b, c = report6(d)
+        t *= a; k += b; s += c
+    end
+    return (t, k, s)
+end
+
+@testset "verify_main: the member's type chooses the method" begin
+    @test isempty(verify_main(choice6, (Int,)).holes)
+    @test isfullytyped(fully_typed(choice6, (Int,)))
+    @test choice6(2) == ("squarea shape", 3, 7.0)
+    @test report6(Dynamic{Shape6}(Rec6(:ab))) == ("a shape", 1, 3.0)
+end
