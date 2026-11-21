@@ -55,12 +55,34 @@ end
 """
     withfields(t; name = v, …)
 
-`t` rebuilt by its type's positional constructor, with the named fields replaced.
+`t` rebuilt by its type's positional constructor, with the named fields replaced. On a `Dynamic{X}`, the object
+it holds rebuilt and boxed at `X` (a declared field of `X` only; a rebuilt object that is no member of `X` is
+refused by the box); on a wrapper, the wrapper of the rebuilt object.
 """
 withfields(t; kw...) = _withfields(t, values(kw))
 
+_withfields(t, nt::NamedTuple) = _rebuilt(t, nt)
+# a box (traits §6.5): its object rebuilt, boxed as any box is. Behind the box only the contract reaches the
+# object, so a name is one of `X`'s declared fields, as the box's `getproperty` asks; the test folds at a
+# constant name. The inner call is at a value known only by its trait (lowering §8).
+function _withfields(d::Dynamic{X}, nt::NamedTuple{names}) where {X, names}
+    s = _first_undeclared(X, names)
+    s === nothing || throw(ArgumentError("withfields: $s is not a declared field of $X; withfields(unwrap(d); …) rebuilds the object"))
+    # every constructor of the box gives a `Dynamic{X}`; at an argument of unknown type inference joins them as `Any`
+    return Dynamic{X}(_rebuilt(getfield(d, :object), nt))::Dynamic{X}
+end
+# a wrapper: the wrapper of its object rebuilt
+_withfields(w::Compiled, nt::NamedTuple) = Compiled(_rebuilt(getfield(w, :object), nt))
+
+Base.@assume_effects :foldable function _first_undeclared(@nospecialize(X), names::Tuple)
+    for s in names
+        _dynamic_field_type(X, s) === nothing && return s
+    end
+    return nothing
+end
+
 # the constructor's call by position, made from the type and the names: nothing is looked up when it runs
-@generated function _withfields(t::T, nt::NamedTuple{names}) where {T, names}
+@generated function _rebuilt(t::T, nt::NamedTuple{names}) where {T, names}
     for k in names
         hasfield(T, k) || return :(throw(ArgumentError(string("withfields: ", $T, " has no field ", $(QuoteNode(k))))))
     end

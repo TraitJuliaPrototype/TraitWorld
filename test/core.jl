@@ -193,6 +193,53 @@ end
     @test sum(ncols, hs) == 2
 end
 
+## withfields on a kept form (traits §6.5; lowering §8): a box gives the box of its object rebuilt, a wrapper the
+## wrapper of it; a method that rebuilds its argument so is bounded (traits §7.3)
+module WFLib
+using TraitWorld
+@trait_module bounded
+@trait WPlaced begin
+    @default_dynamic                                 # its methods box a plain member (traits §7.8)
+    x::Float64
+end
+nudged(p::WPlaced) = withfields(p; x = p.x + 1.0)    # no @unbounded: at the box, a box
+end
+using .WFLib: WPlaced, nudged
+mutable struct WSprite; name::String; x::Float64; end
+mutable struct WDot; x::Float64; end
+@implement WPlaced WSprite
+@implement WPlaced WDot
+@trait WHas{T} begin                                 # the field's type fixes the parameter
+    v::T
+end
+mutable struct WCell{T}; v::T; end
+@implement WHas{T} WCell{T} where {T}
+
+@testset "withfields on a kept form" begin
+    s = WSprite("a", 1.0)
+    @test withfields(s; x = 2.0) isa WSprite && withfields(s; x = 2.0).x == 2.0          # at a member
+    d = Dynamic{WPlaced}(s)
+    b = withfields(d; x = 3.0)                                                          # at a box: a box
+    @test b isa Dynamic{WPlaced} && unwrap(b) isa WSprite && unwrap(b).x == 3.0 && unwrap(b).name == "a" && s.x == 1.0
+    @test (@inferred withfields(d; x = 3.0)) isa Dynamic{WPlaced}
+    w = withfields(compiled_for(s); x = 4.0)                                            # at a wrapper: a wrapper
+    @test w isa Compiled{WSprite} && unwrap(w).x == 4.0 && unwrap(w).name == "a"
+    @test (bd = unwrap(withfields(Dynamic{WPlaced}(WDot(1.0)); x = 5.0)); bd isa WDot && bd.x == 5.0)
+    # behind the box only the contract reaches the object: a name that is no declared field of the box's trait
+    e = try withfields(d; name = "b"); nothing catch err; err end
+    @test e isa ArgumentError && occursin("name is not a declared field of", sprint(showerror, e)) && occursin("WPlaced", sprint(showerror, e))
+    # the rebuilt object that is no member of the box's trait is refused by the box: a WCell{Int} is no WHas{Float64}
+    c = Dynamic{WHas{Float64}}(WCell(1.0))
+    @test unwrap(withfields(c; v = 2.0)).v === 2.0
+    @test_throws TypeError withfields(c; v = 2)
+    @test withfields(WCell(1.0); v = 2) isa WCell{Int}                                 # at the member, as Julia builds it
+    # the method that rebuilds its argument is bounded (accepted in a `bounded` scope) and gives the box's rebuilt value
+    r = nudged(WSprite("n", 1.0))
+    @test r isa Dynamic{WPlaced} && unwrap(r) isa WSprite && unwrap(r).x == 2.0 && unwrap(r).name == "n"
+    @test unwrap(nudged(WDot(1.0))).x == 2.0
+    @test unwrap(nudged(compiled_for(WDot(1.0)))).x == 2.0 && nudged(compiled_for(WDot(1.0))) isa Compiled{WDot}
+end
+
 ## families (traits §5.8) and members checked at their first use (lowering §4)
 @trait Fam begin
     fsize(x::Fam)::Int

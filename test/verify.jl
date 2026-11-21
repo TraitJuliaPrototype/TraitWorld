@@ -106,3 +106,29 @@ end
     @test !(Tuple{typeof(total2), Vector{Shape2}} in r.entrypoints)      # a call in the code names it
     @test !verify_main(main1, (Int,); bound = 2).complete
 end
+
+# withfields on a box over three members (traits §6.5; lowering §8): the inner call, at the object known only by its
+# trait, branches over the members (compiler §7.6), and the box made of the rebuilt object needs no dispatch: no hole
+# there. The check still reports one: the declared-name test reads the declared fields (`_dynamic_field_type`),
+# which the check does not fold where it lays the build's replacements of Base over the session as an overlay
+# table (without the overlay it folds)
+@trait WShape begin
+    x::Float64
+end
+mutable struct WA; x::Float64; end
+mutable struct WB; name::String; x::Float64; end
+mutable struct WC; x::Float64; k::Int; end
+@implement WShape WA
+@implement WShape WB
+@implement WShape WC
+rebuildall(xs::Vector{Dynamic{WShape}}) = (n = 0; for d in xs; n += withfields(d; x = 0.5) isa Dynamic{WShape}; end; n)
+
+@testset "verify_main: withfields on a box" begin
+    xs = Dynamic{WShape}[Dynamic{WShape}(WA(1.0)), Dynamic{WShape}(WB("b", 2.0)), Dynamic{WShape}(WC(3.0, 1))]
+    @test rebuildall(xs) == 3 && all(d -> unwrap(withfields(d; x = 0.5)).x == 0.5, xs)
+    r = verify_main(rebuildall, (Vector{Dynamic{WShape}},))
+    # no hole at the rebuilding: the inner call and the box's constructor
+    @test !any(h -> occursin("_rebuilt(", h.call) || occursin("(Dynamic{WShape})(", h.call), r.holes)
+    @test all(h -> any(c -> occursin("declared_field_type", c), h.cause), r.holes)
+    @test_broken isempty(r.holes)
+end
