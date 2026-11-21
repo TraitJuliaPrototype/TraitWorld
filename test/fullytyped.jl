@@ -23,6 +23,16 @@ usesop(xs::Vector{Lengthy}) = llen(xs[1]) + 1      # an operation on a value kno
 describe1(x::Lengthy) = llen(x) > 1 ? "long" : "short"
 passes(xs::Vector{Lengthy}) = describe1(xs[1])     # a value known by its trait passed to a method at the trait
 @enforce_fully_typed epasses(xs::Vector{Lengthy}) = describe1(xs[1])
+# an operation at an element of `Vector{Any}`: a build branches over its methods, so the mode raises nothing (traits §14)
+@enforce_fully_typed eany(xs::Vector{Any}) = llen(xs[1])
+# a call on an operation's result of an abstract type, at a box: the result is the root cause (traits §14)
+@trait Datum begin
+    ddata(d::Datum)::AbstractVector
+end
+struct DVec; v::Vector{Float64}; end
+ddata(d::DVec) = d.v
+@implement Datum DVec
+@enforce_fully_typed dsum(d::Datum) = sum(ddata(d))
 
 @enforce_fully_typed etotal(h::Holder) = sum(sink, h.data)
 @enforce_fully_typed etwice(x::Int) = 2x
@@ -100,6 +110,12 @@ once_kw() = OnceLib.withkw(DECAY, 1.0; scale = 2.0)
     # passed to a method at the trait is resolved by the members, as the build resolves it
     @test isfullytyped(fully_typed(passes, (Vector{Lengthy},)))
     @test epasses(Lengthy[Rope(3)]) == "long"       # the mode raises only where a build would refuse
+    @test eany(Any[Rope(3)]) == 3 && eany(Any[Dynamic{Lengthy}(Rope(2))]) == 2
+    @test dsum(DVec([1.0, 2.0])) == 3.0              # at a member the result is the member's
+    e = try dsum(Dynamic{Datum}(DVec([1.0]))) catch e; e end
+    @test e isa NotFullyTypedError
+    m = sprint(showerror, e)
+    @test occursin("`ddata` returns AbstractVector at ddata(::Dynamic{", m) && !occursin("Tuple{", m)   # a call, not the tuple type
 
     h = Holder([1, 2])
     @test_throws NotFullyTypedError etotal(h)

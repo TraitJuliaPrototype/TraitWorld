@@ -469,7 +469,7 @@ function _origin(ir, mi, @nospecialize(v), interp, world, depth::Int)
                 push!(out, "the result of a call dispatched when it runs: `$(f === nothing ? "?" : f)(…)` is " * _tstr(T))
             else
                 sigs = _callee_sigs(info)
-                push!(out, "`$(f === nothing ? "?" : f)` returns " * _tstr(T) * (length(sigs) == 1 ? " at " * _tstr(sigs[1]) : ""))
+                push!(out, "`$(f === nothing ? "?" : f)` returns " * _tstr(T) * (length(sigs) == 1 ? " at " * _callform(sigs[1]) : ""))   # a call, never the tuple type (traits §11.3)
                 if length(sigs) == 1 && depth < 3
                     got = _ircode(sigs[1], interp, world)
                     got === nothing || append!(out, _return_cause(got[1], got[3], interp, world, depth + 1))
