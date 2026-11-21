@@ -365,3 +365,55 @@ end
     @test !any(f -> f isa GlobalRef && f.name === :_fwd, refs)
     @test TraitWorld._is_trait_method(m)
 end
+
+# A type that one entry makes a member of every instance of a set (`@implement Callable T`) is a member by use at each
+# instance, as a family's member is (compiler §7.6): a signature's members are the functions the program hands to it.
+# `Far11` is declared callable and never handed to `F11`; its call reaches a call at `Any`, which a closed build cannot
+# resolve: a branch for it at `F11` would be a hole. `Near11` is handed to `F11`, so it is a member there.
+const F11 = Callable{Tuple{Float64}, Float64}
+struct Far11; v::Vector{Any}; end
+(g::Far11)(x::Float64) = g.v[1](x)::Float64
+@implement Callable Far11
+struct Near11; k::Float64; end
+(g::Near11)(x::Float64) = g.k * x
+@implement Callable Near11
+@noinline viabox11(ds::Vector{Dynamic{F11}}, x::Float64) = (s = 0.0; for d in ds; s += d(x); end; s)
+@noinline hold11(fs::Vector{Callable}) = length(fs)
+hand11(n::Int) = viabox11(Dynamic{F11}[Dynamic{F11}(double), Dynamic{F11}(Near11(3.0))], Float64(n)) +
+                 hold11(Callable[Far11(Any[double])])
+# The call of a function known only as `Callable`, with no signature (an element of a `Vector{Callable}`): it branches
+# over `Callable`'s members by use, its result the join of the branches' (compiler §7.6). A box among the elements is a
+# branch, the box's call checks its signature.
+@noinline each11(fs::Vector{Callable}, x::Float64) = [f(x) for f in fs]
+bare11(n::Int) = sum(each11(Callable[double, Near11(2.0), Dynamic{F11}(Near11(1.0))], Float64(n)))
+
+@testset "closed check: a member of every instance is a member by use; the call of bare Callable" begin
+    r = _closed_members(hand11, (Int,))
+    @test r.errors == 0
+    @test Set(get(r.members, F11, Any[])) == Set(Any[typeof(double), Near11])
+    @test hand11(2) == 4.0 + 6.0 + 1
+    r = _closed_members(bare11, (Int,))
+    @test r.errors == 0
+    @test Set(filter(T -> !(T <: Dynamic), get(r.members, Callable, Any[]))) == Set(Any[typeof(double), Near11])
+    @test any(T -> T <: Dynamic, get(r.members, Callable, Any[]))
+    @test bare11(2) == 4.0 + 4.0 + 2.0
+end
+
+# A method at a union of records where the member's type chooses the method (compiler §7.6; open issue 247): beside a
+# method at any value, one at `Union{Rec12a, Rec12b}`, called at the object a box of a signature holds
+struct Rec12a{F}; f::F; end
+(r::Rec12a)(x::Float64) = r.f(x)
+@implement Callable Rec12a{F} where {F}
+struct Rec12b{F}; f::F; end
+(r::Rec12b)(x::Float64) = 2.0 * r.f(x)
+@implement Callable Rec12b{F} where {F}
+kind12(k, f) = 1.0
+kind12(k, f::Union{Rec12a, Rec12b}) = 10.0 + f(1.0)
+@noinline obj12(ds::Vector{Dynamic{F11}}) = (s = 0.0; for d in ds; s += kind12(d, unwrap(d)); end; s)
+union12(n::Int) = obj12(Dynamic{F11}[Dynamic{F11}(double), Dynamic{F11}(Rec12a(double)), Dynamic{F11}(Rec12b(double))]) + n
+
+@testset "closed check: a method at a union of records is chosen by the member's type" begin
+    r = _closed_members(union12, (Int,))
+    @test r.errors == 0
+    @test union12(1) == 1.0 + 12.0 + 14.0 + 1
+end
