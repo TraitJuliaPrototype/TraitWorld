@@ -55,7 +55,8 @@ _substv(@nospecialize(t), v::TypeVar, @nospecialize(x)) =
     box_signature(m::Method) -> Type or nothing
 
 `m`'s signature with `Dynamic{X}` in place of each argument at a trait `X` (a trait, an intersection, a kept
-form of a forwarded method, a `where` variable bounded by one); a free variable is given the first of `Float64`, `Int`,
+form of a forwarded method, a `where` variable bounded by one); a vararg of members `ts::X...` as
+`Dynamic{X}, Vararg{Dynamic{X}}`, the instance a call that passes boxes there runs; a free variable is given the first of `Float64`, `Int`,
 `Symbol`, `String` its bounds allow, else its bound where that is concrete. `nothing` where no argument is at a trait, or the box cannot be formed.
 """
 function box_signature(m::Method)
@@ -90,7 +91,28 @@ function box_signature(m::Method)
         for (w, x) in zip(vars, vals)
             p = _substv(p, w, x)
         end
-        if i > 1 && !(p isa Core.TypeofVararg)
+        if i > 1 && p isa Core.TypeofVararg
+            # a vararg of members (`ts::X...`, traits §6.6): each element in a box, at least one: the instance a call
+            # that passes boxes there runs (Julia's compilation signature for several, `Dynamic{X}, Vararg{Dynamic{X}}`)
+            E = isdefined(p, :T) ? p.T : Any
+            for (w, x) in zip(vars, vals)
+                E = _substv(E, w, x)
+            end
+            N = isdefined(p, :N) && p.N isa Int ? p.N : nothing
+            boxed = E isa DataType && E <: Dynamic
+            if !boxed
+                X = _box_trait(E)
+                if X !== nothing
+                    Xc = _close_params(X)
+                    Xc === nothing && return nothing
+                    E = try Dynamic{Xc} catch; return nothing end
+                    boxed = true
+                end
+            end
+            any_box |= boxed
+            boxed && N === nothing && push!(out, E)
+            p = N === nothing ? Vararg{E} : Vararg{E, N}
+        elseif i > 1
             if p isa DataType && p <: Dynamic
                 any_box = true
             else
@@ -110,8 +132,17 @@ function box_signature(m::Method)
 end
 
 _box_trait_of(@nospecialize(T)) = T isa DataType && T <: Dynamic ? T.parameters[1] : T
-# a value at the box: a box, or a value known only by a trait
-_at_box_value(@nospecialize(T)) = T isa Type && (T <: Dynamic || _trait_of(T) !== nothing)
+# a value at the box: a box, or a value known only by a trait; a tuple that holds one (a vararg of members, `ts`)
+# passes it on
+_at_box_value(@nospecialize(T)) = T isa Type && (T <: Dynamic || _trait_of(T) !== nothing || _tuple_at_box(T))
+function _tuple_at_box(@nospecialize(T))
+    (T isa DataType && T.name === Tuple.name) || return false
+    for p in T.parameters
+        Base.isvarargtype(p) && (p = Base.unwrapva(p))
+        _at_box_value(p) && return true
+    end
+    return false
+end
 
 function _argtype(src::Core.CodeInfo, @nospecialize(a))
     a isa Core.SSAValue && return CC.widenconst(src.ssavaluetypes[a.id])
@@ -131,7 +162,16 @@ function _callee_value(src::Core.CodeInfo, @nospecialize(f))
     end
     return f
 end
-_fname(@nospecialize(fv), @nospecialize(f)) = fv isa Function ? string(nameof(fv)) : fv isa Type ? string(fv) : string(f)
+_fname(@nospecialize(fv), @nospecialize(f)) = fv isa Function ? something(_closure_form(typeof(fv)), string(nameof(fv))) :
+                                                fv isa Type ? string(fv) : string(f)
+# a closure or an anonymous function as it is written, `(t) -> …` (traits §11.3: never its generated name), or nothing
+function _closure_form(@nospecialize(T))
+    (T isa DataType && T <: Function && startswith(string(T.name.name), "#")) || return nothing
+    ms = try Base._methods_by_ftype(Tuple{T, Vararg{Any}}, 1, Base.get_world_counter()) catch; nothing end
+    (ms isa Vector && length(ms) == 1) || return nothing
+    w = match(r"^`([^`]*)`", _written_method(ms[1].method))
+    return w === nothing ? nothing : string(w.captures[1])
+end
 # an argument as a call prints it (traits §11.3): a constant as written, an argument of the method by its name, else
 # `::T`, its type
 function _argstr(src::Core.CodeInfo, @nospecialize(a))
@@ -142,7 +182,8 @@ function _argstr(src::Core.CodeInfo, @nospecialize(a))
         nm = string(src.slotnames[n])
         (isempty(nm) || startswith(nm, "#")) || return nm
     end
-    return "::" * _tstr(_argtype(src, a))
+    T = _argtype(src, a)
+    return something(_closure_form(T), "::" * _tstr(T))
 end
 _callstr(src::Core.CodeInfo, @nospecialize(fv), args) = string(_fname(fv, args[1]), "(", join([_argstr(src, a) for a in args[2:end]], ", "), ")")
 # a chain of calls by the functions' names, the keyword bodies (`#sum#282`) left out
@@ -173,9 +214,10 @@ function _reaches_no_method(interp, @nospecialize(tt), depth::Int, seen::Set{Any
         if fv === Core.throw_methoderror && length(ats) >= 1
             g = _callee_value(src, args[2])
             any(_at_box_value, ats[2:end]) || continue
-            return Any[string(_fname(g, args[2]), "(", join(("::" * _tstr(T) for T in ats[2:end]), ", "), ")"), g]
+            return Any[string(_fname(g, args[2]), "(", join((something(_closure_form(T), "::" * _tstr(T)) for T in ats[2:end]), ", "), ")"), g]
         end
-        if st.head === :invoke && src.ssavaluetypes[i] === Union{} && any(_at_box_value, ats)
+        # a call that only throws, compiled (`invoke`) or left to run time with its result inferred as `Union{}`
+        if src.ssavaluetypes[i] === Union{} && any(_at_box_value, ats)
             below = _reaches_no_method(interp, Tuple{_argtype(src, args[1]), ats...}, depth + 1, seen)
             below === nothing || return pushfirst!(below, _fname(fv, args[1]))
         end
@@ -231,8 +273,9 @@ function check_at_box(m::Method; world::UInt = Base.get_world_counter())
         end
         (fv isa Core.Builtin || fv isa Core.IntrinsicFunction || fv === Base.kwerr) && continue
         any(_at_box_value, ats) || continue
-        if st.head === :invoke
-            # a call that only throws: what it reaches where a call below finds no method
+        if st.head === :invoke || src.ssavaluetypes[i] === Union{}
+            # a call that only throws: what it reaches where a call below finds no method. A call left to run time
+            # whose result inference gives as `Union{}` (at a vararg of boxes, a tuple of no fixed length) is one too
             src.ssavaluetypes[i] === Union{} || continue
             chain = _reaches_no_method(interp, Tuple{_argtype(src, f), ats...}, 1, Set{Any}())
             call = _callstr(src, fv, args)
@@ -304,7 +347,7 @@ function _at_box_checked(m::Method)
     # a keyword method's sorter: its body's method is read instead, with the keywords as declared
     sig.parameters[1] === typeof(Core.kwcall) && return false
     for p in sig.parameters[2:end]
-        Base.isvarargtype(p) && continue
+        Base.isvarargtype(p) && (p = Base.unwrapva(p))      # a vararg of members: its element (traits §7.3)
         _box_trait(p) === nothing || return !_is_forwarder(m)
     end
     return false
@@ -318,12 +361,23 @@ function _bounded_head(m::Method)
     sig = box_signature(m)
     written = Base.unwrap_unionall(m.sig)
     names = Base.method_argnames(m)
+    n = Int(m.nargs)
     boxed = String[]
+    va_named = false
     if sig isa DataType && written isa DataType
         for (i, p) in enumerate(sig.parameters)
-            i > 1 && p isa DataType && p <: Dynamic && !(i <= length(written.parameters) && written.parameters[i] == p) || continue
-            nm = i <= length(names) ? string(names[i]) : ""
-            push!(boxed, string(isempty(nm) || startswith(nm, "#") ? "the argument $(i - 1)" : "`$nm`", " in a box, `", _tstr(p), "`"))
+            P = p isa Core.TypeofVararg ? (isdefined(p, :T) ? p.T : Any) : p
+            i > 1 && P isa DataType && P <: Dynamic && !(i <= length(written.parameters) && written.parameters[i] == p) || continue
+            # the positions of a vararg of members (from the method's last argument on): each of its elements in a box
+            each = m.isva && i >= n
+            if each
+                va_named && continue
+                va_named = true
+            end
+            nm = min(i, n) <= length(names) ? string(names[min(i, n)]) : ""
+            who = isempty(nm) || startswith(nm, "#") ? (each ? "each of the arguments from $(n - 1)" : "the argument $(i - 1)") :
+                  each ? "each of `$nm`" : "`$nm`"
+            push!(boxed, string(who, " in a box, `", _tstr(P), "`"))
         end
     end
     read = isempty(boxed) ? "read at the box" : "read with " * join(boxed, ", and ")

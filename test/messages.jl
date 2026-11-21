@@ -94,7 +94,20 @@ end
     @test occursin(Regex("`\\(t::$(Q)MShape\\) -> …` in `mclo` is declared bounded"), m)
     m = bmsg("mwhere(t::C) where {C <: MShape} = length(t)")
     @test occursin(Regex("`mwhere\\(t::C\\) where C<:$(Q)MShape` is declared bounded"), m)
-    for code in ("msum2(t::MShape) = sum(t)", "mkw2(t::MShape; k::Float64 = 1.0) = k * length(t)", "mclo2() = (t::MShape) -> length(t)")
+    # a vararg of members is read with each of its elements in a box (traits §7.3, §6.6; T-158)
+    m = bmsg("mva(ts::MShape...) = sum(t -> length(t), ts)")
+    @test occursin(Regex("^TraitUseError: `mva\\(ts::$(Q)MShape...\\)` is declared bounded, and is not bounded: read with each of `ts` in a box, `Dynamic\\{$(Q)MShape\\}`:"), m)
+    @test occursin("sum((t) -> …, ts)", m)
+    @test bmsg("mvaok(ts::MShape...) = sum(marea, ts)") == "nothing"
+    m = bmsg("mfv(a::MShape, ts::MShape...) = marea(a) + sum(t -> length(t), ts)")
+    @test occursin(Regex("`mfv\\(a::$(Q)MShape, ts::$(Q)MShape...\\)` is declared bounded, and is not bounded: read with `a` in a box, `Dynamic\\{$(Q)MShape\\}`, and each of `ts` in a box, `Dynamic\\{$(Q)MShape\\}`:"), m)
+    @test bmsg("mfvok(a::MShape, ts::MShape...) = marea(a) + sum(marea, ts)") == "nothing"
+    m = bmsg("mvw(ts::T...) where {T <: MShape} = first(ts[1])")
+    @test occursin("read with each of `ts` in a box", m) && occursin(Regex("first\\(::Dynamic\\{$(Q)MShape\\}\\) reaches iterate"), m)
+    mv(ts::MShape...) = 0
+    @test TraitWorld.box_signature(only(methods(mv))) == Tuple{typeof(mv), Dynamic{MShape}, Vararg{Dynamic{MShape}}}
+    for code in ("msum2(t::MShape) = sum(t)", "mkw2(t::MShape; k::Float64 = 1.0) = k * length(t)", "mclo2() = (t::MShape) -> length(t)",
+                 "mva2(ts::MShape...) = sum(t -> length(t), ts)")
         m = bmsg(code)
         @test startswith(m, "TraitUseError: ") && !occursin("Tuple{", m) && !occursin("var\"#", m) && !occursin(r"#\w+#\d", m)
     end

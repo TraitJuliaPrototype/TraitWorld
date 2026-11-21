@@ -36,7 +36,7 @@ is written in. Never a generated name.
 """
 function _written_method(m::Method)
     tv, decls, _, _ = Base.arg_decl_parts(m)
-    arg((n, t)) = isempty(n) || startswith(n, "#") ? "::" * t : t == "Any" ? n : n * "::" * t
+    arg((n, t)) = isempty(n) || startswith(n, "#") ? "::" * t : (t == "Any" || isempty(t)) ? n : n * "::" * t
     name = string(m.name)
     args = decls[2:end]
     kws = Tuple{String,String}[]
