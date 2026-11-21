@@ -40,10 +40,15 @@ end
 # its arguments match.
 function (d::Dynamic{Z})(args...) where {A, S, Z <: Core.Callable{A, S}}
     args isa A && return _checked_result(getfield(d, :object)(args...), S)
-    for (A2, S2) in _signatures(Z)
-        args isa A2 && return _checked_result(getfield(d, :object)(args...), S2)
-    end
-    throw(MethodError(getfield(d, :object), args))
+    return _call_at_signatures(d, args, _signatures(Z))
+end
+# the signatures taken one by one, each `A2` and `S2` a constant where the call is compiled: a loop over the tuple
+# would give them as a union, and a closed build could resolve neither the test nor the result (compiler §7.6)
+@inline _call_at_signatures(d::Dynamic, args::Tuple, ::Tuple{}) = throw(MethodError(getfield(d, :object), args))
+@inline function _call_at_signatures(d::Dynamic, args::Tuple, sigs::Tuple)
+    A2, S2 = sigs[1]
+    args isa A2 && return _checked_result(getfield(d, :object)(args...), S2)
+    return _call_at_signatures(d, args, Base.tail(sigs))
 end
 @inline function _checked_result(r, ::Type{S}) where {S}
     r isa S || throw(TypeError(:Callable, S === Nothing ? "end the function with `nothing`" : "", S, r))
@@ -66,12 +71,11 @@ end
 # The signature check (traits §9): `f` has a method at each `Callable` signature of the trait `Z` (a `Callable`, or
 # an intersection with such components). A fact where `f`'s type is known: `hasmethod` at a declared signature folds,
 # with its edge to `f`'s dispatch there.
-@inline function _callable_met(::Type{Z}, @nospecialize(f)) where {Z}
-    for (A, _) in _signatures(Z)
-        hasmethod(f, A) || return false
-    end
-    return true
-end
+@inline _callable_met(::Type{Z}, @nospecialize(f)) where {Z} = _first_unmet(f, _signatures(Z)) === nothing
+# the first signature `A` at which `f` has no method, or `nothing`: one by one, so that each test is at a constant `A`
+@inline _first_unmet(@nospecialize(f), ::Tuple{}) = nothing
+@inline _first_unmet(@nospecialize(f), sigs::Tuple) =
+    hasmethod(f, sigs[1][1]) ? _first_unmet(f, Base.tail(sigs)) : sigs[1][1]
 # where the function is boxed by a forwarder: the MethodError of the call that passes it (the method's own call)
 @inline _callable_box_check(::Type{Dynamic{Z}}, @nospecialize(f), @nospecialize(self), args::Tuple) where {Z} =
     (_callable_met(Z, f) || throw(MethodError(self, args)); nothing)
@@ -90,9 +94,8 @@ end
 # `Dynamic{Callable{A, S}}(f)` written out: the signature checked, the MethodError of a call at `A` (traits §9)
 function (::Type{D})(f::Function) where {Z <: Core.Callable, D <: Dynamic{Z}}
     D isa DataType || throw(ArgumentError("Dynamic{X} needs the trait's parameters"))
-    for (A, _) in _signatures(Z)
-        hasmethod(f, A) || throw(MethodError(f, A))
-    end
+    A = _first_unmet(f, _signatures(Z))
+    A === nothing || throw(MethodError(f, A))
     return _new_box(D, f)
 end
 
