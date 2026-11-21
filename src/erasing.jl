@@ -42,6 +42,15 @@ end
 # its own body (`_forwarder_code`).
 @eval @inline _new_box(::Type{D}, @nospecialize(x)) where {D<:Dynamic} = $(Expr(:new, :D, :x))
 
+# A forwarder with several arguments that erase boxes each by a call of its own (compiler §6.3, §7.6), inlined where
+# the forwarder is compiled for the members' types: the method at the kept forms passes one as it is; the other
+# tests a function's signature (`Callable`'s, else nothing) and makes the box by `new`, so code compiled by facts
+# knows the box as before. A closed build that knows an argument only by its trait branches at this call over that
+# argument's own members, apart from the other arguments'.
+@inline _forward_box(::Type{D}, x::Union{Dynamic, Compiled}, @nospecialize(self), args::Tuple) where {D<:Dynamic} = x
+@inline _forward_box(::Type{D}, x, @nospecialize(self), args::Tuple) where {D<:Dynamic} =
+    (_callable_box_check(D, x, self, args); _new_box(D, x))
+
 # a trait's own method reads its receiver through `_fwd` (lowering §2); no other method does
 _code_names_fwd(src::Core.CodeInfo) = any(_names_fwd, src.code)
 _names_fwd(@nospecialize(a)) = (a isa GlobalRef && a.mod === TraitWorld && a.name === :_fwd) ||
@@ -319,11 +328,14 @@ function _collect_vars!(vs, @nospecialize(t), bound::Vector{TypeVar})
     return vs
 end
 
-# The forwarder's code: each plain argument boxed by `new` in the forwarder's own body, then
-# `return #self#(b2, a3, …)`. The box is made in the body, not by a call: in code compiled by facts a call
-# whose argument is typed by the set is a run-time site, and its result would be unknown. A kept form reaches the
-# forwarder only where the kept-form method could not take it (a wrapper of a function without a method at a
-# `Callable`'s signature): the constructor decides then, and refuses it. Made by lowering a definition of the
+# The forwarder's code: each plain argument boxed by `new`, then `return #self#(b2, a3, …)`. With one argument
+# that erases, the box is made in the forwarder's own body, not by a call: compiled once, its argument is typed by
+# the set, and in code compiled by facts a call whose argument is typed by the set is a run-time site, and its
+# result would be unknown. A kept form reaches that forwarder only where the kept-form method could not take it (a
+# wrapper of a function without a method at a `Callable`'s signature): the constructor decides then, and refuses
+# it. With several, each is boxed by its own call `_forward_box(D, x, #self#, args)`, inlined where the forwarder
+# is compiled per member type (a call at the member's type); a kept form passes as it is, and the call at the
+# boxes dispatches it. Made by lowering a definition of the
 # same arguments with the method's variables (so the box's type reads them as static parameters, in the
 # method's order) and taking its code. The forwarder's line is the definition's.
 #
@@ -373,7 +385,14 @@ function _forwarder_code(atypes, tvars, loc, code::Core.CodeInfo, pos, traits, m
         end
         Dn, bn = Symbol("#D", i), Symbol("#b", i)
         push!(boxes, Expr(:(=), Dn, Dexpr))
-        kept = single ? Expr(:call, GlobalRef(Core, :typeassert), Expr(:call, Dn, nm), Dn) : nm
+        if !single
+            # several arguments erase: each boxed by its own call (`_forward_box`)
+            push!(boxes, Expr(:(=), bn, Expr(:call, GlobalRef(TraitWorld, :_forward_box), Dn, nm, Symbol("#self#"),
+                                             Expr(:tuple, origargs...))))
+            push!(cargs, bn)
+            continue
+        end
+        kept = Expr(:call, GlobalRef(Core, :typeassert), Expr(:call, Dn, nm), Dn)
         # a function boxed at `Callable{A, S}` has a method at `A`, or the call that passes it raises (traits §9)
         plain = callable ? Expr(:block, Expr(:call, GlobalRef(TraitWorld, :_callable_box_check), Dn, nm, Symbol("#self#"),
                                              Expr(:tuple, origargs...)), Expr(:new, Dn, nm)) : Expr(:new, Dn, nm)
