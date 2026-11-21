@@ -417,3 +417,31 @@ union12(n::Int) = obj12(Dynamic{F11}[Dynamic{F11}(double), Dynamic{F11}(Rec12a(d
     @test r.errors == 0
     @test union12(1) == 1.0 + 12.0 + 14.0 + 1
 end
+
+# A default's method at a trait reads a box's object as `getfield(d, :object)` (lowering §2), as the box's forwarding
+# methods do: a closed build knows the value for the object a box holds, never a box, so the default's split at it has
+# no box branch (compiler §7.6). A member that forwards still goes through `_fwd`.
+@trait Shape13 begin
+    area13(s::Shape13)::Float64 = 1.0
+end
+struct Sq13; a::Float64; end
+area13(s::Sq13) = s.a^2
+struct Pt13; end
+@implement Shape13 Sq13
+@implement Shape13 Pt13
+struct Fw13; s::Sq13; end
+@implement Shape13 Fw13 by s
+boxes13(n::Int) = (v = Shape13[Dynamic{Shape13}(Sq13(Float64(n))), Pt13(), Dynamic{Shape13}(Pt13()), Fw13(Sq13(3.0))];
+                   s = 0.0; for x in v; s += area13(x); end; s)
+
+@testset "a default's method reads a box's object" begin
+    m = which(area13, Tuple{Shape13})
+    src = Base.uncompressed_ast(m)
+    @test any(st -> st isa Expr && Meta.isexpr(st, :call) && st.args[1] == GlobalRef(Core, :getfield) &&
+                    st.args[end] in (QuoteNode(:object), :object), src.code)
+    r = _closed_members(boxes13, (Int,))
+    @test r.errors == 0
+    @test Set(get(r.members, Shape13, Any[])) == Set(Any[Sq13, Pt13, Fw13, Dynamic{Shape13}])
+    @test boxes13(2) == 4.0 + 1.0 + 1.0 + 9.0
+    @test area13(Dynamic{Shape13}(Sq13(2.0))) == 4.0 && area13(Dynamic{Shape13}(Pt13())) == 1.0
+end

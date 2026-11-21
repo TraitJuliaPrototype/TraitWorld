@@ -369,15 +369,27 @@ function _trait_method(trait::Symbol, params::Vector{Symbol}, bounds::Vector{Any
     plainargs = Any[nm for nm in names]
     op.vararg && (plainargs[end] = Expr(:..., plainargs[end]))
     serve = _subst(op.body, :Self, :(typeof($rname)))
+    # at a box, the operation called on its object read as `getfield(d, :object)`, as the box's forwarding methods
+    # read it: a closed build then knows the value for the object a box holds, never a box (compiler §7.6)
+    object = :($(GlobalRef(Core, :getfield))($rname, :object))
+    boxargs = Any[i == op.receiver ? object : nm for (i, nm) in enumerate(names)]
+    op.vararg && (boxargs[end] = Expr(:..., boxargs[end]))
+    boxcall = Expr(:call, op.fname, boxargs...)
+    resultself && (boxcall = :($boxcall::typeof($object)))
     # a method `@trait` makes is not forwarded where its trait erases by default (compiler §6.3): a plain member
-    # served by a default runs it as itself
+    # served by a default runs it as itself. (The test names the trait: `x isa Dynamic` at a box's type is not folded,
+    # its positive answer read as resting on a membership.)
     body = quote
         $(Expr(:meta, :no_forwarder))
-        $fwd = $(lib(:_fwd))($rname, $trait)
-        if $fwd isa $(lib(:NoForward))
-            $serve
+        if $rname isa $(lib(:Dynamic)){<:$trait}
+            $boxcall
         else
-            $fwdcall
+            $fwd = $(lib(:_fwd))($rname, $trait)
+            if $fwd isa $(lib(:NoForward))
+                $serve
+            else
+                $fwdcall
+            end
         end
     end
     return Expr(:function, sig, body)
