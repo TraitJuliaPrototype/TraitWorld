@@ -164,9 +164,11 @@ function _callee_value(src::Core.CodeInfo, @nospecialize(f))
 end
 _fname(@nospecialize(fv), @nospecialize(f)) = fv isa Function ? something(_closure_form(typeof(fv)), string(nameof(fv))) :
                                                 fv isa Type ? string(fv) : string(f)
-# a closure or an anonymous function as it is written, `(t) -> …` (traits §11.3: never its generated name), or nothing
+# a closure or an anonymous function as it is written, `(t) -> …` (traits §11.3: never its generated name), or nothing;
+# nothing for a named function, whose type's name is `#` and its own (its name is how a call prints it)
 function _closure_form(@nospecialize(T))
     (T isa DataType && T <: Function && startswith(string(T.name.name), "#")) || return nothing
+    (Base.issingletontype(T) && !startswith(string(nameof(T.instance)), "#")) && return nothing
     ms = try Base._methods_by_ftype(Tuple{T, Vararg{Any}}, 1, Base.get_world_counter()) catch; nothing end
     (ms isa Vector && length(ms) == 1) || return nothing
     w = match(r"^`([^`]*)`", _written_method(ms[1].method))
@@ -186,8 +188,16 @@ function _argstr(src::Core.CodeInfo, @nospecialize(a))
     return something(_closure_form(T), "::" * _tstr(T))
 end
 _callstr(src::Core.CodeInfo, @nospecialize(fv), args) = string(_fname(fv, args[1]), "(", join([_argstr(src, a) for a in args[2:end]], ", "), ")")
-# a chain of calls by the functions' names, the keyword bodies (`#sum#282`) left out
-_chain_names(chain) = join(unique!([c for c in chain if !startswith(c, "#")]), " → ")
+# a link of a chain of calls as the report names it: a function by its name, a closure as it is written, a
+# keyword body (`#sum#282`, beside its function's own link) left out (""); a chain by its links, each once
+function _link_name(@nospecialize(fv), @nospecialize(f))
+    fv isa Function || return _fname(fv, f)
+    n = string(nameof(fv))
+    startswith(n, "#") || return n
+    occursin(r"^#[^#]+#\d+$", n) && return ""
+    return something(_closure_form(typeof(fv)), "an anonymous function")
+end
+_chain_names(chain) = join(unique!([c for c in chain if !isempty(c)]), " → ")
 
 # the frames of statement `i` of an optimized instance: (method or name, file, line), outermost first
 function _frames(src::Core.CodeInfo, i::Int)
@@ -195,16 +205,44 @@ function _frames(src::Core.CodeInfo, i::Int)
     return Any[(n.method, n.file, Int(n.line)) for n in nodes]
 end
 
+# Whether the call as written, at the types the code knows, has a method: Julia's lookup at those types. A call
+# left to run time is read so; and so is Julia's optimized form of a call at an abstract argument whose methods
+# cover a part of it (a test of the argument's type, the method's call, and else `Core.throw_methoderror`): the
+# other branch of that split is the call as written, not a call that finds no method (traits §7.3; open issue 249).
+function _has_method_at(@nospecialize(tt), world::UInt)
+    ms = try Base._methods_by_ftype(tt, -1, world) catch; nothing end
+    return ms isa Vector && !isempty(ms)
+end
+# the types `Core.throw_methoderror(f, args...)` is called at: the call it stands for
+_raised_call(src::Core.CodeInfo, args) = Tuple{Any[_argtype(src, a) for a in args[2:end]]...}
+
+# a tuple of no fixed length that holds a value at the box (a vararg of members, `ts`), as one call that passes it
+# runs: its fixed elements, or the vararg's one element (traits §7.3: each element in a box, at least one). Where the
+# length is not fixed, Base's code over the tuple meets calls at abstract types (`Generator{I} where I<:Tuple{…}`),
+# which the facts rule leaves to run time: the call that finds no method is below them
+function _fixed_length(@nospecialize(T))
+    (T isa DataType && T.name === Tuple.name && _tuple_at_box(T)) || return T
+    ps = Any[T.parameters...]
+    (!isempty(ps) && Base.isvarargtype(ps[end]) && !(isdefined(ps[end], :N) && ps[end].N isa Int)) || return T
+    E = isdefined(ps[end], :T) ? ps[end].T : Any
+    pop!(ps)
+    isempty(ps) && push!(ps, E)
+    return Tuple{ps...}
+end
+
 # The call that finds no method with a value at the box, below a call that only throws: the chain of calls down
 # to it, or nothing (the call throws by itself: an undeclared field read at the box, an intended `throw`). Each
-# callee is read again at the argument types of its call.
-function _reaches_no_method(interp, @nospecialize(tt), depth::Int, seen::Set{Any})
-    depth > 20 && return nothing
+# callee is read again at the argument types of its call, a tuple of boxes of no fixed length at its fixed length.
+# Followed to the call that finds no method whatever its depth: the signatures read once each (`seen`), so a
+# recursion ends.
+function _reaches_no_method(interp, @nospecialize(tt), seen::Set{Any})
+    tt isa DataType && (tt = Tuple{Any[_fixed_length(p) for p in tt.parameters]...})
     tt in seen && return nothing
     push!(seen, tt)
     r = try Base.code_typed_by_type(tt; interp, optimize = true) catch; return nothing end
     (length(r) == 1 && r[1][1] isa Core.CodeInfo) || return nothing
     src = r[1][1]
+    world = CC.get_inference_world(interp)
     for (i, st) in enumerate(src.code)
         st isa Expr && st.head === :(=) && (st = st.args[2])
         st isa Expr && st.head in (:call, :invoke) || continue
@@ -214,12 +252,13 @@ function _reaches_no_method(interp, @nospecialize(tt), depth::Int, seen::Set{Any
         if fv === Core.throw_methoderror && length(ats) >= 1
             g = _callee_value(src, args[2])
             any(_at_box_value, ats[2:end]) || continue
+            _has_method_at(_raised_call(src, args), world) && continue      # a split's other branch
             return Any[string(_fname(g, args[2]), "(", join((something(_closure_form(T), "::" * _tstr(T)) for T in ats[2:end]), ", "), ")"), g]
         end
         # a call that only throws, compiled (`invoke`) or left to run time with its result inferred as `Union{}`
         if src.ssavaluetypes[i] === Union{} && any(_at_box_value, ats)
-            below = _reaches_no_method(interp, Tuple{_argtype(src, args[1]), ats...}, depth + 1, seen)
-            below === nothing || return pushfirst!(below, _fname(fv, args[1]))
+            below = _reaches_no_method(interp, Tuple{_argtype(src, args[1]), ats...}, seen)
+            below === nothing || return pushfirst!(below, _link_name(fv, args[1]))
         end
     end
     return nothing
@@ -234,8 +273,10 @@ inferred apart only where the cache keeps no code.
 A fault is a call in it that takes a value at the box (the box, or a value known only by a trait) and finds no
 method (directly, below a call that only throws, or left to run time with no method at the types known), or only
 throws (an undeclared field read at the box). A call left to run time that finds a method when it runs is Julia's
-barrier, no fault. Each is reported at the line of `m` that passes the value. `nothing` where `m` has no argument
-at a trait or the box cannot be formed.
+barrier, no fault. A call is read as written, at the types the code knows: where the optimizer splits a call at an
+abstract argument into the method's call and, for the rest of the argument's type, `Core.throw_methoderror`, that
+other branch is no fault where a method applies at those types. Each is reported at the line of `m` that passes the
+value. `nothing` where `m` has no argument at a trait or the box cannot be formed.
 """
 function check_at_box(m::Method; world::UInt = Base.get_world_counter())
     sig = box_signature(m)
@@ -254,6 +295,11 @@ function check_at_box(m::Method; world::UInt = Base.get_world_counter())
         (length(r) == 1 && r[1][1] isa Core.CodeInfo) || return nothing
         src = r[1][1]
     end
+    return _box_faults(m, src, interp, world)
+end
+
+# The faults of `m`'s code at the box, `src` (its optimized instance; a probe may pass another reading of it)
+function _box_faults(m::Method, src::Core.CodeInfo, interp, world::UInt)
     faults = BoxFault[]
     for (i, st) in enumerate(src.code)
         st isa Expr && st.head === :(=) && (st = st.args[2])
@@ -267,6 +313,8 @@ function check_at_box(m::Method; world::UInt = Base.get_world_counter())
         via = length(frames) > 1 ? string(" (in ", frames[end][1], " at ", basename(string(frames[end][2])), ":", frames[end][3], ")") : ""
         if fv === Core.throw_methoderror
             length(ats) >= 2 && any(_at_box_value, ats[2:end]) || continue
+            # the other branch of a split: the call as written has a method at the types the code knows
+            _has_method_at(_raised_call(src, args), world) && continue
             g = _callee_value(src, args[2])
             push!(faults, BoxFault(:nomethod, string(_callstr(src, g, args[2:end]), " has no method", via), m, line, g))
             continue
@@ -277,7 +325,7 @@ function check_at_box(m::Method; world::UInt = Base.get_world_counter())
             # a call that only throws: what it reaches where a call below finds no method. A call left to run time
             # whose result inference gives as `Union{}` (at a vararg of boxes, a tuple of no fixed length) is one too
             src.ssavaluetypes[i] === Union{} || continue
-            chain = _reaches_no_method(interp, Tuple{_argtype(src, f), ats...}, 1, Set{Any}())
+            chain = _reaches_no_method(interp, Tuple{_argtype(src, f), ats...}, Set{Any}())
             call = _callstr(src, fv, args)
             if chain === nothing
                 what = (fv === getproperty || fv === setproperty!) && length(args) >= 3 && args[3] isa QuoteNode ?
