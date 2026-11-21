@@ -148,3 +148,101 @@ end
     @test choice6(2) == ("squarea shape", 3, 7.0)
     @test report6(Dynamic{Shape6}(Rec6(:ab))) == ("a shape", 1, 3.0)
 end
+
+# A set instance's members by use are the types that flow to it (compiler §7.6): forgotten at a place typed by it, or
+# at a place whose values the code passes on or narrows to one. The build's check run in the session, with each
+# split's set type and its members (`closed_check`'s third result) and its rounds (the fourth).
+const _CC = Base.Compiler
+function _closed_members(f, args)
+    world = Base.get_world_counter()
+    mi = _CC.specialize_method(Base._methods_by_ftype(Base.signature_type(f, args), 1, world)[1])
+    res = _CC.closed_check(Any[mi], world, TraitWorld._build_base())
+    members = Dict{Any,Vector{Any}}()
+    length(res) >= 3 && for (X, ms) in res[3]
+        members[X] = ms
+    end
+    return (; members, rounds = length(res) >= 4 ? res[4] : typemax(Int), errors = count(e -> !e[1], res[1]))
+end
+const F9a = Callable{Tuple{Float64}, Float64}
+const F9b = Callable{Tuple{Int}, Int}
+# (each signature's split is the wrapper's constructor, `compiled_for(f)`, which branches over its members)
+sig9a(f::Callable{Tuple{Float64}, Float64}, x::Float64) = compiled_for(f)(x)
+sig9b(f::Callable{Tuple{Int}, Int}, x::Int) = compiled_for(f)(x)
+double9(x::Float64) = 2x
+quad9(x::Float64) = 4x
+inc9(x::Int) = x + 1
+triple9(x::Int) = 3x
+struct Holder9; f::Function; end
+@noinline keep9(h::Holder9) = h
+struct Wrap9{F}; f::F; end
+(w::Wrap9)(x::Int) = round(Int, w.f(Float64(x)))
+@implement Callable Wrap9{F} where {F}
+function handon9(d::Dynamic{Callable{Tuple{Float64}, Float64}})
+    ws = Callable{Tuple{Int}, Int}[]          # a place typed by the second signature
+    push!(ws, Wrap9(unwrap(d)))                # `Wrap9{M}` for each member `M` at the first
+    return sig9b(ws[1], 3) + sig9a(d, 1.0)
+end
+@noinline anyhand9(v::Vector{Any}) = (x = v[1]; x isa Callable{Tuple{Float64}, Float64} ? sig9a(x, 1.0) : 0.0)
+two9(n::Int) = sig9a(double9, Float64(n)) + sig9b(inc9, n) + keep9(Holder9(triple9)).f(1)
+passed9(n::Int) = sig9a(double9, Float64(n)) + sig9b(keep9(Holder9(triple9)).f, n)
+wrapped9(n::Int) = handon9(Dynamic{F9a}(double9)) + sig9b(inc9, n)
+viaany9(n::Int) = anyhand9(Any[quad9]) + sig9a(double9, Float64(n))
+
+@testset "closed check: the members by the types that flow to a set instance" begin
+    # two signatures, a function handed to each: each signature's members are the functions handed to it; a field
+    # `f::Function` adds none until its value is handed on
+    r = _closed_members(two9, (Int,))
+    @test r.errors == 0
+    @test get(r.members, F9a, nothing) == Any[typeof(double9)]
+    @test get(r.members, F9b, nothing) == Any[typeof(inc9)]
+    r = _closed_members(passed9, (Int,))
+    @test r.errors == 0
+    @test get(r.members, F9a, nothing) == Any[typeof(double9)]
+    @test get(r.members, F9b, nothing) == Any[typeof(triple9)]
+    # a callable family whose constructor is fed the first signature's members, handed on at the second: the
+    # rounds converge, `Wrap9{M}` a member at the second only
+    r = _closed_members(wrapped9, (Int,))
+    @test r.errors == 0 && r.rounds < 16
+    @test get(r.members, F9a, nothing) == Any[typeof(double9)]
+    @test Wrap9{typeof(double9)} in get(r.members, F9b, Any[]) && !any(T -> T <: Wrap9, get(r.members, F9a, Any[]))
+    # a value that reaches the set through `Any` and a test is counted
+    r = _closed_members(viaany9, (Int,))
+    @test r.errors == 0
+    @test typeof(quad9) in get(r.members, F9a, Any[])
+    @test (two9(2), passed9(2), wrapped9(2), viaany9(2)) == (10.0, 10.0, 11.0, 8.0)
+end
+
+# the kept form by use (compiler §7.6): the box is a branch where the build forgets a box at a place typed by the
+# set, and never at the object a box holds
+@trait Shape9 begin
+    area9(s::Shape9)::Float64
+end
+struct Sq9; a::Float64; end
+struct Ci9; r::Float64; end
+area9(s::Sq9) = s.a^2
+area9(c::Ci9) = 3.0 * c.r^2
+@implement Shape9 Sq9
+@implement Shape9 Ci9
+boxes9(n::Int) = (v = Shape9[Dynamic{Shape9}(Sq9(Float64(n))), Ci9(1.0)]; s = 0.0; for x in v; s += area9(x); end; s)
+# no member (compiler §7.6): an operation of a trait whose one entry is a family the program never uses
+@trait Lonely9 begin
+    lone9(x::Lonely9)::Int
+end
+struct LoF9{T}; end
+lone9(::LoF9) = 1
+@implement Lonely9 LoF9{T} where {T}
+lonely9(v::Vector{Lonely9}) = isempty(v) ? 0 : lone9(v[1])
+
+@testset "closed check: the kept form by use; no member" begin
+    r = _closed_members(choice6, (Int,))                   # boxes in a `Vector{Dynamic{Shape6}}`: no box at `Shape6`
+    @test r.errors == 0 && haskey(r.members, Shape6)
+    @test !any(T -> T <: Dynamic, r.members[Shape6])
+    r = _closed_members(boxes9, (Int,))                    # a box in a `Vector{Shape9}`
+    @test r.errors == 0
+    @test Set(get(r.members, Shape9, Any[])) == Set(Any[Sq9, Ci9, Dynamic{Shape9}])
+    @test boxes9(2) == 7.0
+    # the operation's call raises `MethodError`: no hole
+    r = _closed_members(lonely9, (Vector{Lonely9},))
+    @test r.errors == 0 && get(r.members, Lonely9, nothing) == Any[]
+    @test lonely9(Lonely9[]) == 0 && lonely9(Lonely9[LoF9{Int}()]) == 1
+end
