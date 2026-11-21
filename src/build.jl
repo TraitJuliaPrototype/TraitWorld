@@ -300,7 +300,7 @@ function _check_before_build(@nospecialize(f), @nospecialize(argtypes::Tuple))
     r = fully_typed(f, argtypes)
     isfullytyped(r) && return nothing
     n = length(r.sites)
-    throw(BuildError("$(nameof(f)) is not fully typed at $(Tuple{argtypes...}): a build refuses $n call$(n == 1 ? "" : "s") it cannot resolve",
+    throw(BuildError("$(_callform(Tuple{Core.Typeof(f), argtypes...})) is not fully typed: a build refuses $n call$(n == 1 ? "" : "s") it cannot resolve",
                      sprint(show, MIME"text/plain"(), r)))
 end
 

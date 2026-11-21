@@ -132,8 +132,18 @@ function _callee_value(src::Core.CodeInfo, @nospecialize(f))
     return f
 end
 _fname(@nospecialize(fv), @nospecialize(f)) = fv isa Function ? string(nameof(fv)) : fv isa Type ? string(fv) : string(f)
-# an argument as a call prints it: a constant as written, else its type
-_argstr(src::Core.CodeInfo, @nospecialize(a)) = a isa QuoteNode ? repr(a.value) : a isa Symbol ? repr(a) : string(_argtype(src, a))
+# an argument as a call prints it (traits §11.3): a constant as written, an argument of the method by its name, else
+# `::T`, its type
+function _argstr(src::Core.CodeInfo, @nospecialize(a))
+    a isa QuoteNode && return repr(a.value)
+    (a isa Symbol || a isa Number || a isa AbstractString || a isa AbstractChar) && return repr(a)
+    n = a isa Core.Argument ? a.n : a isa Core.SlotNumber ? a.id : 0
+    if 1 < n <= length(src.slotnames)
+        nm = string(src.slotnames[n])
+        (isempty(nm) || startswith(nm, "#")) || return nm
+    end
+    return "::" * _tstr(_argtype(src, a))
+end
 _callstr(src::Core.CodeInfo, @nospecialize(fv), args) = string(_fname(fv, args[1]), "(", join([_argstr(src, a) for a in args[2:end]], ", "), ")")
 # a chain of calls by the functions' names, the keyword bodies (`#sum#282`) left out
 _chain_names(chain) = join(unique!([c for c in chain if !startswith(c, "#")]), " → ")
@@ -163,7 +173,7 @@ function _reaches_no_method(interp, @nospecialize(tt), depth::Int, seen::Set{Any
         if fv === Core.throw_methoderror && length(ats) >= 1
             g = _callee_value(src, args[2])
             any(_at_box_value, ats[2:end]) || continue
-            return Any[string(_fname(g, args[2]), "(", join(ats[2:end], ", "), ")"), g]
+            return Any[string(_fname(g, args[2]), "(", join(("::" * _tstr(T) for T in ats[2:end]), ", "), ")"), g]
         end
         if st.head === :invoke && src.ssavaluetypes[i] === Union{} && any(_at_box_value, ats)
             below = _reaches_no_method(interp, Tuple{_argtype(src, args[1]), ats...}, depth + 1, seen)
@@ -301,3 +311,21 @@ function _at_box_checked(m::Method)
 end
 
 _fault_line(u::BoxFault) = "$(u.what), at line $(u.line)"
+
+# The head of the bounded check's refusal (traits §7.3, §11.3): the method as its signature is written, and each
+# argument read in a box, by its name, with the box's type: never the compiler's tuple type
+function _bounded_head(m::Method)
+    sig = box_signature(m)
+    written = Base.unwrap_unionall(m.sig)
+    names = Base.method_argnames(m)
+    boxed = String[]
+    if sig isa DataType && written isa DataType
+        for (i, p) in enumerate(sig.parameters)
+            i > 1 && p isa DataType && p <: Dynamic && !(i <= length(written.parameters) && written.parameters[i] == p) || continue
+            nm = i <= length(names) ? string(names[i]) : ""
+            push!(boxed, string(isempty(nm) || startswith(nm, "#") ? "the argument $(i - 1)" : "`$nm`", " in a box, `", _tstr(p), "`"))
+        end
+    end
+    read = isempty(boxed) ? "read at the box" : "read with " * join(boxed, ", and ")
+    return string(_written_method(m), " is declared bounded, and is not bounded: ", read)
+end

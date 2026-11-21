@@ -514,10 +514,10 @@ const _KIND_HINT = Dict(
 
 function Base.show(io::IO, ::MIME"text/plain", r::FullyTypedReport)
     if isfullytyped(r)
-        print(io, "fully typed: ", r.sig)
+        print(io, "fully typed: ", _callform(r.sig))
     else
         n = length(r.sites)
-        print(io, "not fully typed: ", r.sig, "\n  ", n, n == 1 ? " call is" : " calls are",
+        print(io, "not fully typed: ", _callform(r.sig), "\n  ", n, n == 1 ? " call is" : " calls are",
               " left to run time, which a closed build refuses:")
         for s in first(r.sites, 12)
             print(io, "\n  ", s.file, ":", s.line, "  ", s.call)
@@ -548,7 +548,7 @@ struct NotFullyTypedError <: Exception
 end
 function Base.showerror(io::IO, e::NotFullyTypedError)
     print(io, "NotFullyTypedError: ")
-    e.report === nothing ? print(io, "not fully typed: ", e.sig) : show(io, MIME"text/plain"(), e.report)
+    e.report === nothing ? print(io, "not fully typed: ", _callform(e.sig)) : show(io, MIME"text/plain"(), e.report)
 end
 
 """
@@ -790,7 +790,7 @@ struct VerifyReport
     complete::Bool              # false where the walk stopped at its bound
 end
 function Base.show(io::IO, ::MIME"text/plain", r::VerifyReport)
-    print(io, "verify_main: ", r.entry, "\n  ", length(r.targets), " targets, ", length(r.entrypoints), " of them entry points, ", length(r.holes), " run-time sites")
+    print(io, "verify_main: ", _callform(r.entry), "\n  ", length(r.targets), " targets, ", length(r.entrypoints), " of them entry points, ", length(r.holes), " run-time sites")
     for h in first(r.holes, 12)
         print(io, "\n  ", h.file, ":", h.line, "  ", h.call, "\n      ", first(h.cause))
     end

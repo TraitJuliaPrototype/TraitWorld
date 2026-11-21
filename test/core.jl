@@ -481,11 +481,11 @@ end
     # the definition-time check reads the method at the box (W-151, D-3): `typeof(t)` acts on the box and is bounded;
     # `length(t)` finds no method there
     ps = check_definitions(C)
-    @test length(ps) == 1 && occursin("wide", ps[1]) && occursin(r"length\((Core\.)?Dynamic\{", ps[1]) && occursin(":$(only(methods(C.wide)).line):", ps[1])
+    @test length(ps) == 1 && occursin(r"`wide\(t::(\w+\.)*CTable\)` at ", ps[1]) && occursin("length(t) has no method", ps[1]) && occursin(":$(only(methods(C.wide)).line):", ps[1])
     Core.eval(C, :(@bounded leak2(t::CTable) = typeof(t)))
     @test Base.invokelatest(getglobal(C, :leak2), C.CT([[1.0]])) === C.CT
     e = try Core.eval(C, :(@bounded wide2(t::CTable) = length(t))); nothing catch err; err end
-    @test e isa TraitUseError && occursin(r"length\((Core\.)?Dynamic\{", sprint(showerror, e))
+    @test e isa TraitUseError && occursin("length(t) has no method", sprint(showerror, e))
     @test !isdefined(C, :wide2) || isempty(methods(getglobal(C, :wide2)))
     Core.eval(C, :(@unbounded wide3(t::CTable) = length(t)))
     Core.eval(C, :(@bounded ok2(t::CTable) = ncols(t)))

@@ -376,7 +376,7 @@ function check_definitions(M::Module)
             fs = check_at_box(m)
             fs === nothing && continue
             for u in fs
-                push!(problems, "$(m.name) at $(m.file):$(u.line): $(u.what)")
+                push!(problems, "$(_written_method(m)) at $(m.file):$(u.line): $(u.what)")
             end
         end
     end
@@ -444,9 +444,8 @@ function _decide_bounded(m::Method; final::Bool = false)
     # the refused method goes; while an image is built a method cannot be deleted, and the error
     # fails the build
     ccall(:jl_generating_output, Cint, ()) == 0 && Base.delete_method(m)
-    X = box_signature(m)
     lines = [_fault_line(u) for u in fs]
-    throw(TraitUseError("$(m.name) is declared bounded, and is not bounded at the box ($X):\n  " * join(lines, "\n  ")))
+    throw(TraitUseError(_bounded_head(m) * ":\n  " * join(lines, "\n  ")))
 end
 
 # the module's end (the module-end hook): its waiting methods are classified a last time

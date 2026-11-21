@@ -76,6 +76,30 @@ end
     @test !occursin("Tuple{typeof", cf(Tuple{typeof(marea), MShape}))
 end
 
+# the bounded check's refusal names the method as its signature is written and each argument read in a box, by its
+# name: never the compiler's tuple type, nor a keyword body's or a closure's generated name (traits §7.3, §11.3)
+@testset "the bounded check names the method as written" begin
+    bmsg(code) = (e = thrown(Meta.parse("module MB$(rand(UInt32))\nusing TraitWorld\nusing ..MsgLib: MShape\n@trait_module\n$code\nend")); e isa TraitWorld.TraitUseError ? msg(e) : string(e))
+    Q = raw"(\w+\.)*"                        # a type's module, where the test's module does not see it
+    m = bmsg("msum(t::MShape) = sum(t)")
+    @test occursin(Regex("^TraitUseError: `msum\\(t::$(Q)MShape\\)` is declared bounded, and is not bounded: read with `t` in a box, `Dynamic\\{$(Q)MShape\\}`:"), m)
+    @test occursin(Regex("sum\\(t\\) reaches iterate\\(::Dynamic\\{$(Q)MShape\\}\\), which has no method"), m)
+    m = bmsg("mboth(a::MShape, b::MShape, k::Int) = length(a) + length(b) + k")
+    @test occursin(Regex("`mboth\\(a::$(Q)MShape, b::$(Q)MShape, k::$Int\\)` is declared bounded"), m)
+    @test occursin(Regex("read with `a` in a box, `Dynamic\\{$(Q)MShape\\}`, and `b` in a box, `Dynamic\\{$(Q)MShape\\}`:"), m)
+    @test occursin("length(a) has no method", m)
+    m = bmsg("mkw(t::MShape; k::Float64 = 1.0) = k * length(t)")
+    @test occursin(Regex("`mkw\\(t::$(Q)MShape; k::Float64\\)` is declared bounded"), m)
+    m = bmsg("mclo() = (t::MShape) -> length(t)")
+    @test occursin(Regex("`\\(t::$(Q)MShape\\) -> …` in `mclo` is declared bounded"), m)
+    m = bmsg("mwhere(t::C) where {C <: MShape} = length(t)")
+    @test occursin(Regex("`mwhere\\(t::C\\) where C<:$(Q)MShape` is declared bounded"), m)
+    for code in ("msum2(t::MShape) = sum(t)", "mkw2(t::MShape; k::Float64 = 1.0) = k * length(t)", "mclo2() = (t::MShape) -> length(t)")
+        m = bmsg(code)
+        @test startswith(m, "TraitUseError: ") && !occursin("Tuple{", m) && !occursin("var\"#", m) && !occursin(r"#\w+#\d", m)
+    end
+end
+
 @testset "no hint at an operation that is another owner's function" begin
     e = try getindex(nothing, 1); nothing catch err; err end
     m = sprint(showerror, e)

@@ -43,10 +43,15 @@ function _short(@nospecialize(x), n::Int = 80)
     return length(t) <= n ? t : first(t, n - 1) * "…"
 end
 
+# code by the name its user wrote (traits §11.3): a function by its module and name, a keyword body or a closure as
+# its signature is written, the library's own code as such; never a generated name or a method instance
 function _code_name(@nospecialize(ci))
     ci isa Core.CodeInstance || return "code compiled by facts"
     mi = CC.get_ci_mi(ci)
-    return mi.def isa Method ? "$(mi.def.module).$(mi.def.name)" : string(mi)
+    m = mi.def
+    m isa Method || return "top-level code in $(m)"
+    m.module === (@__MODULE__) && return "the library's own code"
+    return startswith(string(m.name), "#") ? "$(_written_method(m)) in $(m.module)" : "$(m.module).$(m.name)"
 end
 
 # the type an argument `::Type{T}` or `::Type{<:T}` of a membership's signature names (compiler §5.6)

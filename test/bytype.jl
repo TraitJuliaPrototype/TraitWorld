@@ -191,6 +191,6 @@ end
     @test length(ps) == 3
     for (name, what) in (("spread", "size("), ("through", "reaches length("), ("field", "the field `data`"))
         m = only(m for m in methods(getglobal(M, Symbol(name))) if TraitWorld._at_box_checked(m))
-        @test any(p -> startswith(p, name) && occursin(":$(m.line):", p) && occursin(what, p), ps)
+        @test any(p -> startswith(p, "`" * name * "(") && occursin(":$(m.line):", p) && occursin(what, p), ps)
     end
 end

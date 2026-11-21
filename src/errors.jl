@@ -29,6 +29,36 @@ function _callform(@nospecialize(sig))
     return string(fname, "(", args, ")", isempty(vars) ? "" : " where {" * join(vars, ", ") * "}")
 end
 
+"""
+A method as its signature is written, `colsum(t::ColTable)`, for a message (traits §11.3): a keyword method's body as
+its function with the keywords, `f(t::ColTable; k::Float64)`; a closure as `(t::ColTable) -> …`, with the function it
+is written in. Never a generated name.
+"""
+function _written_method(m::Method)
+    tv, decls, _, _ = Base.arg_decl_parts(m)
+    arg((n, t)) = isempty(n) || startswith(n, "#") ? "::" * t : t == "Any" ? n : n * "::" * t
+    name = string(m.name)
+    args = decls[2:end]
+    kws = Tuple{String,String}[]
+    kb = match(r"^#([^#]+)#\d+$", name)
+    if kb !== nothing
+        # a keyword method's body, `#f#4(k::Float64, ::typeof(f), t::ColTable)`: its keywords, then its function
+        f = kb.captures[1]
+        j = findfirst(d -> startswith(d[2], "typeof(") && (d[2] == "typeof($f)" || endswith(d[2], ".$f)")), args)
+        if j !== nothing
+            kws, args, name = args[1:j-1], args[j+1:end], f
+        end
+    end
+    call = string("(", join(map(arg, args), ", "), isempty(kws) ? "" : "; " * join(map(arg, kws), ", "), ")")
+    wh = isempty(tv) ? "" : " where " * (length(tv) == 1 ? string(tv[1]) : "{" * join(string.(tv), ", ") * "}")
+    if startswith(name, "#")
+        # a closure, `#outer##0`, or an anonymous function at top level, `#7`
+        cl = match(r"^#([^#]+)##\d+$", name)
+        return string("`", call, wh, " -> …`", cl === nothing ? "" : " in `$(cl.captures[1])`")
+    end
+    return string("`", name, call, wh, "`")
+end
+
 "The error for a method refused at its definition: `T` stays a member of `X`."
 _method_refused(@nospecialize(X), @nospecialize(T), p::String) = ImplementError(X, T, [p], true)
 

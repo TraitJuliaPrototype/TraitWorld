@@ -41,12 +41,15 @@ end
 
 function _ended_names(code::Vector{Core.CodeInstance}, n::Int = 6)
     names = String[]
+    own = 0                                  # the library's own code: counted, not named (traits §11.3)
     for ci in code
         s = _code_name(ci)
+        s == "the library's own code" && (own += 1; continue)
         s in names || push!(names, s)
     end
     more = length(names) > n ? " and $(length(names) - n) more" : ""
-    return join(first(names, n), ", ") * more
+    lib = own == 0 ? "" : string(isempty(names) ? "" : "; ", own, " of the library's own")
+    return join(first(names, n), ", ") * more * lib
 end
 
 function Base.show(io::IO, r::PirateReport)
