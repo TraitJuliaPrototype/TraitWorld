@@ -333,11 +333,12 @@ function _first_serving(@nospecialize(T), world::UInt, covers::Bool = true)
     return nothing
 end
 
-# a trait's own method calls _fwd on its receiver: a default's method at the trait, a kept form's forwarding
-# method (lowering §2); no other method does
+# a trait's own method: a default's method at the trait, which calls _fwd on its receiver, and a kept form's
+# forwarding method, marked `:kept_forwarding` (lowering §2); no other method is either
 const _IS_TRAIT_METHOD = IdDict{Method,Bool}()
 _is_trait_method(m::Method) = get!(_IS_TRAIT_METHOD, m) do
-    any(s -> s isa GlobalRef && s.mod === TraitWorld && s.name === :_fwd, _code_refs(m))
+    any(s -> s isa GlobalRef && s.mod === TraitWorld && s.name === :_fwd, _code_refs(m)) ||
+        (!isdefined(m, :generator) && _has_meta(Base.uncompressed_ast(m), :kept_forwarding))
 end
 function _code_refs(m::Method)
     isdefined(m, :generator) && return Any[]      # a generated method has no lowered code of its own

@@ -384,8 +384,10 @@ function _trait_method(trait::Symbol, params::Vector{Symbol}, bounds::Vector{Any
 end
 
 # The kept forms' forwarding methods for an operation without a default (lowering §2, §7): the receiver at
-# `Dynamic{<:R}` and at `Compiled{<:R}`, `R` the declared receiver type, its object read through `_fwd` as a trait's
-# method reads it (so the library's readers take them as the contract's own: not checked at the box, no forwarder).
+# `Dynamic{<:R}` and at `Compiled{<:R}`, `R` the declared receiver type, the operation called on its object,
+# `getfield(d, :object)`: read so, a closed build knows the value for the object a box holds, never a box (compiler
+# §7.6). Marked `:kept_forwarding`, so that the library's readers take them as the contract's own, as a trait's
+# method that reads its receiver through `_fwd` (not checked at the box, no forwarder).
 # A further argument keeps its declared type where that type names neither the trait's parameters, nor `Self`, nor
 # the operation's own variables (`io::IO`, `i::Int`), so that the method is more specific than one of the function
 # that types those arguments and takes any receiver (Base's `show(io::IO, x)`); the others are untyped, but where
@@ -411,7 +413,7 @@ function _kept_forwarders(trait::Symbol, params::Vector{Symbol}, bounds::Vector{
             (op.vararg && i == length(op.args)) && (a = Expr(:..., a))
             push!(sigargs, a)
         end
-        callargs = Any[i == op.receiver ? :($(lib(:_fwd))($rname, $trait)) : nm for (i, (nm, _)) in enumerate(op.args)]
+        callargs = Any[i == op.receiver ? :($(GlobalRef(Core, :getfield))($rname, :object)) : nm for (i, (nm, _)) in enumerate(op.args)]
         op.vararg && (callargs[end] = Expr(:..., callargs[end]))
         sig = Expr(:call, op.fname, sigargs...)
         sigex = Expr(:block, sigargs...)
@@ -427,7 +429,7 @@ function _kept_forwarders(trait::Symbol, params::Vector{Symbol}, bounds::Vector{
         isempty(wheres) || (sig = Expr(:where, sig, wheres...))
         # (a line of this file: `_at_source!` puts the user's `@trait` there)
         body = Expr(:block, LineNumberNode(@__LINE__, Symbol(@__FILE__)), Expr(:meta, :no_forwarder),
-                    Expr(:call, op.fname, callargs...))
+                    Expr(:meta, :kept_forwarding), Expr(:call, op.fname, callargs...))
         push!(out, Expr(:function, sig, body))
     end
     return out
