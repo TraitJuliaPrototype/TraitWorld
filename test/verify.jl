@@ -484,3 +484,48 @@ writes15(n::Int) = setall15(Dynamic{WShape}[Dynamic{WShape}(WA(1.0)), Dynamic{WS
     @test r.errors == 0
     @test writes15(2) == 4.0
 end
+
+# Past the bound of the product (compiler §7.6, C-156): a constructor at three `Callable` signatures, given values known
+# only by bare `Callable` (a record's fields, as the ODE port's `DiscreteCallback`), 15 functions forgotten there:
+# 15^3 branches. The method the members reach is a forwarder (§6.3), which boxes each argument by its own call
+# (`_forward_box`): the build's check runs the forwarder once, at the signatures, each argument's box a branch over its
+# own members, and the method as written once at the boxes; not the forwarder per member of the first argument.
+for (k, T) in enumerate((Float64, Int, Tuple{Int, Float64}))
+    for j in 1:5
+        nm = Symbol(:f16_, k, :_, j)
+        if T === Tuple{Int, Float64}
+            @eval $nm(n::Int, y::Float64) = $j * n + y
+        else
+            @eval $nm(x::$T) = Float64($j * x)
+        end
+    end
+end
+struct Trip16{C<:Callable{Tuple{Float64}, Float64}, A<:Callable{Tuple{Int}, Float64}, I<:Callable{Tuple{Int, Float64}, Float64}}
+    c::C
+    a::A
+    i::I
+end
+mktrip16(c::Callable{Tuple{Float64}, Float64}, a::Callable{Tuple{Int}, Float64}, i::Callable{Tuple{Int, Float64}, Float64}) =
+    Trip16{typeof(c), typeof(a), typeof(i)}(c, a, i)
+struct Raw16; c::Callable; a::Callable; i::Callable; end
+use16(t::Trip16) = t.c(1.5) + t.a(2) + t.i(3, 0.5)
+@noinline enter16(rs::Vector{Raw16}) = (s = 0.0; for r in rs; s += use16(mktrip16(r.c, r.a, r.i)); end; s)
+const FS16 = ((f16_1_1, f16_1_2, f16_1_3, f16_1_4, f16_1_5), (f16_2_1, f16_2_2, f16_2_3, f16_2_4, f16_2_5),
+              (f16_3_1, f16_3_2, f16_3_3, f16_3_4, f16_3_5))
+pick16(n::Int) = Raw16(FS16[1][mod1(n, 5)], FS16[2][mod1(n + 1, 5)], FS16[3][mod1(n + 2, 5)])
+trips16(n::Int) = enter16([pick16(n + k) for k in 1:5])
+
+@testset "closed check: past the product's bound, the forwarder boxes each argument apart" begin
+    r = _closed_members(trips16, (Int,))
+    @test r.errors == 0
+    fwd = only(m for m in methods(mktrip16) if TraitWorld._is_forwarder(m))
+    specs = Any[s.specTypes for s in Base.specializations(fwd) if isdefined(s, :cache)]
+    sig = Tuple{typeof(mktrip16), Callable{Tuple{Float64}, Float64}, Callable{Tuple{Int}, Float64}, Callable{Tuple{Int, Float64}, Float64}}
+    @test sig in specs
+    @test !any(s -> s.parameters[2] <: Function, specs)       # no forwarder per member of the first argument
+    @test trips16(0) == sum(k -> (s = mod1(k, 5); a = mod1(k + 1, 5); i = mod1(k + 2, 5); s * 1.5 + 2a + (3i + 0.5)), 1:5)
+    # the forwarder's body: each argument boxed by its own call
+    src = Base.uncompressed_ast(fwd)
+    names16(x) = x == GlobalRef(TraitWorld, :_forward_box) || (x isa Expr && any(names16, x.args))
+    @test count(names16, src.code) == 3
+end
