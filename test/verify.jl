@@ -130,7 +130,9 @@ rebuildall(xs::Vector{Dynamic{WShape}}) = (n = 0; for d in xs; n += withfields(d
     # no hole at the rebuilding: the inner call and the box's constructor
     @test !any(h -> occursin("_rebuilt(", h.call) || occursin("(Dynamic{WShape})(", h.call), r.holes)
     @test all(h -> any(c -> occursin("declared_field_type", c), h.cause), r.holes)
-    @test_broken isempty(r.holes)
+    # the lookup of a declared field's type is fully typed: the check under the build's replacements evaluates it
+    # where its arguments are constants, and its code compiles where they are not (compiler C-153)
+    @test isempty(r.holes)
 end
 
 # a call at a value known only by its trait (a box's object) where the member's type chooses the method (compiler
@@ -271,4 +273,95 @@ lonely9(v::Vector{Lonely9}) = isempty(v) ? 0 : lone9(v[1])
     r = _closed_members(lonely9, (Vector{Lonely9},))
     @test r.errors == 0 && get(r.members, Lonely9, nothing) == Any[]
     @test lonely9(Lonely9[]) == 0 && lonely9(Lonely9[LoF9{Int}()]) == 1
+end
+
+# The call of a function known only by its signature (compiler §7.4, §7.6): in a closed build it branches over the
+# signature's members, as an operation's call does. A box of an intersection of two signatures, called at each (the
+# box's call method calls the object it holds); a box of one signature; a function passed to an argument declared
+# `@nospecialize`; a constructor whose method at two signatures erases by default, called with values known only by
+# bare `Callable` (its forwarder boxes each and tests `hasmethod(f, A)`: per member it folds).
+const G10 = All{Callable{Tuple{Float64}, Float64}, Callable{Tuple{Int}, Float64}}
+const G10a = Callable{Tuple{Float64}, Float64}
+hh10(x::Float64) = 2x
+hh10(x::Int) = 3.0 * x
+kk10(x::Float64) = x + 1
+kk10(x::Int) = Float64(x)
+@noinline boxall10(ds::Vector{Dynamic{G10}}, n::Int) = (s = 0.0; for d in ds; s += d(1.0) + d(n); end; s)
+@noinline boxone10(ds::Vector{Dynamic{G10a}}, n::Int) = (s = 0.0; for d in ds; s += d(Float64(n)); end; s)
+@noinline callns10(@nospecialize(f::Callable{Tuple{Float64}, Float64}), x::Float64) = f(x)
+boxes10(n::Int) = boxall10(Dynamic{G10}[Dynamic{G10}(hh10), Dynamic{G10}(kk10)], n) +
+                  boxone10(Dynamic{G10a}[Dynamic{G10a}(hh10), Dynamic{G10a}(kk10)], n) + callns10(hh10, 1.0)
+struct Pair10{C<:Callable{Tuple{Float64}, Float64}, A<:Callable{Tuple{Int}, Float64}}
+    c::C
+    a::A
+end
+mkpair10(c::Callable{Tuple{Float64}, Float64}, a::Callable{Tuple{Int}, Float64}) = Pair10{typeof(c), typeof(a)}(c, a)
+struct Raw10
+    c::Callable
+    a::Callable
+end
+usepair10(p::Pair10) = p.c(1.0) + p.a(2)
+@noinline enter10(rs::Vector{Raw10}) = (s = 0.0; for r in rs; s += usepair10(mkpair10(r.c, r.a)); end; s)
+pick10(n::Int) = Raw10(isodd(n) ? hh10 : kk10, iseven(n) ? hh10 : kk10)
+ctor10(n::Int) = enter10([pick10(n), pick10(n + 1)])
+
+@testset "closed check: the call of a function known only by its signature" begin
+    r = _closed_members(boxes10, (Int,))
+    @test r.errors == 0
+    @test Set(get(r.members, G10, Any[])) == Set(Any[typeof(hh10), typeof(kk10)])
+    @test Set(get(r.members, G10a, Any[])) ⊇ Set(Any[typeof(hh10), typeof(kk10)])
+    @test boxes10(2) == (2.0 + 6.0 + 2.0 + 2.0) + (4.0 + 3.0) + 2.0
+    # two arguments known only by their signatures: the call branches over each (the product of their members)
+    r = _closed_members(ctor10, (Int,))
+    @test r.errors == 0
+    @test ctor10(2) == 2.0 + 2.0 + 6.0 + 2.0
+    # the box's check stays: an argument outside the signature raises
+    @test_throws MethodError Dynamic{G10a}(hh10)("s")
+end
+
+# A constant the code holds (folded by inference: here a tuple of boxes, and of structs that keep functions in fields
+# typed by bare `Callable`) holds members in its fields: a set instance's members by use count them (compiler §7.6).
+# Not counted, the set had no member and its operation's call a "no method" fact: the build raised where a session
+# returns.
+fixed10(n::Int) = enter10([Raw10(hh10, kk10), Raw10(kk10, hh10)]) + n
+fixedboxes10(n::Int) = boxone10(Dynamic{G10a}[Dynamic{G10a}(hh10), Dynamic{G10a}(kk10)], n)
+
+@testset "closed check: a constant's fields hold members" begin
+    r = _closed_members(fixed10, (Int,))
+    @test r.errors == 0
+    @test Set(get(r.members, Callable, Any[])) == Set(Any[typeof(hh10), typeof(kk10)])
+    r = _closed_members(fixedboxes10, (Int,))
+    @test r.errors == 0
+    @test Set(get(r.members, G10a, Any[])) == Set(Any[typeof(hh10), typeof(kk10)])
+    @test fixed10(2) == 14.0 && fixedboxes10(2) == 7.0
+end
+
+# Several arguments where the member's type chooses the method (compiler §7.6): the call branches over each, and the
+# methods are listed past Julia's few (five methods take a call at two values known only by `Shape9`)
+pairup9(@nospecialize(x), @nospecialize(y)) = 0
+pairup9(x::Sq9, y::Ci9) = 1
+pairup9(x::Ci9, y::Sq9) = 2
+pairup9(x::Ci9, y::Ci9) = 3
+pairup9(x::Sq9, y::Sq9) = 4
+pairs9(n::Int) = (v = Shape9[Sq9(Float64(n)), Ci9(1.0)]; s = 0; for a in v, b in v; s += pairup9(a, b); end; s)
+
+@testset "closed check: two arguments where the member's type chooses the method" begin
+    r = _closed_members(pairs9, (Int,))
+    @test r.errors == 0
+    @test Set(get(r.members, Shape9, Any[])) == Set(Any[Sq9, Ci9])
+    @test pairs9(2) == 10
+end
+
+# The box's forwarding method reads its object as `getfield(d, :object)` (lowering §2): a closed build then knows the
+# value for the object a box holds, never a box, and splits there with no box branch (compiler §7.6)
+@testset "the box's forwarding method reads its object" begin
+    m = only(methods(area9, (Dynamic{Shape9},)))
+    src = Base.uncompressed_ast(m)
+    refs = Any[]
+    for st in src.code
+        st isa Expr && Meta.isexpr(st, :call) && push!(refs, st.args[1])
+    end
+    @test any(f -> f == GlobalRef(Core, :getfield), refs)
+    @test !any(f -> f isa GlobalRef && f.name === :_fwd, refs)
+    @test TraitWorld._is_trait_method(m)
 end
