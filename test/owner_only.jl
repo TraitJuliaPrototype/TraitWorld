@@ -100,3 +100,65 @@ end)
         TraitWorld.strict!(false)
     end
 end
+
+# The messages at a method of another module's owner-only function (traits §11.3, §12.2): the function, why it is
+# owner-only, its owner, that only the owner adds methods whatever types they are for, and what the owner writes to
+# let others extend it; never that the definer owns no type in the signature, nor to define it where a type is owned.
+@testset "the messages at an owner-only function's pirate" begin
+    OOLib = getglobal(Main, :OOLib)
+    msg(e) = sprint(showerror, e)
+    v = Any[1]                                # (the testset above gave the owner a method at Float64)
+    @test latest(OOLib.useall, v) == 2
+    # in a trait module (`no_pirates`), at the module's own type: OwnershipError
+    e = thrown(:(module OOMine
+        using TraitWorld, ..OOLib
+        @trait_module
+        struct Mine end
+        OOLib.helper(::Mine) = 0
+        end))
+    @test e isa OwnershipError
+    @test occursin("helper(::Mine) in Main.OOMine is a pirate, and the scope declares `no_pirates`", msg(e))
+    @test occursin("`helper` is an owner-only function of Main.OOLib (neither exported nor declared `public`)", msg(e))
+    @test occursin("only Main.OOLib adds methods to it, whatever types they are for", msg(e))
+    @test occursin("Main.OOLib declares it `public` or exports it, or names Main.OOMine a joint owner (`@joint_owners`)", msg(e))
+    @test !occursin("owns neither", msg(e))
+    # a function declared `@owner_only`, exported: what the owner writes is not `public`
+    e = thrown(:(module OOMine2
+        using TraitWorld, ..OOLib
+        @trait_module
+        struct Mine end
+        OOLib.decl(::Mine) = 0
+        end))
+    @test e isa OwnershipError
+    @test occursin("`decl` is an owner-only function of Main.OOLib (declared `@owner_only`)", msg(e))
+    @test occursin("Main.OOLib does not declare it `@owner_only`", msg(e))
+    # the classic pirate's names the owners
+    e = thrown(:(module OOMine3
+        using TraitWorld
+        @trait_module
+        Base.length(x::Vector{Int8}) = 0
+        end))
+    @test e isa OwnershipError
+    @test occursin("Main.OOMine3 owns neither the function (owned by Julia) nor a type in each of its signatures (owned by Julia)", msg(e))
+    # the report, by default
+    logs, _ = Test.collect_test_logs() do
+        @eval Main OOLib.helper(x::Float32) = 7
+    end
+    w = join((string(l.message) for l in logs if l.level == Base.CoreLogging.Warn), "\n")
+    @test occursin("helper(::Float32)", w) && occursin("only Main.OOLib adds methods to it", w)
+    @test !occursin("Define it where a type it is for is owned", w)
+    Base.delete_method(latest(which, OOLib.helper, (Float32,)))
+    @test latest(OOLib.useall, v) == 2
+    # strict mode's PirateError: the method as a call, the same text
+    TraitWorld.strict!(true)
+    try
+        e = thrown(:(@eval Main OOLib.helper(x::Float32) = 7))
+        @test e isa PirateError
+        @test occursin("strict mode refuses `helper(::Float32)`", msg(e))
+        @test occursin("`helper` is an owner-only function of Main.OOLib", msg(e))
+        @test occursin("Main.OOLib declares it `public` or exports it", msg(e))
+        @test !occursin("Define it where a type it is for is owned", msg(e))
+    finally
+        TraitWorld.strict!(false)
+    end
+end

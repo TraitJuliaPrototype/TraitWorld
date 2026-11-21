@@ -156,6 +156,11 @@ end
 # module's `owner_only` option, a trait module's default, unless exported or public; or by `@owner_only`),
 # else `nothing`. The compiler's test, which inference reads (compiler §1.2).
 function _owner_only_owner(@nospecialize(sig))
+    F = _owner_only_ftype(sig)
+    return F === nothing ? nothing : owner(F.name.module)
+end
+# the type of the function of a signature where the function is owner-only, else `nothing`
+function _owner_only_ftype(@nospecialize(sig))
     b = Base.unwrap_unionall(sig)
     b isa DataType && b <: Tuple && !isempty(b.parameters) || return nothing
     F = b.parameters[1]
@@ -167,7 +172,52 @@ function _owner_only_owner(@nospecialize(sig))
     F isa Type || return nothing
     F = Base.unwrap_unionall(F)
     (F isa DataType && CC.is_owner_only(F)) || return nothing
-    return owner(F.name.module)
+    return F
+end
+
+# What a message says of a method of another owner's owner-only function (traits §11.3, §12.2): the function, why it
+# is owner-only, its owner, and that only the owner adds its methods, whatever types they are for
+function _owner_only_what(@nospecialize(sig))
+    F = _owner_only_ftype(sig)::DataType
+    mod = F.name.module
+    name = isdefined(F, :instance) ? nameof(F.instance) : F.name.name
+    why = Base.ispublic(mod, name) ? "declared `@owner_only`" : "neither exported nor declared `public`"
+    o = _owner_name(owner(mod))
+    return "`$name` is an owner-only function of $mod ($why): only $o adds methods to it, whatever types they are for"
+end
+# and who may declare the method: what the owner writes to let others extend the function, or what the definer
+# writes instead
+function _owner_only_fix(@nospecialize(sig), @nospecialize(definer))
+    F = _owner_only_ftype(sig)::DataType
+    mod = F.name.module
+    name = isdefined(F, :instance) ? nameof(F.instance) : F.name.name
+    o = _owner_name(owner(mod))
+    let_ = Base.ispublic(mod, name) ? "$mod does not declare it `@owner_only`" : "$mod declares it `public` or exports it"
+    who = string(mod) == o ? "" : "$o "
+    return "To let other modules add methods, $let_, or $(who)names $(_owner_name(definer)) a joint owner " *
+        "(`@joint_owners`). Otherwise define a function of your own"
+end
+function _owner_list(s::Base.IdSet{Any})
+    names = String[]
+    for o in s
+        push!(names, _owner_name(o))
+    end
+    return join(sort!(names), ", ")
+end
+# What a message says of a classic pirate (traits §11.3, §12.2): the owners of the function and of the types it
+# names, and who may declare the method
+function _classic_pirate_text(@nospecialize(sig), @nospecialize(definer))
+    u = Base.unwrap_unionall(sig)
+    fo, to = Base.IdSet{Any}(), Base.IdSet{Any}()
+    if u isa DataType && u <: Tuple && !isempty(u.parameters)
+        _owners!(fo, u.parameters[1])
+        for p in u.parameters[2:end]
+            _owners!(to, p)
+        end
+    end
+    return "$(_owner_name(definer)) owns neither the function (owned by $(_owner_list(fo))) nor a type in each of its " *
+        "signatures (owned by $(_owner_list(to))). The function's owner or the owner of a type it is for defines it, or " *
+        "names $(_owner_name(definer)) a joint owner (`@joint_owners`)"
 end
 
 """
@@ -316,6 +366,9 @@ _no_pirates(m::Module) = (ccall(:jl_get_module_trait_options, Cint, (Any,), m) &
 function _check_pirate(m::Method)
     _no_pirates(m.module) || return nothing
     owned_method(m) && return nothing
-    throw(OwnershipError("$(_callform(m.sig)) in $(m.module) is a pirate: $(_owner_name(owner(m.module))) " *
-        "owns neither the function nor a type in each of its signatures, and the scope declares `no_pirates`"))
+    definer = owner(m.module)
+    head = "$(_callform(m.sig)) in $(m.module) is a pirate, and the scope declares `no_pirates`: "
+    _owner_only_owner(m.sig) === nothing &&
+        throw(OwnershipError(head * _classic_pirate_text(m.sig, definer)))
+    throw(OwnershipError(head * _owner_only_what(m.sig) * ". " * _owner_only_fix(m.sig, definer)))
 end

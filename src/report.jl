@@ -63,6 +63,7 @@ function Base.show(io::IO, r::PirateReport)
           ". It is followed, as plain Julia follows it: that code is compiled again. ",
           m isa PirateMembership ?
           "The trait's owner or the type's owner declares the membership, or names the declarer a joint owner (`@joint_owners`)" :
+          _owner_only_owner(m.sig) !== nothing ? _owner_only_fix(m.sig, r.definer) :
           "Define it where a type it is for is owned, or name the definer a joint owner (`@joint_owners`)",
           "; strict mode (`TraitWorld.strict!()`) refuses such a definition; `TraitWorld.report_pirates!(false)` silences this report.")
 end
@@ -70,7 +71,7 @@ end
 # why a method is a pirate's (traits §12.2): another owner's owner-only function, or Julia's piracy
 function _pirate_why(m::Method, @nospecialize(definer))
     fo = _owner_only_owner(m.sig)
-    fo === nothing || return "which does not own the function: an owner-only function of $(_owner_name(fo)), whose methods are its owner's"
+    fo === nothing || return "which does not own the function: " * _owner_only_what(m.sig)
     return "which owns neither the function nor a type in it"
 end
 

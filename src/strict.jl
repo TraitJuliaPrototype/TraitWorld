@@ -82,15 +82,17 @@ function Base.showerror(io::IO, e::PirateError)
         e.later && print(io, "\n  (found after the declaration; the membership stays: a membership is not taken back)")
         return nothing
     end
-    print(io, "PirateError: strict mode refuses `", m.name, "(",
-          join((_short(t, 40) for t in (Base.unwrap_unionall(m.sig)::DataType).parameters[2:end]), ", "),
-          ")`, defined by ", _owner_name(e.definer), ".\n  It would win at the call `", _callform(e.sig),
-          "`, which code compiled by facts makes (in `", _code_name(e.caller), "`).\n  ",
-          _owner_only_owner(m.sig) === nothing ?
-              "$(_owner_name(e.definer)) owns neither the function nor a type in that signature (a pirate). " :
-              "$(_owner_name(e.definer)) does not own the function, an owner-only function of $(_owner_name(_owner_only_owner(m.sig))) (a pirate). ",
-          "Define it where a type it is for is owned, name the definer a joint owner (`@joint_owners`), ",
-          "or turn strict mode off (`TraitWorld.strict!(false)`) to follow it as plain Julia does.")
+    print(io, "PirateError: strict mode refuses `", _callform(m.sig),
+          "`, defined by ", _owner_name(e.definer), ".\n  It would win at the call `", _callform(e.sig),
+          "`, which code compiled by facts makes (in `", _code_name(e.caller), "`).\n  ")
+    if _owner_only_owner(m.sig) === nothing
+        print(io, _owner_name(e.definer), " owns neither the function nor a type in that signature (a pirate). ",
+              "Define it where a type it is for is owned, name the definer a joint owner (`@joint_owners`), ")
+    else
+        # a method of another owner's owner-only function, whatever types it names (traits §12.2)
+        print(io, "A pirate: ", _owner_only_what(m.sig), ".\n  ", _owner_only_fix(m.sig, e.definer), "; ")
+    end
+    print(io, "or turn strict mode off (`TraitWorld.strict!(false)`) to follow it as plain Julia does.")
     e.later && print(io, "\n  (found after the definition; the method was deleted again)")
 end
 
