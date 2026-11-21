@@ -154,3 +154,26 @@ end
     @test TraitWorld.is_concrete_part(Vector{Dynamic{Lengthy}})
     @test TraitWorld.is_concrete_part(Vector{Lengthy})            # a trait as a parameter's value
 end
+
+# A record built in a trait module from a value the code does not know (a field typed `Any`; an operation's result
+# declared `::Any`): the record's constructor at that argument is no fact signature (facts §3: an abstract argument
+# type, at a function that is not owner-only), so a session leaves the call to run time and its result is `Any`
+# (facts §4.2); a declared result narrows it. The front ends of the ODE and the nonlinear solve are of this shape
+# (open issue 250).
+module FRec
+using TraitWorld
+@trait_module
+export Rec, Prob, front, front_declared
+struct Rec{T}; u::Vector{T}; sys::Any; end
+struct Prob; sys::Any; end
+withsys(u::Vector{T}, @nospecialize(sys)) where {T} = Rec{T}(u, sys)
+withsys_declared(u::Vector{T}, @nospecialize(sys)) where {T} = Rec{T}(u, sys)::Rec{T}
+front(u::Vector{Float64}, p::Prob) = withsys(u, p.sys)
+front_declared(u::Vector{Float64}, p::Prob) = withsys_declared(u, p.sys)
+end
+@testset "a record built from a value the code does not know" begin
+    @test Base.infer_return_type(FRec.front, (Vector{Float64}, FRec.Prob)) === Any
+    @test Base.infer_return_type(FRec.front_declared, (Vector{Float64}, FRec.Prob)) === FRec.Rec{Float64}
+    @test FRec.front([1.0], FRec.Prob(:s)) isa FRec.Rec{Float64}
+    @test !Core.Compiler.is_fact_sig(Tuple{Type{FRec.Rec{Float64}}, Vector{Float64}, Any})
+end
