@@ -113,6 +113,53 @@ end
     end
 end
 
+# A call is read as written, at the types the code knows (traits §7.3; open issue 249). Julia's optimizer compiles a
+# call at an abstract argument whose methods cover a part of it as a test of the argument's type, the method's call,
+# and else `Core.throw_methoderror`: that other branch is the call as written, which has a method there. A call
+# that finds no method at the types the code knows stays a fault, split or not.
+@testset "the bounded check reads a split as the call as written" begin
+    bmsg(code) = (e = thrown(Meta.parse("module MS$(rand(UInt32))\nusing TraitWorld\n@trait_module\n$code\nend")); e isa TraitWorld.TraitUseError ? msg(e) : string(e))
+    traits = """
+        struct GSol{T}; u::Vector{T}; end
+        struct GOpts; a::Float64; n::Int; end
+        @trait GProb{T} begin
+            @const u0::Vector{T}
+        end
+        @trait GAlg begin
+            grun(a::GAlg, x::Vector{Float64})::GSol
+        end
+        gwith(s::GSol{T}, p::GProb{T}) where {T} = (s.u, p.u0)
+        ginner(p::GProb{Float64}, a::GAlg, o::GOpts) = grun(a, p.u0)
+        """
+    # the operation's result of an abstract type, passed where one method takes a part of it (`isa(s, GSol{Float64})`)
+    @test bmsg(traits * "gcase(p::GProb{Float64}, a::GAlg) = gwith(grun(a, p.u0), p)") == "nothing"
+    # a keyword of a type the code does not know: its options' type unknown, the call split on it
+    @test bmsg(traits * "gkw(p::GProb{Float64}, a::GAlg; tol = 1e-8, n = 10) = ginner(p, a, GOpts(Float64(tol), Int(n)))") == "nothing"
+    # no method at the types known: a fault, named by the function's name
+    m = bmsg(traits * "gno(x::Int) = x\ngref(p::GProb{Float64}) = gno(p)")
+    @test occursin("gno(p) has no method", m)
+    # an abstract argument that no method covers: a fault, though the argument's type is abstract
+    m = bmsg(traits * "gint(x::Int, p::GProb{Float64}) = 1.0\ngref2(p::GProb{Float64}, a::GAlg) = gint(grun(a, p.u0), p)")
+    @test occursin(Regex("gint\\(::(\\w+\\.)*GSol, p\\) has no method"), m)
+    # the box's own argument outside every method, beside an argument of a type the code does not know
+    m = bmsg(traits * "gtwo(x::Int, y::Int) = x\ngref3(p::GProb{Float64}, k) = gtwo(k, p)")
+    @test occursin("gtwo(k, p) has no method", m)
+    # Julia's own form, as the check reads it: the split's test and its other branch are in the instance at the box
+    @eval module MSplit
+    using TraitWorld
+    @trait_module bounded = false
+    struct SSol{T}; u::Vector{T}; end
+    @trait SAlg begin
+        srun(a::SAlg)::SSol
+    end
+    swith(s::SSol{Float64}, a::SAlg) = 1.0
+    scase(a::SAlg) = swith(srun(a), a)
+    end
+    src = Base.code_typed_by_type(TraitWorld.box_signature(only(methods(MSplit.scase))); optimize = true)[1][1]
+    @test any(st -> st isa Expr && st.head === :call && st.args[1] == GlobalRef(Core, :throw_methoderror), src.code)
+    @test TraitWorld.check_at_box(only(methods(MSplit.scase))) == TraitWorld.BoxFault[]
+end
+
 @testset "no hint at an operation that is another owner's function" begin
     e = try getindex(nothing, 1); nothing catch err; err end
     m = sprint(showerror, e)
