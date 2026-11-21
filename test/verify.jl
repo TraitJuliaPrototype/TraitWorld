@@ -445,3 +445,30 @@ boxes13(n::Int) = (v = Shape13[Dynamic{Shape13}(Sq13(Float64(n))), Pt13(), Dynam
     @test boxes13(2) == 4.0 + 1.0 + 1.0 + 9.0
     @test area13(Dynamic{Shape13}(Sq13(2.0))) == 4.0 && area13(Dynamic{Shape13}(Pt13())) == 1.0
 end
+
+# An operation's call is typed by its declared result (compiler §7.1): in a closed build the branches' results are
+# forgotten at a place of that type (compiler §7.6). A family's member is counted by use; with one member the optimizer
+# inlines the lone branch, and no statement of the code forgets its value. Not counted, the declared result's set had
+# no member and the call of its operation a "no method" fact: the build raised where a session returns (the ODE
+# program's `linfactor(ls, W)::Solvable{Float64}`, then `ldiv!` at the `LU`).
+@trait Fact14 begin
+    solve14(f::Fact14, b::Float64)::Float64
+end
+struct LU14{T}; d::T; end
+solve14(f::LU14, b::Float64) = b / f.d
+@implement Fact14 LU14{T} where {T}
+@trait Maker14 begin
+    make14(m::Maker14, d::Float64)::Fact14
+end
+struct Dense14 end
+make14(::Dense14, d::Float64) = LU14(d)
+@implement Maker14 Dense14
+@noinline run14(ms::Vector{Maker14}, d::Float64) = (s = 0.0; for m in ms; s += solve14(make14(m, d), 6.0); end; s)
+result14(n::Int) = run14(Maker14[Dense14()], Float64(n))
+
+@testset "closed check: an operation's results are forgotten at its declared result" begin
+    r = _closed_members(result14, (Int,))
+    @test r.errors == 0
+    @test get(r.members, Fact14, Any[]) == Any[LU14{Float64}]
+    @test result14(2) == 3.0
+end
