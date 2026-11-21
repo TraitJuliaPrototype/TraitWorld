@@ -79,7 +79,8 @@ end
 # the bounded check's refusal names the method as its signature is written and each argument read in a box, by its
 # name: never the compiler's tuple type, nor a keyword body's or a closure's generated name (traits §7.3, §11.3)
 @testset "the bounded check names the method as written" begin
-    bmsg(code) = (e = thrown(Meta.parse("module MB$(rand(UInt32))\nusing TraitWorld\nusing ..MsgLib: MShape\n@trait_module\n$code\nend")); e isa TraitWorld.TraitUseError ? msg(e) : string(e))
+    # (`marea`, the trait's operation, imported: a name a module never defines is a call left to run time)
+    bmsg(code) = (e = thrown(Meta.parse("module MB$(rand(UInt32))\nusing TraitWorld\nusing ..MsgLib: MShape, marea\n@trait_module\n$code\nend")); e isa TraitWorld.TraitUseError ? msg(e) : string(e))
     Q = raw"(\w+\.)*"                        # a type's module, where the test's module does not see it
     m = bmsg("msum(t::MShape) = sum(t)")
     @test occursin(Regex("^TraitUseError: `msum\\(t::$(Q)MShape\\)` is declared bounded, and is not bounded: read with `t` in a box, `Dynamic\\{$(Q)MShape\\}`:"), m)

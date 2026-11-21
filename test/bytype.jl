@@ -87,6 +87,11 @@ end
     # the forwarder is compiled once where the trait's parameters are fixed, per member type where only the member fixes them
     @test only(m for m in methods(BT.kind) if TraitWorld._is_forwarder(m)).nospecialize != 0
     @test only(m for m in methods(BT.first2) if TraitWorld._is_forwarder(m)).nospecialize == 0
+    # with several arguments that erase, each is boxed by its own call (`_forward_box`, compiler §6.3), inlined where
+    # the forwarder is compiled for the members' types: the box made by `new`, no call left
+    ci = code_typed(BT.pair, (Circle, Sq))[1][1]
+    @test count(st -> Meta.isexpr(st, :new) && st.args[1] in (Dynamic{Shape}, QuoteNode(Dynamic{Shape})), ci.code) == 2
+    @test !any(st -> Meta.isexpr(st, :invoke) || (Meta.isexpr(st, :call) && occursin("_forward_box", string(st))), ci.code)
     # a struct whose parameter is bounded by the trait: its default outer constructor boxes; its own constructor does not
     @test BT.Prob(c) isa BT.Prob{Dynamic{Shape}} && BT.Prob(compiled_for(c)) isa BT.Prob{Compiled{Circle}}
     @test BT.Prob{Circle}(c) isa BT.Prob{Circle}
