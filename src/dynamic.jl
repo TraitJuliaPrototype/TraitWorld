@@ -45,7 +45,7 @@ end
 Base.@constprop :aggressive function Base.setproperty!(d::Dynamic{X}, s::Symbol, v) where {X}
     T = _dynamic_field_type(X, s)
     T === nothing && throw(ArgumentError("$s is not a declared field of $X; unwrap(d) is the object"))
-    _field_isconst(X, s) && throw(ArgumentError("$s is declared @const by $X"))
+    _field_isconst(X, Val(s)) && throw(ArgumentError("$s is declared @const by $X"))
     return setproperty!(getfield(d, :object), s, convert(T, v))
 end
 Base.propertynames(d::Dynamic{X}) where {X} = Tuple(_declared_field_names(X))
@@ -65,6 +65,11 @@ function _field_isconst(@nospecialize(X), s::Symbol)
     end
     return false
 end
+
+# The same as a constant where the name is one (`d.u = v`): the contract is fixed once `X` is declared, as the field's
+# declared type is, so the generator's answer stands; a build then folds the test as it folds the type (the contract's
+# lookup, run when the program runs, is a call a closed build cannot resolve)
+@generated _field_isconst(::Type{X}, ::Val{s}) where {X, s} = _field_isconst(X, s)
 
 function _declared_field_names(@nospecialize(X))
     names = Symbol[]

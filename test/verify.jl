@@ -472,3 +472,15 @@ result14(n::Int) = run14(Maker14[Dense14()], Float64(n))
     @test get(r.members, Fact14, Any[]) == Any[LU14{Float64}]
     @test result14(2) == 3.0
 end
+
+# A write of a declared field at a box at a constant name (`d.x = v`, traits §6.5): the `@const` test is a constant,
+# as the field's declared type is, so the build's check has no call left to the contract's lookup (the ODE port's
+# step callbacks write `sv.u_modified` at a box)
+setall15(xs::Vector{Dynamic{WShape}}, v::Float64) = (for d in xs; d.x = v; end; sum(d -> d.x, xs))
+writes15(n::Int) = setall15(Dynamic{WShape}[Dynamic{WShape}(WA(1.0)), Dynamic{WShape}(WC(3.0, 1))], Float64(n))
+
+@testset "closed check: a declared field written at a box" begin
+    r = _closed_members(writes15, (Int,))
+    @test r.errors == 0
+    @test writes15(2) == 4.0
+end
