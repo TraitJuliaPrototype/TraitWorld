@@ -24,6 +24,8 @@ struct TMA end
 tstate(::TMA, s) = 1
 @implement TMeas TMA
 @noinline gstate(m, s) = tstate(m, s)
+op_direct(v) = tstate(v[1], nothing) + 0.5
+op_passed(v) = gstate(v[1], nothing) + 0.5
 
 callable_error(f) = try f(); nothing catch e; e isa TypeError && e.func === :Callable ? e : rethrow() end
 
@@ -63,8 +65,9 @@ end
 
 @testset "an operation's result its members' check does not reach, passed on" begin
     v = TMeas[TMA()]
-    @test_throws TypeError tstate(v[1], nothing) + 0.5          # the operation's call at the set: asserted
-    e = try gstate(v[1], nothing) + 0.5; nothing catch e; e end  # passed on to code compiled for the member
+    # (in compiled code: at the prompt `v[1]` is a `TMA`, and each call is the member's own)
+    @test_throws TypeError op_direct(v)                          # the operation's call at the set: asserted
+    e = try op_passed(v); nothing catch e; e end                 # passed on to code compiled for the member
     @test e isa TypeError && e.got === 1
     @test gstate(TMA(), nothing) === 1                           # at the member's own type: its own result
 end
