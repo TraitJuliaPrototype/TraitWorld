@@ -8,7 +8,8 @@
 
 "A call in a method's instance at the box that is not fully typed there or finds no method."
 struct BoxFault
-    kind::Symbol          # :nomethod (a call reaches no method), :throws (a call that only throws)
+    kind::Symbol          # :nomethod (a call reaches no method), :throws (a call that only throws), :undefined (a call
+                          # of a name its module does not define; `callee` is the name)
     what::String          # the call, and what it reaches
     method::Method        # the method checked
     line::Int             # the line in `method` that passes the value
@@ -163,7 +164,7 @@ function _callee_value(src::Core.CodeInfo, @nospecialize(f))
     return f
 end
 _fname(@nospecialize(fv), @nospecialize(f)) = fv isa Function ? something(_closure_form(typeof(fv)), string(nameof(fv))) :
-                                                fv isa Type ? string(fv) : string(f)
+                                                fv isa Type ? string(fv) : f isa GlobalRef ? string(f.name) : string(f)
 # a closure or an anonymous function as it is written, `(t) -> …` (traits §11.3: never its generated name), or nothing;
 # nothing for a named function, whose type's name is `#` and its own (its name is how a call prints it)
 function _closure_form(@nospecialize(T))
@@ -179,6 +180,8 @@ end
 function _argstr(src::Core.CodeInfo, @nospecialize(a))
     a isa QuoteNode && return repr(a.value)
     (a isa Symbol || a isa Number || a isa AbstractString || a isa AbstractChar) && return repr(a)
+    # the load of a global (`sum(uarea, ts)`, `uarea` not a constant here): by its name
+    a isa Core.SSAValue && src.code[a.id] isa GlobalRef && return string(src.code[a.id].name)
     n = a isa Core.Argument ? a.n : a isa Core.SlotNumber ? a.id : 0
     if 1 < n <= length(src.slotnames)
         nm = string(src.slotnames[n])
@@ -187,7 +190,9 @@ function _argstr(src::Core.CodeInfo, @nospecialize(a))
     T = _argtype(src, a)
     return something(_closure_form(T), "::" * _tstr(T))
 end
-_callstr(src::Core.CodeInfo, @nospecialize(fv), args) = string(_fname(fv, args[1]), "(", join([_argstr(src, a) for a in args[2:end]], ", "), ")")
+# a callee that is the load of a global, `%1 = M.K` (a global not defined, or not a function), by the global's name
+_callstr(src::Core.CodeInfo, @nospecialize(fv), args) = string(_fname(fv, _loaded(src, args[1])), "(", join([_argstr(src, a) for a in args[2:end]], ", "), ")")
+_loaded(src::Core.CodeInfo, @nospecialize(a)) = a isa Core.SSAValue && src.code[a.id] isa GlobalRef ? src.code[a.id] : a
 # a link of a chain of calls as the report names it: a function by its name, a closure as it is written, a
 # keyword body (`#sum#282`, beside its function's own link) left out (""); a chain by its links, each once
 function _link_name(@nospecialize(fv), @nospecialize(f))
@@ -272,7 +277,7 @@ optimized, and kept in Julia's cache with its edges (an image keeps it; a defini
 inferred apart only where the cache keeps no code.
 A fault is a call in it that takes a value at the box (the box, or a value known only by a trait) and finds no
 method (directly, below a call that only throws, or left to run time with no method at the types known), or only
-throws (an undeclared field read at the box). A call left to run time that finds a method when it runs is Julia's
+throws (an undeclared field read at the box), or calls a name `m`'s module does not define. A call left to run time that finds a method when it runs is Julia's
 barrier, no fault. A call is read as written, at the types the code knows: where the optimizer splits a call at an
 abstract argument into the method's call and, for the rest of the argument's type, `Core.throw_methoderror`, that
 other branch is no fault where a method applies at those types. Each is reported at the line of `m` that passes the
@@ -311,6 +316,18 @@ function _box_faults(m::Method, src::Core.CodeInfo, interp, world::UInt)
         frames = _frames(src, i)
         line = isempty(frames) ? Int(m.line) : frames[1][3]
         via = length(frames) > 1 ? string(" (in ", frames[end][1], " at ", basename(string(frames[end][2])), ":", frames[end][3], ")") : ""
+        # a call of a name its module does not define, with a value at the box: at the module's end a fault (traits
+        # §7.3, "When"); before it, the method waits for the name (`_decide_bounded`)
+        # (the callee, or a function passed on: `sum(uarea, ts)`)
+        undef = false
+        for a in args
+            name = _undefined_callee(src, a, m.module)
+            (name === nothing || !any(_at_box_value, ats)) && continue
+            push!(faults, BoxFault(:undefined, string(_callstr(src, fv, args), ": `", name, "` is not defined in ", m.module,
+                                                      _undefined_hint(m, name), via), m, line, name))
+            undef = true
+        end
+        undef && continue
         if fv === Core.throw_methoderror
             length(ats) >= 2 && any(_at_box_value, ats[2:end]) || continue
             # the other branch of a split: the call as written has a method at the types the code knows
@@ -349,6 +366,24 @@ function _box_faults(m::Method, src::Core.CodeInfo, interp, world::UInt)
         end
     end
     return faults
+end
+
+# The name a call's callee loads where it is a global of the module `M` that is not defined (a call `nothere(a)`, its
+# callee the load `M.nothere`), else nothing. A name of another module, written `N.name`, is not one: `M`'s end does
+# not decide it.
+function _undefined_callee(src::Core.CodeInfo, @nospecialize(f), M::Module)
+    f isa Core.SSAValue && (f = src.code[f.id])
+    (f isa GlobalRef && f.mod === M && !isdefined(M, f.name)) || return nothing
+    return f.name
+end
+# where the undefined name is an operation of a trait the method is at (an operation not imported): where to import it
+function _undefined_hint(m::Method, name::Symbol)
+    for X in _argument_traits(m), (c, _) in _contracts_of(X), op in c.operations
+        op.name === name && op.f isa Function && parentmodule(op.f) !== m.module || continue
+        M = parentmodule(op.f)
+        return string("; `", name, "` is an operation of ", bare(c.trait), ": `using ", M, ": ", name, "` imports it")
+    end
+    return ""
 end
 
 # The method's instance at the box (compiler §6.7, D-3): the instance a box's call runs, inferred and optimized by

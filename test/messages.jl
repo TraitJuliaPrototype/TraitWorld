@@ -79,7 +79,8 @@ end
 # the bounded check's refusal names the method as its signature is written and each argument read in a box, by its
 # name: never the compiler's tuple type, nor a keyword body's or a closure's generated name (traits §7.3, §11.3)
 @testset "the bounded check names the method as written" begin
-    # (`marea`, the trait's operation, imported: a name a module never defines is a call left to run time)
+    # (`marea`, the trait's operation, imported: at its module's end a call of a name the module never defines is a
+    # fault, the next testset)
     bmsg(code) = (e = thrown(Meta.parse("module MB$(rand(UInt32))\nusing TraitWorld\nusing ..MsgLib: MShape, marea\n@trait_module\n$code\nend")); e isa TraitWorld.TraitUseError ? msg(e) : string(e))
     Q = raw"(\w+\.)*"                        # a type's module, where the test's module does not see it
     m = bmsg("msum(t::MShape) = sum(t)")
@@ -121,6 +122,38 @@ end
         m = bmsg(code)
         @test startswith(m, "TraitUseError: ") && !occursin("Tuple{", m) && !occursin("var\"#", m) && !occursin(r"#\w+#\d", m)
     end
+end
+
+# At its module's end a call of a name the module never defines is a fault (traits §7.3, "When"; T-161): the report
+# names the name, its module and the line; a name defined later in the module, by `@eval` or a macro at its end, is
+# read once defined. A call with no value at the box is not the check's; nor a name of another module, `N.name`.
+@testset "the bounded check at a name its module never defines" begin
+    umsg(code; opts = "") = (e = thrown(Meta.parse("module MU$(rand(UInt32))\nusing TraitWorld\nusing ..MsgLib: MShape\n@trait_module $opts\n$code\nend")); e isa TraitWorld.TraitUseError ? msg(e) : string(e))
+    m = umsg("mnot(a::MShape) = nothere(a)")
+    @test occursin(r"nothere\(a\): `nothere` is not defined in Main\.(\w+\.)*MU\d+, at line 5", m)
+    # the trait's operation not imported: each call that names it, and where to import it from
+    m = umsg("mfv(a::MShape, ts::MShape...) = marea(a) + sum(marea, ts)")
+    @test occursin(r"marea\(a\): `marea` is not defined in [\w.]+; `marea` is an operation of [\w.]*MShape: `using [\w.]*MsgLib: marea` imports it, at line 5", m)
+    @test occursin("sum(marea, ts): `marea` is not defined in", m)
+    @test occursin("nothere(a): `nothere` is not defined", umsg("using ..MsgLib: marea\nmbr(a::MShape) = marea(a) > 0 ? nothere(a) : 0.0"))
+    @test occursin("`nothere` is not defined", umsg("global nothere\nmdecl(a::MShape) = nothere(a)"))
+    # defined in `__init__`: after the module's end
+    @test occursin("later(a): `later` is not defined", umsg("mini(a::MShape) = later(a)\n__init__() = @eval later(x) = 1.0"))
+    # defined later: waits, then read (no method at the box: refused; a method: accepted)
+    @test occursin("later(a) has no method", umsg("mlate(a::MShape) = later(a)\nlater(x::Int) = 1.0"))
+    @test umsg("mlate(a::MShape) = later(a)\nlater(x) = 1.0") == "nothing"
+    @test umsg("mlate(a::MShape) = later(a)\n@eval later(x) = 1.0") == "nothing"
+    @test umsg("macro deflater(); esc(:(later(x) = 1.0)); end\nmlate(a::MShape) = later(a)\n@deflater") == "nothing"
+    # a global that is not a function: its call has no method; an untyped global's value is not known: run time
+    @test occursin("K(a) has no method", umsg("const K = 3\nmk(a::MShape) = K(a)"))
+    @test occursin("K(a) has no method", umsg("K::Int = 3\nmk(a::MShape) = K(a)"))
+    @test umsg("K = 3\nmk(a::MShape) = K(a)") == "nothing"
+    # not the check's: no value at the box; another module's name
+    @test umsg("using ..MsgLib: marea\nmnb(a::MShape) = nothere(1) + marea(a)") == "nothing"
+    @test umsg("using ..MsgLib\nmqual(a::MShape) = MsgLib.nothere(a)") == "nothing"
+    # a scope that does not declare `bounded` accepts it; `check_definitions` lists it
+    M = Core.eval(@__MODULE__, Meta.parse("module MU$(rand(UInt32))\nusing TraitWorld\nusing ..MsgLib: MShape\n@trait_module bounded = false\nmnot(a::MShape) = nothere(a)\nend"))
+    @test occursin("nothere(a): `nothere` is not defined in", only(check_definitions(M)))
 end
 
 # A call is read as written, at the types the code knows (traits §7.3; open issue 249). Julia's optimizer compiles a
