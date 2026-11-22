@@ -20,7 +20,7 @@ export @trait, @implement, Dynamic, unwrap, like, withfields, ImplementError, Tr
        @enforce_fully_typed, @warn_not_fully_typed, fully_typed, isfullytyped, FullyTypedReport,
        NotFullyTypedError, AbstractTypeError, @enforce_concrete_only, @warn_on_abstract,
        OwnershipError, @joint_owners, @owner_only, delete_membership, PirateError, verify_main, VerifyReport, add_entrypoints, make_executable, make_library, BuildError,
-       Compiled, erases, check_at_box
+       Compiled, erases, check_at_box, operations
 
 # Intersections All{X, Y, …} (traits §3.6): Core does not export the name, and the library does,
 # so a module that also uses DataAPI's `All` qualifies one of them (open issue 148)
@@ -46,6 +46,7 @@ include("scope.jl")
 include("callable.jl")
 include("fullytyped.jl")
 include("hints.jl")
+include("operations.jl")
 include("strict.jl")
 include("report.jl")
 include("delete.jl")
