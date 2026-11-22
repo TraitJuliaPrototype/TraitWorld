@@ -425,7 +425,8 @@ end
 
 # reads `m` at the box now (D-3): refuses it where a fault is found; keeps it waiting where its body names a
 # global not yet defined, or where its only faults are calls of the module's own functions that find no method
-# yet. At its module's end (`final`) every fault counts.
+# yet. At its module's end (`final`) every fault counts: a call of a name the module never defined among them
+# (traits §7.3, "When").
 function _decide_bounded(m::Method; final::Bool = false)
     if !final
         waits = _names_undefined!(Symbol[], m)
@@ -436,8 +437,14 @@ function _decide_bounded(m::Method; final::Bool = false)
     if !final
         own = Symbol[]
         for u in fs
-            (u.kind === :nomethod && u.callee isa Function && parentmodule(u.callee) === m.module) || break
-            push!(own, nameof(u.callee))
+            if u.kind === :undefined
+                # a name of its module not defined yet, reached through a callee of the module inlined here
+                push!(own, u.callee::Symbol)
+            elseif u.kind === :nomethod && u.callee isa Function && parentmodule(u.callee) === m.module
+                push!(own, nameof(u.callee))
+            else
+                break
+            end
         end
         length(own) == length(fs) && (push!(_PENDING_BOUNDED, (m, own)); return nothing)
     end

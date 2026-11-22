@@ -162,3 +162,105 @@ end
         TraitWorld.strict!(false)
     end
 end
+
+# A trait's operation is not owner-only by the default (traits §12.2; T-162): a member's package adds its method for its
+# own type, exported or not, in a block or beside it; the operation's calls are typed by the contract. A module closes
+# an operation with `@owner_only`. A method of an operation for a type the definer does not own, at a trait it does not
+# own, stays a classic pirate. At the module's end the library declares each open operation `public`, after the
+# module's own `export` lines.
+toplevel(quote
+    module OOTr
+    using TraitWorld
+    @trait_module
+    export OShape, CShape
+    @trait OShape begin
+        oarea(s::OShape)::Float64                 # not exported: open to members
+    end
+    @trait CShape begin
+        carea(s::CShape)::Float64
+    end
+    @owner_only carea                             # closed
+    ohelper(x) = 1                                # not exported, no operation: owner-only
+    useop(v::Vector{Any}) = oarea(v[1])
+    usecontract(s::OShape) = oarea(s)
+    @trait EShape begin
+        eop(s::EShape)::Int
+    end
+    export EShape, eop                            # an operation exported after its `@trait`
+    end
+end)
+
+@testset "a trait's operation is not owner-only by the default" begin
+    OOTr = getglobal(Main, :OOTr)
+    CC = Base.Compiler
+    msg(e) = sprint(showerror, e)
+    @test !CC.is_owner_only(typeof(OOTr.oarea))
+    @test CC.is_owner_only(typeof(OOTr.carea))
+    @test CC.is_owner_only(typeof(OOTr.ohelper))
+    @test Base.ispublic(OOTr, :oarea) && !Base.ispublic(OOTr, :carea) && !Base.ispublic(OOTr, :ohelper)
+    @test Base.isexported(OOTr, :eop)
+    # a member's package, a trait module: the operation's method in the block, and beside it
+    e = thrown(:(module OOMem
+        using TraitWorld, ..OOTr
+        @trait_module
+        struct Sq; s::Float64; end
+        @implement OShape Sq begin
+            oarea(q) = q.s^2
+        end
+        struct Ci; r::Float64; end
+        OOTr.oarea(c::Ci) = 3.0 * c.r^2
+        @implement OShape Ci
+        end))
+    @test e === nothing
+    OOMem = getglobal(Main, :OOMem)
+    Sq, Ci = G(:OOMem, :Sq), G(:OOMem, :Ci)
+    @test latest(OOTr.usecontract, latest(Sq, 2.0)) == 4.0 && latest(OOTr.useop, Any[latest(Ci, 1.0)]) == 3.0
+    @test TraitWorld.owned_method(latest(which, OOTr.oarea, (Sq,)))
+    # its calls: at a value known by the trait typed by the contract; at a value of a type the code does not know a
+    # run-time site, as for any function others extend
+    @test only(Base.return_types(OOTr.usecontract, (Dynamic{OOTr.OShape},))) === Float64
+    @test code_of(OOTr.useop, Tuple{Vector{Any}})[1] === Any
+    # strict mode: a member's method of an open operation is a stakeholder's, followed
+    TraitWorld.strict!(true)
+    try
+        @test thrown(:(module OOMemS
+            using TraitWorld, ..OOTr
+            @trait_module
+            struct Tri; b::Float64; end
+            @implement OShape Tri begin
+                oarea(t) = t.b / 2
+            end
+            end)) === nothing
+    finally
+        TraitWorld.strict!(false)
+    end
+    # a method of the operation for a type the definer does not own, at a trait it does not own: a classic pirate
+    e = thrown(:(module OOPir
+        using TraitWorld, ..OOTr
+        @trait_module
+        OOTr.oarea(x::Float64) = x
+        end))
+    @test e isa OwnershipError
+    @test occursin("oarea(::Float64) in Main.OOPir is a pirate", msg(e))
+    @test occursin("owns neither the function (owned by Main.OOTr) nor a type in each of its signatures (owned by Julia)", msg(e))
+    # a closed operation: the member's method is a pirate's, and the message says the module closed it
+    e = thrown(:(module OOMemC
+        using TraitWorld, ..OOTr
+        @trait_module
+        struct Sq; s::Float64; end
+        @implement CShape Sq begin
+            carea(q) = q.s^2
+        end
+        end))
+    @test e isa OwnershipError
+    @test occursin("`carea` is an operation of Main.OOTr.CShape that Main.OOTr declares `@owner_only`: only Main.OOTr adds methods to it", msg(e))
+    @test occursin("Main.OOTr does not declare it `@owner_only`", msg(e))
+    # an unexported function that is no operation stays owner-only
+    e = thrown(:(module OOMemH
+        using TraitWorld, ..OOTr
+        @trait_module
+        struct Sq; s::Float64; end
+        OOTr.ohelper(::Sq) = 0
+        end))
+    @test e isa OwnershipError && occursin("`ohelper` is an owner-only function of Main.OOTr (neither exported nor declared `public`)", msg(e))
+end

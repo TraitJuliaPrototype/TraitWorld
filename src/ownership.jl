@@ -181,8 +181,11 @@ function _owner_only_what(@nospecialize(sig))
     F = _owner_only_ftype(sig)::DataType
     mod = F.name.module
     name = isdefined(F, :instance) ? nameof(F.instance) : F.name.name
-    why = Base.ispublic(mod, name) ? "declared `@owner_only`" : "neither exported nor declared `public`"
     o = _owner_name(owner(mod))
+    # an operation is owner-only only where its module closes it (traits §12.2)
+    X = _declared_owner_only(mod, F.name.singletonname) ? _operation_of(F) : nothing
+    X === nothing || return "`$name` is an operation of $X that $mod declares `@owner_only`: only $o adds methods to it, whatever types they are for"
+    why = _declared_owner_only(mod, F.name.singletonname) ? "declared `@owner_only`" : "neither exported nor declared `public`"
     return "`$name` is an owner-only function of $mod ($why): only $o adds methods to it, whatever types they are for"
 end
 # and who may declare the method: what the owner writes to let others extend the function, or what the definer
@@ -192,7 +195,7 @@ function _owner_only_fix(@nospecialize(sig), @nospecialize(definer))
     mod = F.name.module
     name = isdefined(F, :instance) ? nameof(F.instance) : F.name.name
     o = _owner_name(owner(mod))
-    let_ = Base.ispublic(mod, name) ? "$mod does not declare it `@owner_only`" : "$mod declares it `public` or exports it"
+    let_ = _declared_owner_only(mod, F.name.singletonname) ? "$mod does not declare it `@owner_only`" : "$mod declares it `public` or exports it"
     who = string(mod) == o ? "" : "$o "
     return "To let other modules add methods, $let_, or $(who)names $(_owner_name(definer)) a joint owner " *
         "(`@joint_owners`). Otherwise define a function of your own"
@@ -226,7 +229,8 @@ end
 At the top level of a function's own module: the functions named take methods from their owner only,
 exported or not (traits §12.2). A method of one by another package is a pirate's, whatever types it
 names; so a call of one is a fact at any signature (facts §3). A trait module's functions that it
-neither exports nor declares `public` are owner-only by default.
+neither exports nor declares `public` are owner-only by default, but for its traits' operations: a member's
+package adds an operation's method for its own type. `@owner_only op` closes an operation.
 """
 macro owner_only(names...)
     (!isempty(names) && all(n -> n isa Symbol, names)) ||
@@ -371,4 +375,47 @@ function _check_pirate(m::Method)
     _owner_only_owner(m.sig) === nothing &&
         throw(OwnershipError(head * _classic_pirate_text(m.sig, definer)))
     throw(OwnershipError(head * _owner_only_what(m.sig) * ". " * _owner_only_fix(m.sig, definer)))
+end
+
+# A trait's operation is not owner-only by the default (traits §12.2): a member's package adds its method for its own
+# type, exported or not; a module closes an operation with `@owner_only`. Julia's compiler reads a trait module's
+# function as owner-only where the module neither exports nor declares it `public` (`Compiler.is_owner_only`,
+# compiler §1.2), and so does the library's ownership (`_owner_only_ftype`). At the module's end, after its own
+# `export` and `public` lines (a function declared `public` cannot be exported after), each operation of a trait the
+# module declares whose function is its owner's, owner-only and not declared `@owner_only`, is declared `public`:
+# from there on neither reads it as owner-only. At the prompt (`Main`, which has no end) at the declaration.
+function _open_operations!(m::Module, @nospecialize(X))
+    c = contract(X)
+    (c === nothing || c.mod !== m) && return nothing
+    for op in c.operations
+        F = typeof(op.f)
+        (F isa DataType && F <: Function && isdefined(F.name, :singletonname) && CC.is_owner_only(F)) || continue
+        fm = F.name.module
+        nm = F.name.singletonname
+        _declared_owner_only(fm, nm) && continue
+        owns(owner(m), owner(fm)) || continue
+        try
+            Core.eval(fm, Expr(:public, nm))
+        catch
+            # a module of the owner that has ended while an image is built: the operation stays owner-only
+        end
+    end
+    return nothing
+end
+# whether the function `M.name` is declared `@owner_only` (the binding's flag, compiler §1.2)
+_declared_owner_only(M::Module, name::Symbol) = ccall(:jl_binding_owner_only_p, Cint, (Any, Any), M, name) != 0
+# the trait of its module that declares the function of type `F` an operation, or nothing
+function _operation_of(F::DataType)
+    M = F.name.module
+    for n in names(M; all = true)
+        isdefined(M, n) || continue
+        X = try getglobal(M, n) catch; continue end
+        (X isa Type && istrait(Base.unwrap_unionall(X))) || continue
+        c = contract(X)
+        c === nothing && continue
+        for op in c.operations
+            typeof(op.f) === F && return bare(c.trait)
+        end
+    end
+    return nothing
 end
