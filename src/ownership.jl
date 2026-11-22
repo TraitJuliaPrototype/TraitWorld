@@ -378,27 +378,20 @@ function _check_pirate(m::Method)
 end
 
 # A trait's operation is not owner-only by the default (traits §12.2): a member's package adds its method for its own
-# type, exported or not; a module closes an operation with `@owner_only`. Julia's compiler reads a trait module's
-# function as owner-only where the module neither exports nor declares it `public` (`Compiler.is_owner_only`,
-# compiler §1.2), and so does the library's ownership (`_owner_only_ftype`). At the module's end, after its own
-# `export` and `public` lines (a function declared `public` cannot be exported after), each operation of a trait the
-# module declares whose function is its owner's, owner-only and not declared `@owner_only`, is declared `public`:
-# from there on neither reads it as owner-only. At the prompt (`Main`, which has no end) at the declaration.
+# type, exported or not; a module closes an operation with `@owner_only`. Where the trait is declared, each operation
+# whose function is its owner's gets the binding's flag that Julia's compiler and the library's ownership read as open
+# (`jl_set_open_operation`, compiler §1.2: `Compiler.is_owner_only`): from the declaration on, in the module's body,
+# at the prompt, and in a module whose end has passed. The flag is no `public` declaration: `Base.ispublic` stays as
+# the module writes it, and the module may still export the operation.
 function _open_operations!(m::Module, @nospecialize(X))
     c = contract(X)
     (c === nothing || c.mod !== m) && return nothing
     for op in c.operations
         F = typeof(op.f)
-        (F isa DataType && F <: Function && isdefined(F.name, :singletonname) && CC.is_owner_only(F)) || continue
+        (F isa DataType && F <: Function && isdefined(F.name, :singletonname)) || continue
         fm = F.name.module
-        nm = F.name.singletonname
-        _declared_owner_only(fm, nm) && continue
         owns(owner(m), owner(fm)) || continue
-        try
-            Core.eval(fm, Expr(:public, nm))
-        catch
-            # a module of the owner that has ended while an image is built: the operation stays owner-only
-        end
+        ccall(:jl_set_open_operation, Cvoid, (Any, Any), fm, F.name.singletonname)
     end
     return nothing
 end

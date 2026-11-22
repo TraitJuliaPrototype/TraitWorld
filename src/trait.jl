@@ -127,8 +127,8 @@ function _trait(mod::Module, head, body)
         Any[$(QuoteNode.(supers)...)], $(lib(:OperationDecl))[$(opdecls...)],
         $(lib(:FieldDecl))[$(fielddecls...)], Pair{Symbol,Any}[$(eqs...)], $(QuoteNode(items.attribute)),
         Pair{Symbol,Symbol}[$([:($(QuoteNode(n)) => $(QuoteNode(l))) for (n, l) in items.concrete]...)]))))
-    # its operations open to its members (traits §12.2): at a module's end; at the prompt, which has no end, here
-    mod === Main && push!(out.args, :($(lib(:_open_operations!))($mod, $name)))
+    # its operations open to its members from the declaration (traits §12.2)
+    push!(out.args, :($(lib(:_open_operations!))($mod, $name)))
     # the trait's default (traits §4.6): `@default_dynamic` is recorded on the contract, where the expansion hook
     # reads it to make the forwarders (erasing.jl)
     # the declared fields' names and types, read by inference (compiler §7.1)

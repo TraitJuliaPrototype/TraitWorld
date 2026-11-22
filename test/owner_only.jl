@@ -166,8 +166,8 @@ end
 # A trait's operation is not owner-only by the default (traits §12.2; T-162): a member's package adds its method for its
 # own type, exported or not, in a block or beside it; the operation's calls are typed by the contract. A module closes
 # an operation with `@owner_only`. A method of an operation for a type the definer does not own, at a trait it does not
-# own, stays a classic pirate. At the module's end the library declares each open operation `public`, after the
-# module's own `export` lines.
+# own, stays a classic pirate. The operation is open from its declaration (a binding's flag, not a `public`
+# declaration): in the module's body, and for a trait evaluated into a module after its end.
 toplevel(quote
     module OOTr
     using TraitWorld
@@ -176,12 +176,14 @@ toplevel(quote
     @trait OShape begin
         oarea(s::OShape)::Float64                 # not exported: open to members
     end
+    const OPEN_AT_DECL = !Base.Compiler.is_owner_only(typeof(oarea))   # open in the module's body
     @trait CShape begin
         carea(s::CShape)::Float64
     end
     @owner_only carea                             # closed
     ohelper(x) = 1                                # not exported, no operation: owner-only
     useop(v::Vector{Any}) = oarea(v[1])
+    precompile(useop, (Vector{Any},))             # compiled in the module's body, before its end
     usecontract(s::OShape) = oarea(s)
     @trait EShape begin
         eop(s::EShape)::Int
@@ -197,7 +199,12 @@ end)
     @test !CC.is_owner_only(typeof(OOTr.oarea))
     @test CC.is_owner_only(typeof(OOTr.carea))
     @test CC.is_owner_only(typeof(OOTr.ohelper))
-    @test Base.ispublic(OOTr, :oarea) && !Base.ispublic(OOTr, :carea) && !Base.ispublic(OOTr, :ohelper)
+    # open from its declaration, by the binding's flag: no `public` declaration is added
+    @test OOTr.OPEN_AT_DECL
+    @test !Base.ispublic(OOTr, :oarea) && !Base.ispublic(OOTr, :carea) && !Base.ispublic(OOTr, :ohelper)
+    # a trait evaluated into the module after its end: its operation is open too
+    Core.eval(OOTr, :(@trait LShape begin lop(s::LShape)::Int end))
+    @test !CC.is_owner_only(typeof(G(:OOTr, :lop))) && !Base.ispublic(OOTr, :lop)
     @test Base.isexported(OOTr, :eop)
     # a member's package, a trait module: the operation's method in the block, and beside it
     e = thrown(:(module OOMem
