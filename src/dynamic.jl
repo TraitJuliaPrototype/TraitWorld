@@ -39,13 +39,13 @@ _fwd(d::Dynamic, @nospecialize(X::Type)) = getfield(d, :object)
 # type folds where the name is a constant (`d.u`), so a read costs the held object's own read.
 Base.@constprop :aggressive function Base.getproperty(d::Dynamic{X}, s::Symbol) where {X}
     T = _dynamic_field_type(X, s)
-    T === nothing && throw(ArgumentError("$s is not a declared field of $X; unwrap(d) is the object"))
+    T === nothing && throw(ArgumentError(_runtime_site(string, s, " is not a declared field of ", X, "; unwrap(d) is the object")::String))
     return getproperty(getfield(d, :object), s)::T
 end
 Base.@constprop :aggressive function Base.setproperty!(d::Dynamic{X}, s::Symbol, v) where {X}
     T = _dynamic_field_type(X, s)
-    T === nothing && throw(ArgumentError("$s is not a declared field of $X; unwrap(d) is the object"))
-    _field_isconst(X, Val(s)) && throw(ArgumentError("$s is declared @const by $X"))
+    T === nothing && throw(ArgumentError(_runtime_site(string, s, " is not a declared field of ", X, "; unwrap(d) is the object")::String))
+    _field_isconst(X, Val(s)) && throw(ArgumentError(_runtime_site(string, s, " is declared @const by ", X)::String))
     return setproperty!(getfield(d, :object), s, convert(T, v))
 end
 Base.propertynames(d::Dynamic{X}) where {X} = Tuple(_declared_field_names(X))
