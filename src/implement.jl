@@ -479,8 +479,9 @@ function _image_methods_hook(ms::Vector{Any}, pkg::String)
 end
 
 # The module-end hook (compiler §10.1): the methods that waited for later definitions are classified
-# (compiler §6.7), and a type the module defines with a trait as its declared supertype, and no
-# `@implement` for it, is refused at the module's end (traits §5.2).
+# (compiler §6.7), a trait's operations are opened to its members (traits §12.2, `_open_operations!`), and a type
+# the module defines with a trait as its declared supertype, and no `@implement` for it, is refused at the
+# module's end (traits §5.2).
 function _module_end_hook(m::Module)
     _end_pending_bounded(m)
     for name in names(m; all = true)
@@ -489,7 +490,7 @@ function _module_end_hook(m::Module)
         T isa Type || continue
         S = Base.unwrap_unionall(T)
         (S isa DataType && S.name.module === m && S.name.name === name) || continue
-        istrait(S) && continue
+        istrait(S) && (_open_operations!(m, T); continue)
         X = supertype(S)
         while X !== Any && !istrait(X)
             X = supertype(X)

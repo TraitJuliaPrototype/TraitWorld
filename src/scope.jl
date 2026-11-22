@@ -5,7 +5,8 @@
 
 Before a module's first method: its methods are compiled by facts (`facts`), an unbounded method at a trait
 argument is refused (`bounded`), a pirate is refused (`no_pirates`), and the functions the module neither
-exports nor declares `public` take methods from it only (`owner_only`, traits §12.2). All four are on unless
+exports nor declares `public` take methods from it only (`owner_only`, traits §12.2), but for its traits' operations,
+which members extend (`@owner_only op` closes one). All four are on unless
 written otherwise (`@trait_module bounded = false`). No option decides how a trait argument is compiled: the
 value's type does (traits §7.5, §13). The options are Julia's module options (compiler §2.1).
 """
