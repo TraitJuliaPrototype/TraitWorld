@@ -569,24 +569,31 @@ function Base.showerror(io::IO, e::AbstractTypeError)
     end
 end
 
+function _ft_error(mi::Core.MethodInstance)
+    r = try
+        fully_typed_by_type(mi.specTypes)
+    catch
+        nothing
+    end
+    return r !== nothing && isfullytyped(r) ? nothing : NotFullyTypedError(mi.specTypes, r)
+end
+
 # the compiler's check calls this with svec(mi, level, warned, kind, rt) (compiler §2.7)
-const _FT_ERRORS = IdDict{Any,Any}()
+const _FT_ERRORS = IdDict{Core.MethodInstance,Any}()
 function _fully_typed_hook(site::Core.SimpleVector)
     mi = site[1]::Core.MethodInstance
     level = site[2]::Int
     # the compiled code found a call it leaves to run time. The fault is the closed build's refusal
-    # (traits §14): where the build's check resolves every call (by the members), there is none
-    err = get!(_FT_ERRORS, mi) do
-        r = try
-            fully_typed_by_type(mi.specTypes)
-        catch
-            nothing
-        end
-        r !== nothing && isfullytyped(r) ? nothing : NotFullyTypedError(mi.specTypes, r)
+    # (traits §14): where the build's check resolves every call (by the members), there is none. The check is the
+    # library's tool over any code: a run-time site, compiled where it first runs (W-167)
+    err = get(_FT_ERRORS, mi, false)
+    if err === false
+        err = _runtime_site(_ft_error, mi)
+        _FT_ERRORS[mi] = err
     end
     err === nothing && return nothing
     level == 2 && throw(err)
-    @warn "@warn_not_fully_typed: " * sprint(showerror, err)
+    _runtime_site(() -> @warn "@warn_not_fully_typed: " * sprint(showerror, err))
     return nothing
 end
 
@@ -675,7 +682,7 @@ const _CONCRETE_WARNED = Set{Any}()
     key = (f, n, T)
     key in _CONCRETE_WARNED && return nothing
     push!(_CONCRETE_WARNED, key)
-    @warn msg * "; the code for it dispatches when it runs where it uses that type"
+    _runtime_site(() -> @warn msg * "; the code for it dispatches when it runs where it uses that type")
     return nothing
 end
 
@@ -687,7 +694,7 @@ end
     key = (f, :result, T)
     key in _CONCRETE_WARNED && return nothing
     push!(_CONCRETE_WARNED, key)
-    @warn "`$f` returns a value of the type $T, which is not concrete (`@warn_on_abstract result`)"
+    _runtime_site(() -> @warn "`$f` returns a value of the type $T, which is not concrete (`@warn_on_abstract result`)")
     return nothing
 end
 

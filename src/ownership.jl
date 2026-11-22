@@ -23,7 +23,7 @@ end
 
 const _EXT_PARENTS = IdDict{Module,Module}()
 const _EXT_TRIGGERS = IdDict{Module,Vector{String}}()
-const _NOT_EXTENSIONS = Base.IdSet{Module}()
+const _NOT_EXTENSIONS = Set{Module}()
 
 # an extension's parent and triggers: from Base's record of primed extensions, or from its source file,
 # which lies in the parent's `ext/` directory, whose Project.toml names it and its triggers
@@ -53,7 +53,7 @@ function _note_extension!(r::Module, f::AbstractString)
     basename(d) == "ext" || (d = dirname(d); basename(d) == "ext") || return false
     proj = joinpath(dirname(d), "Project.toml")
     isfile(proj) || return false
-    toml = Base.parsed_toml(proj)
+    toml = _runtime_site(Base.parsed_toml, proj)      # Base's TOML reader: values of any type (W-167)
     exts = get(toml, "extensions", nothing)
     exts isa AbstractDict || return false
     trig = get(exts, String(nameof(r)), nothing)
@@ -348,8 +348,10 @@ function _pirate_membership_text(mod::Module, @nospecialize(X), @nospecialize(me
         "(owned by $(_owner_name(_type_owner(bare(X))))) nor the type (owned by $(_owner_name(_type_owner(member))))"
 end
 function _warn_pirate_membership(what::String)
-    @warn what * ": a pirate's membership. It is followed; code that relied on its absence is compiled again. " *
-        "The trait's owner or the type's owner declares it, a foreign pair in the trait owner's package extension" maxlog = 1 _id = Symbol(what)
+    _runtime_site() do
+        @warn what * ": a pirate's membership. It is followed; code that relied on its absence is compiled again. " *
+            "The trait's owner or the type's owner declares it, a foreign pair in the trait owner's package extension" maxlog = 1 _id = Symbol(what)
+    end
     return nothing
 end
 

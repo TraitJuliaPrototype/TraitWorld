@@ -52,9 +52,21 @@ end
     (_callable_box_check(D, x, self, args); _new_box(D, x))
 
 # a trait's own method reads its receiver through `_fwd` (lowering §2); no other method does
-_code_names_fwd(src::Core.CodeInfo) = any(_names_fwd, src.code)
-_names_fwd(@nospecialize(a)) = (a isa GlobalRef && a.mod === TraitWorld && a.name === :_fwd) ||
-                               (a isa Expr && any(_names_fwd, a.args))
+function _code_names_fwd(src::Core.CodeInfo)
+    for a in src.code
+        _names_fwd(a) && return true
+    end
+    return false
+end
+function _names_fwd(@nospecialize(a))
+    a isa GlobalRef && return a.mod === TraitWorld && a.name === :_fwd
+    if a isa Expr
+        for b in a.args
+            _names_fwd(b) && return true
+        end
+    end
+    return false
+end
 
 "whether `m` is a forwarder that a method's definition made"
 function _is_forwarder(m::Method)
@@ -91,6 +103,15 @@ function _subst_vararg(@nospecialize(t), v::TypeVar, @nospecialize(x))
     t isa Core.TypeofVararg || return _subst(t, v, x)
     T = isdefined(t, :T) ? _subst(t.T, v, x) : Any
     return isdefined(t, :N) ? Vararg{T, t.N isa TypeVar ? _subst(t.N, v, x) : t.N} : Vararg{T}
+end
+
+# the index of `x` in `s` (by `===`), or nothing: a loop in the library's code, where Base's `any` and `findfirst` over
+# a simple vector are code outside the deep class (W-167)
+function _svec_index(@nospecialize(x), s::Core.SimpleVector)
+    for i in 1:length(s)
+        s[i] === x && return i
+    end
+    return nothing
 end
 
 """
@@ -132,7 +153,7 @@ function _expand_definition(argdata::Core.SimpleVector, code::Core.CodeInfo, mod
         T = fatypes[i]
         T isa Core.TypeofVararg && continue
         via = nothing
-        if T isa TypeVar && any(v -> v === T, tvars)
+        if T isa TypeVar && _svec_index(T, tvars) !== nothing
             via = T
             T = T.ub
         end
@@ -151,7 +172,7 @@ function _expand_definition(argdata::Core.SimpleVector, code::Core.CodeInfo, mod
             katypes[i] = _kept_forms(fatypes[i] === atypes[i] ? traits[k] : atypes[i])
         else
             # the variable as it stands now (an earlier replacement may have rebuilt it), with its bound replaced
-            vi = findfirst(w -> w === v, collect(tvars))::Int
+            vi = _svec_index(v, tvars)::Int
             cur = ktvars[vi]::TypeVar
             X = traits[k]
             X = foldl((t, j) -> ktvars[j] === tvars[j] ? t : _subst(t, tvars[j]::TypeVar, ktvars[j]), eachindex(ktvars); init = X)

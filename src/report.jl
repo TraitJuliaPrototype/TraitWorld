@@ -135,7 +135,7 @@ function _report_endings!(es::Vector{Any})
             PirateReport(m, owner(m.module), get(sigs, m, nothing), byc[key])
         end
         push!(PIRATE_REPORTS, r)
-        @warn sprint(show, r)
+        _runtime_site(() -> @warn sprint(show, r))
     end
     return nothing
 end

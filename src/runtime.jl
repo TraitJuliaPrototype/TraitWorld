@@ -1,5 +1,30 @@
 # The runtime's interface for sets and memberships (compiler §4).
 
+"""
+    _runtime_site(f, args...)
+
+`f(args...)` as a run-time site (facts §5): `f` is passed typed `Any`, so the caller records no edge to the code it
+reaches, and that code is compiled where it first runs. The library's code is compiled by facts, and each hook must be
+in the deep class (compiler §3.2), so that no unrelated load ends it (G2). Its calls into code outside the class go
+through here: the code that handles values of any type by its purpose (a message that prints a user's type or method,
+the logger the user installed) and Base's code over values its types do not settle. The result is typed `Any`.
+"""
+_runtime_site(f, args...) = Base.inferencebarrier(f)(args...)
+
+# Helpers over containers of `Any` that stay in the deep class: a loop in the library's own code, where a call at a
+# value typed `Any` is a run-time site; Base's `any`, `findfirst`, `enumerate` and the like over such a container
+# are plain code that commits at `Any` (open issue 218). A store of a value of a known type into a `Dict{Symbol,Any}`
+# reaches Base's method that takes any value (`@nospecialize`), outside the class: `_setenv!` takes the value typed
+# `Any`, so that the store is a run-time site.
+"whether `x` is in `v`, by `===`"
+function _in_by_identity(@nospecialize(x), v::Vector{Any})
+    for y in v
+        y === x && return true
+    end
+    return false
+end
+_setenv!(d::Dict{Symbol,Any}, k::Symbol, @nospecialize(v)) = (d[k] = Base.inferencebarrier(v); d)
+
 _open_set!(@nospecialize(T)) = ccall(:jl_set_open_set, Cvoid, (Any,), T)
 _set_contract!(@nospecialize(T), @nospecialize(c)) = ccall(:jl_set_contract, Cvoid, (Any, Any), T, c)
 "Mark a set's input parameters (compiler §4.6): bit i for parameter i, the first eight only."

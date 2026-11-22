@@ -92,7 +92,7 @@ function __init__()
     # fully typed mode's hook (compiler §2.7): code that fails it reports through the library
     ccall(:jl_set_fully_typed_hook, Cvoid, (Any,), _fully_typed_hook)
     # the hints on MethodError where a trait is involved (traits §11.4)
-    Base.Experimental.register_error_hint(_method_error_hint, MethodError)
+    _runtime_site(Base.Experimental.register_error_hint, _method_error_hint, MethodError)
     # strict mode (traits §12.3): JULIA_TW_STRICT=1, the report after each package load
     _strict_init!()
     # the pirate's report (traits §12.2): by default, after a definition, a declaration and a load

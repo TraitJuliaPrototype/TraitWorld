@@ -98,7 +98,14 @@ function _contracts_of!(out, @nospecialize(X))
         end
     end
     # a trait at other values of its inputs is a trait of its own (traits §3.2)
-    any(q -> q[1] === c && all(p -> get(q[2], p, nothing) == get(env, p, nothing), c.inputs), out) && return out
+    for q in out                        # loops here, not Base's `any` and `all` with closures (W-167)
+        q[1] === c || continue
+        same = true
+        for p in c.inputs
+            get(q[2], p, nothing) == get(env, p, nothing) || (same = false; break)
+        end
+        same && return out
+    end
     push!(out, (c, env))
     if length(env) == length(c.params)
         for s in c.supers

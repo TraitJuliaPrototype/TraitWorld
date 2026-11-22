@@ -54,7 +54,7 @@ function delete_membership(@nospecialize(X), @nospecialize(S); by::Union{Module,
         what = "delete_membership($(bare(X)), $S) by $mod: $(_owner_name(definer)) owns neither the trait nor the type"
         _no_pirates(mod) && throw(OwnershipError(what * ": a pirate's, and the scope declares `no_pirates`"))
         STRICT[] && _strict_take_back!(en, S, inst, mod, definer)
-        @warn what * ": a pirate's. It is followed; the code that relied on the membership is compiled again."
+        _runtime_site(() -> @warn what * ": a pirate's. It is followed; the code that relied on the membership is compiled again.")
     end
     ccall(:jl_delete_membership, Cvoid, (Any, Any, Any), getfield(en, :member), inst, mod)
     _forget_membership!(X, getfield(en, :member), inst)
@@ -86,14 +86,14 @@ end
 # answers (compiler §10.4, `_CHECKED`), for each member a pattern made; its pattern for first uses.
 function _forget_membership!(@nospecialize(X), @nospecialize(member), @nospecialize(inst))
     Xb = bare(X)
-    for key in collect(keys(_CHECKED))
+    for key in _runtime_site(collect, keys(_CHECKED))      # Base's walk of an `IdDict{Any}` (W-167)
         T, Y = key
         Y === Xb && T isa Type && T <: member && delete!(_CHECKED, key)
     end
-    for recs in values(_FIXED_CALLS)
+    for recs in _FIXED_LISTS
         _forget_under!(recs, member, Xb)
     end
-    for recs in values(_CHECKED_RESULTS)
+    for recs in _CHECKED_LISTS
         _forget_under!(recs, member, Xb)
     end
     j = 0
@@ -127,7 +127,7 @@ end
 function _strict_take_back!(en, @nospecialize(S), @nospecialize(inst), mod::Module, @nospecialize(definer))
     pm = PirateMembership(bare(getfield(en, :instance)), S, mod)
     m = getfield(en, :method)
-    seen = Base.IdSet{Any}()
+    seen = Set{Core.CodeInstance}()
     if m isa Method
         for mi in Base.specializations(m)
             mi isa Core.MethodInstance && isdefined(mi, :backedges) || continue

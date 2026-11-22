@@ -221,7 +221,8 @@ textbound(x::Union{String, SubString{String}}) = ncodeunits(x)
 textbound(x::AbstractString) = 4 * length(x)          # printed as UTF-8: at most four bytes a character
 textbound(x::Symbol) = sizeof(x)
 textbound(x::Union{Dates.Date, Dates.DateTime, Dates.Time}) = textbound(typeof(x))
-textbound(x::Union{Dates.Period, Dates.CompoundPeriod}) = ncodeunits(string(x))
+# Dates prints a compound period from its `Vector{Period}`, code outside the deep class: a run-time site (W-167)
+textbound(x::Union{Dates.Period, Dates.CompoundPeriod}) = ncodeunits(TraitWorld._runtime_site(string, x)::String)
 @implement BoundedText Number
 @implement BoundedText AbstractChar
 @implement BoundedText AbstractString

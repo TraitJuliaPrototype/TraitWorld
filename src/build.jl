@@ -330,7 +330,7 @@ function make_executable(@nospecialize(main), path::AbstractString; project = Ba
     src = _source_of(main, Tuple{Vector{String}}, session)
     _check_before_build(main, (Vector{String},))
     src[1] === :session && src[4] > 0 &&
-        @info "make_executable: the build replays the $(length(src[2])) definitions of the session that $(src[3]) depends on; $(src[4]) other statements are not replayed"
+        _runtime_site(() -> @info "make_executable: the build replays the $(length(src[2])) definitions of the session that $(src[3]) depends on; $(src[4]) other statements are not replayed")
     dir = mktempdir(; cleanup = false)
     driver = joinpath(dir, "driver.jl")
     open(driver, "w") do io

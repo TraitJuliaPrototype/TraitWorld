@@ -34,12 +34,17 @@ end
 const _SRC_DIR = @__DIR__
 function _at_source!(@nospecialize(ex), src::LineNumberNode)
     ex isa Expr || return ex
-    for (i, a) in enumerate(ex.args)
-        if a isa LineNumberNode
-            # the user's own lines (a default's body) stay
-            startswith(string(a.file), _SRC_DIR) && (ex.args[i] = src)
-        elseif a isa Expr
-            a.head === :quote || _at_source!(a, src)
+    stack = Expr[ex]                    # a stack and an index loop: Base's `enumerate` over `Vector{Any}` is code outside the deep class (W-167)
+    while !isempty(stack)
+        e = pop!(stack)
+        for i in 1:length(e.args)
+            a = e.args[i]
+            if a isa LineNumberNode
+                # the user's own lines (a default's body) stay
+                startswith(string(a.file), _SRC_DIR) && (e.args[i] = src)
+            elseif a isa Expr
+                a.head === :quote || push!(stack, a)
+            end
         end
     end
     return ex
@@ -311,7 +316,15 @@ end
 
 _is_self(ty, trait::Symbol) = ty === trait || ty === :Self || (Meta.isexpr(ty, :curly) && ty.args[1] === trait)
 
-_mentions(ex, s::Symbol) = ex === s || (ex isa Expr && any(a -> _mentions(a, s), ex.args))
+function _mentions(@nospecialize(ex), s::Symbol)
+    ex === s && return true
+    if ex isa Expr
+        for a in ex.args                # a loop here, not `any` over a `Vector{Any}` in Base's code (W-167)
+            _mentions(a, s) && return true
+        end
+    end
+    return false
+end
 
 _subst(ex, s::Symbol, by) = ex === s ? by : ex isa Expr ? Expr(ex.head, Any[_subst(a, s, by) for a in ex.args]...) : ex
 
@@ -569,4 +582,9 @@ function _operation_entry(trait::Symbol, params::Vector{Symbol}, op, mod::Module
         :(($(op.fname), Tuple{typeof($(op.fname)), $(tys...)}, $rt, $default, Any[$(params...), $(wnames...)])))
 end
 
-_mentions_any(ex, names::Vector{Symbol}) = any(n -> _mentions(ex, n), names)
+function _mentions_any(@nospecialize(ex), names::Vector{Symbol})
+    for n in names
+        _mentions(ex, n) && return true
+    end
+    return false
+end

@@ -51,7 +51,7 @@ function _check_concrete!(problems, c::Contract, env, @nospecialize(S), how::How
             push!(problems, msg)
         else
             key = (c.trait, n, S)
-            key in _CONCRETE_WARNED || (push!(_CONCRETE_WARNED, key); @warn "$S as a member of $(bare(c.trait)): $msg")
+            key in _CONCRETE_WARNED || (push!(_CONCRETE_WARNED, key); _runtime_site(() -> @warn "$S as a member of $(bare(c.trait)): $msg"))
         end
     end
 end
@@ -106,7 +106,11 @@ function _params_at(c::Contract, @nospecialize(S), @nospecialize(stated), how::H
             stored = fieldtype(S, f.name)
             tvs = Dict{Symbol,TypeVar}(p => TypeVar(p) for p in c.params if _mentions(f.type, p))
             pat = try
-                _eval_in(c, f.type, merge(Dict{Symbol,Any}(env), Dict{Symbol,Any}(tvs)), _receiver_type(S, how))
+                e = copy(env)
+                for (p, t) in tvs
+                    _setenv!(e, p, t)
+                end
+                _eval_in(c, f.type, e, _receiver_type(S, how))
             catch
                 continue
             end
@@ -261,7 +265,7 @@ function _where_env(c::Contract, op::OperationDecl, env, @nospecialize(R))
     env2 = Dict{Symbol,Any}(env)
     for w in op.wherevars
         if w isa Symbol
-            env2[w] = Any
+            _setenv!(env2, w, Any)
         elseif Meta.isexpr(w, :<:) && w.args[1] isa Symbol
             env2[w.args[1]] = _eval_in(c, w.args[2], env2, R)
         end
@@ -336,9 +340,19 @@ end
 # a trait's own method: a default's method at the trait, which calls _fwd on its receiver, and a kept form's
 # forwarding method, marked `:kept_forwarding` (lowering §2); no other method is either
 const _IS_TRAIT_METHOD = IdDict{Method,Bool}()
-_is_trait_method(m::Method) = get!(_IS_TRAIT_METHOD, m) do
-    any(s -> s isa GlobalRef && s.mod === TraitWorld && s.name === :_fwd, _code_refs(m)) ||
-        (!isdefined(m, :generator) && _has_meta(Base.uncompressed_ast(m), :kept_forwarding))
+function _is_trait_method(m::Method)
+    v = get(_IS_TRAIT_METHOD, m, nothing)
+    v === nothing || return v::Bool
+    r = false
+    for s in _code_refs(m)              # a loop here, not `any` over a `Vector{Any}` in Base's code (W-167)
+        if s isa GlobalRef && s.mod === TraitWorld && s.name === :_fwd
+            r = true
+            break
+        end
+    end
+    r = r || (!isdefined(m, :generator) && _has_meta(Base.uncompressed_ast(m), :kept_forwarding))
+    _IS_TRAIT_METHOD[m] = r
+    return r
 end
 function _code_refs(m::Method)
     isdefined(m, :generator) && return Any[]      # a generated method has no lowered code of its own
@@ -352,8 +366,13 @@ function _code_refs(m::Method)
 end
 _collect_refs!(out, ex::Expr) = (for a in ex.args; a isa GlobalRef ? push!(out, a) : a isa Expr && _collect_refs!(out, a); end; out)
 
-_declared(op::OperationDecl, c::Contract) =
-    string(op.name, "(", join([ty === nothing ? string(n) : string(n, "::", ty) for (n, ty) in op.args], ", "), ")::", op.result)
+function _declared(op::OperationDecl, c::Contract)
+    parts = String[]
+    for (n, ty) in op.args
+        push!(parts, ty === nothing ? string(n) : string(n, "::", ty)::String)
+    end
+    return string(op.name, "(", join(parts, ", "), ")::", op.result)::String
+end
 
 function _near(op::OperationDecl, @nospecialize(R))
     ms = Method[]
@@ -365,7 +384,11 @@ function _near(op::OperationDecl, @nospecialize(R))
         p isa Type && !Base.has_free_typevars(p) && typeintersect(R, p) !== Union{} && push!(ms, m)
     end
     isempty(ms) && return ""
-    return "; its methods there: " * join(string.(ms), "; ")
+    strs = String[]
+    for m in ms
+        push!(strs, _runtime_site(string, m)::String)     # Base prints the method: the user's types (W-167)
+    end
+    return "; its methods there: " * join(strs, "; ")
 end
 
 # Declared fields (traits §4.3): present, typed, writable where declared so.

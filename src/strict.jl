@@ -120,10 +120,10 @@ end
 _owned_or_julia(m::Method) = (d = owner(m.module); d === :Julia || owned_method(m))
 
 "The first fact `(sig, caller)` of code compiled by facts at which `m` would win and `accept(sig)` holds, or `nothing`."
-_winning_fact(m::Method, accept) = _winning_fact(m, m.sig, accept)
-function _winning_fact(m::Method, @nospecialize(isig), accept)
+_winning_fact(m::Method, @nospecialize(accept)) = _winning_fact(m, m.sig, accept)
+function _winning_fact(m::Method, @nospecialize(isig), @nospecialize(accept))
     world = Base.get_world_counter()
-    seen = Base.IdSet{Any}()
+    seen = Set{Core.CodeInstance}()
     function check(@nospecialize(s), @nospecialize(caller))
         caller isa Core.CodeInstance && caller.max_world == typemax(UInt) || return nothing
         _deep(caller) || return nothing                      # outside the deep class: followed (facts §11.2)
@@ -147,7 +147,7 @@ function _winning_fact(m::Method, @nospecialize(isig), accept)
         old = (mm::Core.MethodMatch).method
         old === m && continue
         ccall(:jl_type_morespecific, Cint, (Any, Any), old.sig, m.sig) != 0 && continue
-        for mi in Base.specializations(old)
+        for mi in _runtime_site(Base.specializations, old)     # Base's iterator: code outside the class (W-167)
             mi isa Core.MethodInstance && isdefined(mi, :backedges) || continue
             be = mi.backedges
             i = 1
@@ -184,7 +184,7 @@ function _winning_fact(m::Method, @nospecialize(isig), accept)
 end
 
 "The first valid CodeInstance compiled by facts in the deep class that rests on `ci` through its callers' backedges, through code in the class, or `nothing`."
-function _facts_dependent(ci::Core.CodeInstance, seen::Base.IdSet{Any})
+function _facts_dependent(ci::Core.CodeInstance, seen::Set{Core.CodeInstance})
     stack = Any[ci]
     while !isempty(stack)
         c = pop!(stack)::Core.CodeInstance
@@ -211,11 +211,16 @@ function _facts_dependent(ci::Core.CodeInstance, seen::Base.IdSet{Any})
     return nothing
 end
 
+# the predicate "the definer holds no stake at the signature": one type, whatever the definer is (W-167)
+struct _NoStake
+    definer::Any
+end
+(a::_NoStake)(@nospecialize(s)) = !_stakeholder(a.definer, s)
+
 "The fact `(sig, caller)` a pirate `m` would win at, by a definer that holds no stake there, or `nothing`."
 function _strict_violation(m::Method)
     _owned_or_julia(m) && return nothing
-    definer = owner(m.module)
-    return _winning_fact(m, s -> !_stakeholder(definer, s))
+    return _winning_fact(m, _NoStake(owner(m.module)))
 end
 
 # A package extension counts as its parent (traits §12.1), so its method for the parent's function is
@@ -231,8 +236,10 @@ function _warn_extension_method(m::Method)
     end
     hit = _winning_fact(m, s -> true)
     hit === nothing && return nothing
-    @warn "strict mode: $(_callform(m.sig)) in the package extension $r names no type of its triggers ($(join(trig, ", "))) " *
-          "and wins at $(_callform(hit[1])) in code compiled by facts. It is followed as its parent's change: that code is compiled again."
+    _runtime_site() do
+        @warn "strict mode: $(_callform(m.sig)) in the package extension $r names no type of its triggers ($(join(trig, ", "))) " *
+              "and wins at $(_callform(hit[1])) in code compiled by facts. It is followed as its parent's change: that code is compiled again."
+    end
     return nothing
 end
 
@@ -297,7 +304,7 @@ _is_membership_method(m::Method) =
 "The first `(sig, code)`: an absence edge that a membership's method at `msig` meets (compiler §5.6), held by code compiled by facts or by code it rests on; or `nothing`."
 function _absence_fact(@nospecialize(msig))
     tn = _implements_typename()
-    seen = Base.IdSet{Any}()
+    seen = Set{Core.CodeInstance}()
     be = getfield(Core.methodtable, :backedges)
     for i in 1:2:(length(be)::Int)-1
         isassigned(be, i) && be[i] === tn && isassigned(be, i + 1) || continue
@@ -330,7 +337,7 @@ function _membership_violation(mod::Module, @nospecialize(member), @nospecialize
     for i in 1:2:length(rs)-1
         sig = rs[i+1]
         sig isa Type || continue                     # the walk has no signature here: the check after decides
-        v = _winning_fact(rs[i]::Method, sig, s -> !_stakeholder(definer, s))
+        v = _winning_fact(rs[i]::Method, sig, _NoStake(definer))
         v === nothing || return v
     end
     return nothing
@@ -411,7 +418,7 @@ function _strict_image_refusals(ms::Vector{Any})
             v === nothing && continue
             b = Base.unwrap_unionall(m.sig)::DataType
             pm = PirateMembership(_sig_arg(b.parameters[2]), _sig_arg(b.parameters[3]), m.module)
-            @error sprint(showerror, PirateError(pm, owner(m.module), v[1], v[2], false)) * "\n  (the image's membership is refused)"
+            _runtime_site(() -> @error sprint(showerror, PirateError(pm, owner(m.module), v[1], v[2], false)) * "\n  (the image's membership is refused)")
             push!(out, m)
             continue
         end
@@ -421,7 +428,7 @@ function _strict_image_refusals(ms::Vector{Any})
         end
         v = _strict_violation(m)
         v === nothing && continue
-        @error sprint(showerror, PirateError(m, owner(m.module), v[1], v[2], false)) * "\n  (the image's method is left inactive)"
+        _runtime_site(() -> @error sprint(showerror, PirateError(m, owner(m.module), v[1], v[2], false)) * "\n  (the image's method is left inactive)")
         push!(out, m)
     end
     return out
@@ -500,8 +507,10 @@ function _report_load_ambiguities!()
         m isa String && push!(_LOAD_AMBIGUITIES, m)
     end
     length(_LOAD_AMBIGUITIES) > n || return nothing
-    @error "strict mode: a package image's membership makes methods ambiguous with code loaded earlier:\n  " *
-           join(_LOAD_AMBIGUITIES[n+1:end], "\n  ")
+    _runtime_site() do
+        @error "strict mode: a package image's membership makes methods ambiguous with code loaded earlier:\n  " *
+               join(_LOAD_AMBIGUITIES[n+1:end], "\n  ")
+    end
     return nothing
 end
 
@@ -520,7 +529,7 @@ function _report_load_memberships!()
     list = ccall(:jl_activated_memberships, Any, ())::Core.SimpleVector
     _STRICT_ENTRY_CURSOR[] = length(list)
     _sync_image_records!()
-    new = Base.IdSet{Any}()                       # the members with a membership activated since
+    new = Any[]                                   # the members with a membership activated since
     for i in from:length(list)
         en = list[i]
         getfield(en, :max_world, :acquire) == typemax(UInt64) || continue
@@ -530,9 +539,9 @@ function _report_load_memberships!()
     isempty(new) && return nothing
     world = Base.get_world_counter()
     msgs = String[]
-    for recs in values(_CHECKED_RESULTS), r in recs
+    for recs in _CHECKED_LISTS, r in recs
         r = r::_CheckedResult
-        r.member in new || continue
+        _in_by_identity(r.member, new) || continue
         declared = _declared_result(r)
         declared === nothing && continue
         sig = r.sig::DataType
@@ -545,9 +554,11 @@ function _report_load_memberships!()
                     "$rt, outside the declared $declared ($by).")
     end
     isempty(msgs) && return nothing
-    @error "strict mode: a package image's membership fails its check in this session:\n  " * join(msgs, "\n  ") *
-           "\n  A method the session held before the image's load decides the result. It came first, so strict " *
-           "mode cannot refuse it: load the package before it."
+    _runtime_site() do
+        @error "strict mode: a package image's membership fails its check in this session:\n  " * join(msgs, "\n  ") *
+               "\n  A method the session held before the image's load decides the result. It came first, so strict " *
+               "mode cannot refuse it: load the package before it."
+    end
     append!(_LOAD_MEMBERSHIPS, msgs)
     return nothing
 end
@@ -560,7 +571,7 @@ function _strict_at_load!(_pkg = nothing)
     try
         _report_load_memberships!()
     catch err
-        @warn "TraitWorld: strict mode's inference of an image's memberships failed" exception = err
+        _runtime_site(() -> @warn "TraitWorld: strict mode's inference of an image's memberships failed" exception = err)
     end
     log = _VAL_LOG[]
     if log isa Vector{Any} && _validation_log_ref()[] === log
@@ -568,8 +579,10 @@ function _strict_at_load!(_pkg = nothing)
         entries = copy(log)
         empty!(log)
         es = _load_pirates(entries)
-        isempty(es) || @error "strict mode: pirates loaded before a package image change its code compiled by facts:\n  " *
-                              join(sprint.(showerror, es), "\n  ")
+        isempty(es) || _runtime_site() do
+            @error "strict mode: pirates loaded before a package image change its code compiled by facts:\n  " *
+                   join(sprint.(showerror, es), "\n  ")
+        end
         append!(_LOAD_PIRATES, es)
     else
         _validation_log_on!()
@@ -584,9 +597,9 @@ function _deletion_hook(m::Method)
     STRICT[] || return nothing
     _owned_or_julia(m) && return nothing                 # an owner's change
     world = Base.get_world_counter()
-    for mi in Base.specializations(m)
+    for mi in _runtime_site(Base.specializations, m)
         mi isa Core.MethodInstance && isdefined(mi, :backedges) || continue
-        seen = Base.IdSet{Any}()
+        seen = Set{Core.CodeInstance}()
         for x in mi.backedges
             x isa Core.CodeInstance || continue
             c = _facts_dependent(x, seen)

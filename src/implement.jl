@@ -39,7 +39,7 @@ function _implement_expr(mod::Module, args, source = nothing)
         f isa Symbol || error("@implement … by f: f is a field's name, got $f")
         by = f
     elseif !isempty(rest)
-        error("@implement X S, then nothing, a begin … end block, or by f; got $(rest)")
+        error("@implement X S, then nothing, a begin … end block, or by f; got " * _runtime_site(string, rest)::String)
     end
     traits = Meta.isexpr(traitsex, :tuple) ? Any[traitsex.args...] : Any[traitsex]
     names = Symbol[]
@@ -86,23 +86,29 @@ end
 # `@implement BoundedText I where {I <: Base.BitInteger}`.
 function _implement_vars!(mod::Module, traits::Vector{Any}, @nospecialize(body), tvs::Vector{Any},
                           by::Union{Nothing,Symbol}, block)
-    k = findfirst(tv -> (tv::TypeVar).ub isa Union, tvs)
+    k = nothing
+    for i in 1:length(tvs)              # loops here: Base's `findfirst` and a filtered collect over `Vector{Any}` (W-167)
+        (tvs[i]::TypeVar).ub isa Union && (k = i; break)
+    end
     if k !== nothing
         tv = tvs[k]::TypeVar
-        rest = Any[tvs[i] for i in eachindex(tvs) if i != k]
+        rest = Any[]
+        for i in 1:length(tvs)
+            i == k || push!(rest, tvs[i])
+        end
         for t in Base.uniontypes(tv.ub)
             b = body === tv ? t : _subst_tv(body, tv, t)
             _implement_vars!(mod, Any[_subst_tv(X, tv, t) for X in traits], b, rest, by, block)
         end
         return nothing
     end
-    body isa TypeVar && throw(ArgumentError("@implement: the member is a type or a family of types; got $body"))
+    body isa TypeVar && throw(ArgumentError("@implement: the member is a type or a family of types; got " * _runtime_site(string, body)::String))
     member = foldr((tv, acc) -> UnionAll(tv, acc), tvs; init = body)
     return _implement!(mod, traits, member, by, block)
 end
 
 function _implement!(mod::Module, traits::Vector{Any}, @nospecialize(member), by::Union{Nothing,Symbol}, block)
-    if any(X -> X === Core.Callable, traits)
+    if _in_by_identity(Core.Callable, traits)
         (length(traits) == 1 && by === nothing && block === nothing) ||
             throw(ArgumentError("@implement Callable T: alone, with no block and no forwarding field"))
         return _implement_callable!(mod, member)
@@ -113,7 +119,9 @@ function _implement!(mod::Module, traits::Vector{Any}, @nospecialize(member), by
         istrait(X) || throw(ArgumentError("@implement: $X is not a trait"))
         _check_membership_owner(mod, X, member) && push!(pirates, X)
     end
-    foreach(X -> _forget_records!(X, member), traits)   # a redeclaration fixes them anew (traits §5.10, §5.11)
+    for X in traits                                     # a redeclaration fixes them anew (traits §5.10, §5.11)
+        _forget_records!(X, member)
+    end
     defined = block === nothing ? Method[] : _define_block!(mod, traits, member, block)
     added = Method[]
     try
@@ -122,13 +130,17 @@ function _implement!(mod::Module, traits::Vector{Any}, @nospecialize(member), by
         end
         # the forwarding's methods fix their calls once every trait's are defined: two traits forwarded
         # by one field may share an operation's method
-        how.by === nothing || foreach(X -> _record_forwarders!(X, member, how.by), traits)
+        if how.by !== nothing
+            for X in traits
+                _record_forwarders!(X, member, how.by)
+            end
+        end
     catch
         # a refused membership takes its block's methods away; while an image is built a method cannot
         # be deleted, and the error fails the build
         if ccall(:jl_generating_output, Cint, ()) == 0
-            foreach(Base.delete_method, defined)
-            foreach(Base.delete_method, added)
+            for m in defined; Base.delete_method(m); end
+            for m in added; Base.delete_method(m); end
         end
         rethrow()
     end
@@ -210,14 +222,26 @@ end
 # membership an image activates (`_sync_image_records!`).
 const _FIXED_CALLS = IdDict{Any,Vector{Any}}()
 const _CHECKED_RESULTS = IdDict{Any,Vector{Any}}()
+# the lists of each store, for the walks over all of them: Base's iteration of an `IdDict{Any}` is code outside the
+# deep class (W-167), which a hook that walks the store would rest on. A list is never removed from its store.
+const _FIXED_LISTS = Vector{Any}[]
+const _CHECKED_LISTS = Vector{Any}[]
+function _records_for!(d::IdDict{Any,Vector{Any}}, lists::Vector{Vector{Any}}, @nospecialize(f))
+    v = get(d, f, nothing)
+    v === nothing || return v::Vector{Any}
+    v = Any[]
+    d[f] = v
+    push!(lists, v)
+    return v
+end
 
 function _record_checks!(@nospecialize(X), @nospecialize(member), defaults::Vector{Any}, results::Vector{Any})
     Xb = bare(X)
     for (src, f, sig) in defaults
-        push!(get!(Vector{Any}, _FIXED_CALLS, f), _FixedCall(Xb, src, member, sig))
+        push!(_records_for!(_FIXED_CALLS, _FIXED_LISTS, f), _FixedCall(Xb, src, member, sig))
     end
     for (c, op, sig, env, R) in results
-        push!(get!(Vector{Any}, _CHECKED_RESULTS, op.f), _CheckedResult(Xb, c, op, member, sig, env, R))
+        push!(_records_for!(_CHECKED_RESULTS, _CHECKED_LISTS, op.f), _CheckedResult(Xb, c, op, member, sig, env, R))
     end
     return nothing
 end
@@ -226,7 +250,7 @@ end
 function _record_forwarders!(@nospecialize(X), @nospecialize(member), by::Symbol)
     Xb = bare(X)
     for (f, sig) in _fwd_sigs(member, Xb)
-        push!(get!(Vector{Any}, _FIXED_CALLS, f), _FixedCall(Xb, by, member, sig))
+        push!(_records_for!(_FIXED_CALLS, _FIXED_LISTS, f), _FixedCall(Xb, by, member, sig))
     end
     return nothing
 end
@@ -254,10 +278,10 @@ end
 # a membership redeclared, or made again from an image's entry, fixes its calls and results anew
 function _forget_records!(@nospecialize(X), @nospecialize(member))
     Xb = bare(X)
-    for recs in values(_FIXED_CALLS)
+    for recs in _FIXED_LISTS
         _forget_in!(recs, member, Xb)
     end
-    for recs in values(_CHECKED_RESULTS)
+    for recs in _CHECKED_LISTS
         _forget_in!(recs, member, Xb)
     end
     return nothing
@@ -297,7 +321,7 @@ function _sync_image_records!()
         try
             _records_from_entry!(en)
         catch err
-            @warn "TraitWorld: the records of an image's membership were not made" entry = en exception = err
+            _runtime_site(() -> @warn "TraitWorld: the records of an image's membership were not made" entry = en exception = err)
         end
     end
     return nothing
@@ -316,7 +340,7 @@ function _sync_image_checks!()
         try
             _restore_checked!(T, X)
         catch err
-            @warn "TraitWorld: the records of a member an image checked were not made" member = T trait = X exception = err
+            _runtime_site(() -> @warn "TraitWorld: the records of a member an image checked were not made" member = T trait = X exception = err)
         end
     end
     return nothing
@@ -450,7 +474,7 @@ function _infer_new_method(m::Method, @nospecialize(s), world::UInt)
     try
         _, sparams = ccall(:jl_type_intersection_with_env, Any, (Any, Any), s, m.sig)::Core.SimpleVector
         mi = Base.specialize_method(m, s, sparams)
-        frame = Base.invoke_in_typeinf_world(CC.typeinf_frame, CC.NativeInterpreter(world), mi, false)   # the compiler's own world, as `_classify`
+        frame = Base.invoke_in_typeinf_world(CC.typeinf_frame, _runtime_site(CC.NativeInterpreter, world), mi, false)   # the compiler's own world, as `_classify`; its constructor is code outside the class (W-167)
         frame === nothing && return Any
         return CC.widenconst(CC.ignorelimited(frame.result.result))
     catch
@@ -468,7 +492,7 @@ function _image_methods_hook(ms::Vector{Any}, pkg::String)
             _check_membership_calls(m)
         catch e
             e isa ImplementError || rethrow()
-            @warn "$pkg: a method left inactive" method = m exception = e
+            _runtime_site(() -> @warn "$pkg: a method left inactive" method = m exception = e)
             push!(drop, m)
         end
     end
@@ -599,7 +623,11 @@ function _define_block!(mod::Module, traits::Vector{Any}, @nospecialize(member),
             # a family's variables are the method's static parameters: in scope in its body (`T` in
             # `@implement CoreIntegrator{Vector{T}, Float64} Tsit5Integrator{T, M} where {T, M}`)
             if member isa UnionAll && (wh = _where_exprs(member)) !== nothing
-                k = findfirst(a -> Meta.isexpr(a, :(::)) && a.args[2] === member, newargs)
+                k = nothing
+                for i in 1:length(newargs)  # a loop: Base's `findfirst` over `Vector{Any}` is outside the deep class (W-167)
+                    a = newargs[i]
+                    Meta.isexpr(a, :(::)) && a.args[2] === member && (k = i; break)
+                end
                 if k !== nothing
                     newargs[k] = Expr(:(::), newargs[k].args[1], _type_expr(Base.unwrap_unionall(member)))
                     sig = Expr(:where, Expr(:call, fref, newargs...), wh...)
@@ -611,7 +639,9 @@ function _define_block!(mod::Module, traits::Vector{Any}, @nospecialize(member),
             end
         end
     catch
-        ccall(:jl_generating_output, Cint, ()) == 0 && foreach(Base.delete_method, defined)
+        if ccall(:jl_generating_output, Cint, ()) == 0
+            for m in defined; Base.delete_method(m); end
+        end
         rethrow()
     end
     return defined
@@ -653,7 +683,7 @@ function _find_op(traits::Vector{Any}, fname, n::Int)
             op.name === name && length(op.args) == n && return op, c, X
         end
     end
-    error("@implement: $name with $n arguments is not an operation of $(join(traits, ", "))")
+    error("@implement: $name with $n arguments is not an operation of $(_runtime_site(join, traits, ", "))")
 end
 
 function _stated_env(c::Contract, @nospecialize(X))
@@ -789,7 +819,8 @@ function _member_instance_at(@nospecialize(T), @nospecialize(X))
                 p = p.body
             end
             Tinst = inst
-            for (k, tv) in enumerate(tvs)
+            for k in 1:length(tvs)      # by index: Base's `enumerate` over `Vector{Any}` is outside the deep class (W-167)
+                tv = tvs[k]
                 Tinst = _subst_tv(Tinst, tv, vals[k])
             end
         end

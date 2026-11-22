@@ -29,14 +29,25 @@ function _callform(@nospecialize(sig))
     return string(fname, "(", args, ")", isempty(vars) ? "" : " where {" * join(vars, ", ") * "}")
 end
 
+# the arguments as written: `t::ColTable`, `::Int`, `x` for an argument typed `Any`
+function _written_args(ds::Vector{Tuple{String,String}})
+    out = String[]
+    for (n, t) in ds
+        push!(out, isempty(n) || startswith(n, "#") ? "::" * t : (t == "Any" || isempty(t)) ? n : n * "::" * t)
+    end
+    return join(out, ", ")
+end
+
 """
 A method as its signature is written, `colsum(t::ColTable)`, for a message (traits §11.3): a keyword method's body as
 its function with the keywords, `f(t::ColTable; k::Float64)`; a closure as `(t::ColTable) -> …`, with the function it
 is written in. Never a generated name.
 """
 function _written_method(m::Method)
-    tv, decls, _, _ = Base.arg_decl_parts(m)
-    arg((n, t)) = isempty(n) || startswith(n, "#") ? "::" * t : (t == "Any" || isempty(t)) ? n : n * "::" * t
+    # Base prints the method's argument types, the user's types: a run-time site (W-167); the rest is typed
+    parts = _runtime_site(Base.arg_decl_parts, m)
+    tv = parts[1]::Vector{Any}
+    decls = parts[2]::Vector{Tuple{String,String}}
     name = string(m.name)
     args = decls[2:end]
     kws = Tuple{String,String}[]
@@ -49,8 +60,12 @@ function _written_method(m::Method)
             kws, args, name = args[1:j-1], args[j+1:end], f
         end
     end
-    call = string("(", join(map(arg, args), ", "), isempty(kws) ? "" : "; " * join(map(arg, kws), ", "), ")")
-    wh = isempty(tv) ? "" : " where " * (length(tv) == 1 ? string(tv[1]) : "{" * join(string.(tv), ", ") * "}")
+    call = string("(", _written_args(args), isempty(kws) ? "" : "; " * _written_args(kws), ")")
+    tvs = String[]
+    for v in tv
+        push!(tvs, string(v)::String)
+    end
+    wh = isempty(tvs) ? "" : " where " * (length(tvs) == 1 ? tvs[1] : "{" * join(tvs, ", ") * "}")
     if startswith(name, "#")
         # a closure, `#outer##0`, or an anonymous function at top level, `#7`
         cl = match(r"^#([^#]+)##\d+$", name)

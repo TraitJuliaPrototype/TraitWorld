@@ -84,7 +84,7 @@ function _build_base()
             try
                 Base.invokelatest(Base.include, mapexpr, M, file)
             catch err
-                @warn "the build's replacements of Base could not be read; the fully typed check runs without them" file err
+                _runtime_site(() -> @warn "the build's replacements of Base could not be read; the fully typed check runs without them" file err)
             end
         end
     end

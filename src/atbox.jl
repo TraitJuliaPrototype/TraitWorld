@@ -71,7 +71,8 @@ function box_signature(m::Method)
     vals = Any[]
     for v in vars
         ub = v.ub
-        for (w, x) in zip(vars, vals)
+        for k in 1:length(vals)        # by index: Base's `zip` and `enumerate` over a `Vector{Any}` are code outside the deep class (W-167)
+            w, x = vars[k], vals[k]
             ub = ub isa Type || ub isa TypeVar ? _substv(ub, w, x) : ub
         end
         X = _box_trait(ub)
@@ -88,15 +89,18 @@ function box_signature(m::Method)
     end
     out = Any[]
     any_box = false
-    for (i, p) in enumerate(ps)
-        for (w, x) in zip(vars, vals)
+    for i in 1:length(ps)
+        p = ps[i]
+        for k in 1:length(vals)
+            w, x = vars[k], vals[k]
             p = _substv(p, w, x)
         end
         if i > 1 && p isa Core.TypeofVararg
             # a vararg of members (`ts::X...`, traits §6.6): each element in a box, at least one: the instance a call
             # that passes boxes there runs (Julia's compilation signature for several, `Dynamic{X}, Vararg{Dynamic{X}}`)
             E = isdefined(p, :T) ? p.T : Any
-            for (w, x) in zip(vars, vals)
+            for k in 1:length(vals)
+                w, x = vars[k], vals[k]
                 E = _substv(E, w, x)
             end
             N = isdefined(p, :N) && p.N isa Int ? p.N : nothing
@@ -269,6 +273,10 @@ function _reaches_no_method(interp, @nospecialize(tt), seen::Set{Any})
     return nothing
 end
 
+# the compiler's interpreter of the facts mode, made where a run-time site reaches it: its constructor is code
+# outside the deep class (W-167)
+_facts_interp(world::UInt) = CC.NativeInterpreter(world; facts = true)
+
 """
     check_at_box(m::Method; world) -> Vector{BoxFault} or nothing
 
@@ -287,7 +295,7 @@ function check_at_box(m::Method; world::UInt = Base.get_world_counter())
     sig = box_signature(m)
     sig === nothing && return nothing
     # the chain below a call that only throws is read by the facts rule, as each callee is compiled
-    interp = CC.NativeInterpreter(world; facts = true)
+    interp = _runtime_site(_facts_interp, world)
     src = _box_instance(sig, world)
     if src === nothing
         # the native interpreter runs in inference's own world (Base's reflection): no package's method ends the
@@ -406,7 +414,7 @@ function _box_instance(@nospecialize(sig), world::UInt)
     end
     ci isa Core.CodeInstance || return nothing
     inf = ci.inferred
-    src = inf isa Core.CodeInfo ? copy(inf) : inf isa String ? (try Base._uncompressed_ir(ci, inf) catch; nothing end) : nothing
+    src = inf isa Core.CodeInfo ? _runtime_site(copy, inf)::Core.CodeInfo : inf isa String ? (try Base._uncompressed_ir(ci, inf) catch; nothing end) : nothing
     src isa Core.CodeInfo || return nothing
     if src.slottypes === nothing
         # the cache keeps no slot types: the arguments' types are the instance's, a varargs tail as its tuple

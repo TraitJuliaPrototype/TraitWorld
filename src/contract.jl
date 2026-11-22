@@ -60,12 +60,13 @@ bare(@nospecialize(X)) = (Base.unwrap_unionall(X)::DataType).name.wrapper
 function _eval_in(c::Contract, @nospecialize(ex), env::AbstractDict{Symbol}, @nospecialize(self))
     v = _eval_pure(c.mod, ex, env, self)
     v isa _NotPure || return v
-    binds = Any[Expr(:(=), p, QuoteNode(v)) for (p, v) in env]
+    binds = _runtime_site(_env_binds, env)::Vector{Any}    # a walk of the parameters' values: Base's iteration of a `Dict{Symbol,Any}` (W-167)
     self === nothing || push!(binds, Expr(:(=), :Self, QuoteNode(self)))
     return Core.eval(c.mod, Expr(:let, Expr(:block, binds...), ex))
 end
 
 struct _NotPure end
+_env_binds(env) = Any[Expr(:(=), p, QuoteNode(v)) for (p, v) in env]
 
 function _eval_pure(mod::Module, @nospecialize(ex), env::AbstractDict{Symbol}, @nospecialize(self))
     if ex isa Symbol
