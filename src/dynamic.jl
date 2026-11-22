@@ -118,11 +118,44 @@ function _contracts_of!(out, @nospecialize(X))
 end
 
 # The declared fields at the trait instance `X` as a constant of the type, (names, types, @const flags): fixed once
-# `X` is declared, as each field's declared type is (compiler §7.1), so the generator's answer stands. It stands after
-# the functions its generator calls (a generator runs in the world of its definition).
+# `X` is declared, as each field's declared type is (compiler §7.1), so the generator's answer stands. Read as the
+# Compiler reads a declared field (`declared_field_type`: the TypeName's declared fields, its supertraits' instances,
+# its supertypes'), with no evaluation of a contract's expressions, which a generator may not do.
 @generated function _declared_fields(::Type{X}) where {X}
-    names = Tuple(_declared_field_names(X))
-    return QuoteNode((names, map(n -> _dynamic_field_type(X, n), names), map(n -> _field_isconst(X, n), names)))
+    names, types, consts = Symbol[], Any[], Bool[]
+    u = Base.unwrap_unionall(X)
+    comps = u isa DataType && u.name === Base.unwrap_unionall(Core.All).name ? (u.parameters[1]::DataType).parameters : Any[u]
+    for c in comps
+        _fields_in!(names, types, consts, Base.unwrap_unionall(c), 0)
+    end
+    types = Any[Base.has_free_typevars(T) ? Base.rewrap_unionall(T, X) : T for T in types]
+    return QuoteNode((Tuple(names), Tuple(types), Tuple(consts)))
+end
+_instantiate(@nospecialize(T), tn::Core.TypeName, c::DataType) =
+    ccall(:jl_instantiate_type_in_env, Any, (Any, Any, Ptr{Any}), T, tn.wrapper, c.parameters)
+function _fields_in!(names::Vector{Symbol}, types::Vector{Any}, consts::Vector{Bool}, @nospecialize(c), depth::Int)
+    while c isa DataType && c !== Any
+        tn = c.name
+        if isdefined(tn, :declared_fields)
+            df = tn.declared_fields::Core.SimpleVector
+            ks, ts, ct = df[1]::Core.SimpleVector, df[2]::Core.SimpleVector, contract(c)
+            for k in 1:length(ks)
+                key = ks[k]
+                n = key isa TypeVar ? _instantiate(key, tn, c) : key
+                (n isa Symbol && !(n in names)) || continue
+                T = Base.has_free_typevars(ts[k]) ? _instantiate(ts[k], tn, c) : ts[k]
+                f = ct === nothing ? nothing : findfirst(f -> f.name === (key isa TypeVar ? key.name : key), ct.fields)
+                push!(names, n); push!(types, T); push!(consts, f !== nothing && ct.fields[f].isconst)
+            end
+        end
+        if depth < 8 && ccall(:jl_is_open_set, Cint, (Any,), c) != 0
+            for s in ccall(:jl_supertrait_instances, Any, (Any,), c)::Vector{Any}
+                _fields_in!(names, types, consts, Base.unwrap_unionall(s), depth + 1)
+            end
+        end
+        c = c.super
+    end
+    return nothing
 end
 # the declared type of the field `s` at `X`, or `nothing`; whether it is `@const`: a scan of the constant table, one
 # name at a time, so that at a constant name it folds
