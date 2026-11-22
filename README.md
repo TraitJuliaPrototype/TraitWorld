@@ -5,7 +5,7 @@ The library of trait-bound Julia. A trait is an open abstract type with a contra
 ## What it provides
 
 - **Declaring** (`src/trait.jl`, `src/implement.jl`, `src/contract.jl`):
-  - `@trait X{P…} <: (A, …) begin … end`: operations with declared results, defaults, declared fields (`@const` for read-only), parameters by fields, equations of `Self`, `@input`, supertraits; `@default_dynamic` for a trait that erases by default.
+  - `@trait X{P…} <: (A, …) begin … end`: operations with declared results, defaults, declared fields (`@const` for read-only), parameters by fields, equations of `Self`, `@input`, supertraits; `@default_dynamic` for a trait that erases by default; a docstring before an operation documents it.
   - `@implement X S`: a block of methods, `by f`, several traits, stated parameters, families (`S{T} where {T}`), closed abstract types and traits as members, `struct S <: X`.
 - **Checking:** the checks at a declaration (completeness, results, fields, parameters, supertraits), with `ImplementError`; a member of a pattern checked at its first use; bounded methods (`@bounded`, `@unbounded`, `check_definitions`, `classify`, `check_at_box`), with `TraitUseError` (`src/check.jl`, `src/classify.jl`, `src/atbox.jl`).
 - **The kept forms:** the box `Dynamic{X}` and the wrapper `Compiled` (Julia's `Core.Dynamic` and `Core.Compiled`), `compiled_for(x)` that makes the wrapper, `unwrap`, `like`, `withfields`; a trait that erases by default gets its methods at the kept forms and a forwarder that boxes a plain member (`src/dynamic.jl`, `src/compiled.jl`, `src/erasing.jl`).
@@ -15,6 +15,7 @@ The library of trait-bound Julia. A trait is an open abstract type with a contra
 - **Fully typed mode and closed builds:** `@enforce_fully_typed`, `@warn_not_fully_typed`, `fully_typed`, `isfullytyped`, `@enforce_concrete_only`, `@warn_on_abstract`; `verify_main`, `add_entrypoints`, `make_executable`, `make_library` (`src/fullytyped.jl`, `src/build.jl`, `src/buildbase.jl`).
 - **Compiling ahead** while a package is precompiled (`src/ahead.jl`; `JULIA_TW_AHEAD=0` turns it off).
 - **Hints** on `MethodError` where a trait is involved (`src/hints.jl`).
+- **At the prompt:** `operations(x)`, `operations(T)`: what a value offers, grouped by trait, read from the contracts (the operations as written, defaults, fields, docstrings, the methods at each trait, then the methods at the type itself); `TraitWorld.install_operations_key!()` binds Alt-o to it on the name under the cursor (`src/operations.jl`).
 - **BaseTraits** (`src/BaseTraits.jl`): `HasLength`, `Iterable`, `Indexable`, `MutableIndexable`, `Resizable`, `Keyed`, `Solvable`, `LinearOp`, `BoundedText`, `HasProperty`, with `asvector`, `IndexableVector`, `retain!`, `apply!`, `textbound`.
 
 The library's own code is compiled by facts, as a trait module's is.
