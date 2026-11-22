@@ -8,8 +8,12 @@ reaches, and that code is compiled where it first runs. The library's code is co
 in the deep class (compiler §3.2), so that no unrelated load ends it (G2). Its calls into code outside the class go
 through here: the code that handles values of any type by its purpose (a message that prints a user's type or method,
 the logger the user installed) and Base's code over values its types do not settle. The result is typed `Any`.
+
+Written as a call in the latest world: in a session inference follows no such call, and the hooks run in the latest
+world as it is (compiler §10.1); in a closed build a call in the latest world is the call (compiler §7.6), so the
+build resolves it. A call at a function typed `Any` would be a call no closed build can resolve.
 """
-_runtime_site(f, args...) = Base.inferencebarrier(f)(args...)
+_runtime_site(f, args...) = Base.invokelatest(f, args...)
 
 # Helpers over containers of `Any` that stay in the deep class: a loop in the library's own code, where a call at a
 # value typed `Any` is a run-time site; Base's `any`, `findfirst`, `enumerate` and the like over such a container
