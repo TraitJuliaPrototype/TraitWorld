@@ -303,7 +303,8 @@ function _argument_traits(m::Method)
     out = Any[]
     sig = Base.unwrap_unionall(m.sig)
     sig isa DataType || return out
-    for p in sig.parameters[2:end]
+    for k in 2:length(sig.parameters)                       # by index: `svec[2:end]` (W-170)
+        p = sig.parameters[k]
         Base.isvarargtype(p) && (p = Base.unwrapva(p))
         X = _trait_of(p isa TypeVar ? p.ub : p)
         X === nothing && continue
@@ -331,7 +332,8 @@ function _trait_arguments(m::Method)
     _is_trait_method(m) && return false
     sig = Base.unwrap_unionall(m.sig)
     sig isa DataType || return false
-    for p in sig.parameters[2:end]
+    for k in 2:length(sig.parameters)                       # by index: `svec[2:end]` (W-170)
+        p = sig.parameters[k]
         Base.isvarargtype(p) && (p = Base.unwrapva(p))      # a varargs tail: its element type
         _trait_of(p isa TypeVar ? p.ub : p) === nothing || return true
     end

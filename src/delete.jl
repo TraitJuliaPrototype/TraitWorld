@@ -99,7 +99,7 @@ function _forget_membership!(@nospecialize(X), @nospecialize(member), @nospecial
     j = 0
     for i in eachindex(_PATTERNS)
         p = _PATTERNS[i]
-        (p[1] == member && bare(p[2]) === Xb) && continue
+        (p.member == member && bare(p.inst) === Xb) && continue
         j += 1
         _PATTERNS[j] = p
     end

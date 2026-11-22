@@ -78,7 +78,8 @@ function _params_at(c::Contract, @nospecialize(S), @nospecialize(stated), how::H
     # the declared supertype (`struct S <: X{Int}`): the parameters come from the definition (traits §5.2)
     decl = S isa DataType ? _declared_instance(S, Base.unwrap_unionall(c.trait).name) : nothing
     if decl !== nothing
-        for (i, p) in enumerate(c.params)
+        for i in 1:length(c.params)              # by index (W-170)
+            p = c.params[i]
             v = decl.parameters[i]
             v isa TypeVar && continue
             env[p] = v
@@ -87,7 +88,8 @@ function _params_at(c::Contract, @nospecialize(S), @nospecialize(stated), how::H
     end
     sdt = Base.unwrap_unionall(stated)
     if stated isa DataType && sdt.name === Base.unwrap_unionall(c.trait).name
-        for (i, p) in enumerate(c.params)
+        for i in 1:length(c.params)              # by index (W-170)
+            p = c.params[i]
             v = sdt.parameters[i]
             v isa TypeVar && continue
             if haskey(env, p) && !(env[p] == v)
@@ -154,7 +156,8 @@ function _params_at(c::Contract, @nospecialize(S), @nospecialize(stated), how::H
             source[p] = "the equation"
         end
     end
-    for (i, p) in enumerate(c.params)
+    for i in 1:length(c.params)              # by index (W-170)
+        p = c.params[i]
         if !haskey(env, p)
             push!(problems, "the parameter $p is not determined: no field or equation defines it; state it, @implement $(bare(c.trait)){…} $S")
             continue

@@ -439,7 +439,8 @@ function _at_box_checked(m::Method)
     sig isa DataType || return false
     # a keyword method's sorter: its body's method is read instead, with the keywords as declared
     sig.parameters[1] === typeof(Core.kwcall) && return false
-    for p in sig.parameters[2:end]
+    for k in 2:length(sig.parameters)                       # by index: `svec[2:end]` (W-170)
+        p = sig.parameters[k]
         Base.isvarargtype(p) && (p = Base.unwrapva(p))      # a vararg of members: its element (traits §7.3)
         _box_trait(p) === nothing || return !_is_forwarder(m)
     end

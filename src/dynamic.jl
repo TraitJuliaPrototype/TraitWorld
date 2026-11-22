@@ -95,8 +95,8 @@ function _contracts_of!(out, @nospecialize(X))
     env = Dict{Symbol,Any}()
     dt = Base.unwrap_unionall(X)::DataType
     if X isa DataType
-        for (i, p) in enumerate(c.params)
-            env[p] = dt.parameters[i]
+        for i in 1:length(c.params)     # by index (W-170)
+            env[c.params[i]] = dt.parameters[i]
         end
     end
     # a trait at other values of its inputs is a trait of its own (traits §3.2)

@@ -691,7 +691,8 @@ function _stated_env(c::Contract, @nospecialize(X))
     X isa DataType || return env
     dt = Base.unwrap_unionall(X)::DataType
     dt.name === (Base.unwrap_unionall(c.trait)::DataType).name || return env
-    for (i, p) in enumerate(c.params)
+    for i in 1:length(c.params)                             # by index (W-170)
+        p = c.params[i]
         v = dt.parameters[i]
         v isa TypeVar || (env[p] = v)
     end
@@ -700,14 +701,21 @@ end
 
 ## Members of a pattern, checked at their first use (lowering §4)
 
-"the patterns declared in this session whose members are checked at their first use: (pattern, trait instance, how)"
-const _PATTERNS = Any[]
-_pending!(@nospecialize(member), @nospecialize(inst), how::How) = push!(_PATTERNS, (member, inst, how))
+"A pattern's membership: the pattern, the trait's instance, how its members serve the trait. A record of one type, so
+that code over it is compiled once, not per the types of a tuple of the three (W-170)."
+struct _Pattern
+    member::Any
+    inst::Any
+    how::How
+end
+"the patterns declared in this session whose members are checked at their first use"
+const _PATTERNS = _Pattern[]
+_pending!(@nospecialize(member), @nospecialize(inst), how::How) = push!(_PATTERNS, _Pattern(member, inst, how))
 
 # a loop: a closure over the pattern would be compiled per pattern type (E-322)
-function _has_pattern(out::Vector{Any}, @nospecialize(pat), @nospecialize(inst))
+function _has_pattern(out::Vector{_Pattern}, @nospecialize(pat), @nospecialize(inst))
     for p in out
-        p[1] == pat && p[2] == inst && return true
+        p.member == pat && p.inst == inst && return true
     end
     return false
 end
@@ -716,9 +724,9 @@ end
 # entries of `T`'s TypeName and its supertypes', which a package image keeps (the library's table is
 # this session's only: another package's additions to it are not in that package's image).
 function _patterns_for(@nospecialize(T), @nospecialize(X))
-    out = Any[]
+    out = _Pattern[]
     for p in _PATTERNS
-        bare(p[2]) === bare(X) && push!(out, p)
+        bare(p.inst) === bare(X) && push!(out, p)
     end
     Xname = (Base.unwrap_unionall(bare(X))::DataType).name
     d = Base.unwrap_unionall(T)
@@ -734,7 +742,7 @@ function _patterns_for(@nospecialize(T), @nospecialize(X))
                                    core.name === Base.unwrap_unionall(Compiled).name || istrait(core))) && continue
             _has_pattern(out, pat, inst) && continue
             by = getfield(en, :by)
-            push!(out, (pat, inst, How(by isa Symbol ? by : nothing)))
+            push!(out, _Pattern(pat, inst, How(by isa Symbol ? by : nothing)))
         end
         d = d.super
     end
@@ -807,7 +815,8 @@ _member_hook(@nospecialize(T), @nospecialize(X)) = (check_first_use(T, X); nothi
 # The pattern's membership that makes `T` a member of `X`: the trait's instance at `T` (the pattern's
 # variables matched against `T`) and how the member serves the trait; `nothing` where there is none.
 function _member_instance_at(@nospecialize(T), @nospecialize(X))
-    for (pat, inst, how) in _patterns_for(T, X)
+    for p in _patterns_for(T, X)::Vector{_Pattern}
+        pat, inst, how = p.member, p.inst, p.how
         T <: pat || continue
         Tinst = inst
         if Base.has_free_typevars(inst)
@@ -824,15 +833,20 @@ function _member_instance_at(@nospecialize(T), @nospecialize(X))
                 Tinst = _subst_tv(Tinst, tv, vals[k])
             end
         end
-        return (Tinst, how)
+        return _MemberAt(Tinst, how)
     end
     return nothing
 end
+"A member's trait instance and how it serves the trait (`_member_instance_at`): a record, as `_Pattern`."
+struct _MemberAt
+    inst::Any
+    how::How
+end
 
 function _check_pattern_member(@nospecialize(T), @nospecialize(X))
-    r = _member_instance_at(T, X)
+    r = _member_instance_at(T, X)::Union{Nothing,_MemberAt}
     r === nothing && return nothing
-    Tinst, how = r
+    Tinst, how = r.inst, r.how
     _, _, problems = check_member(bare(X), T; stated = Tinst, how)
     isempty(problems) || return ImplementError(Tinst, T, problems)
     # a member checked at its first use keeps its check while it is a member (traits §5.10, §5.11)
@@ -846,9 +860,9 @@ end
 function _restore_checked!(@nospecialize(T), @nospecialize(X))
     key = (T, bare(X))
     get(_CHECKED, key, missing) === missing || return nothing
-    r = _member_instance_at(T, X)
+    r = _member_instance_at(T, X)::Union{Nothing,_MemberAt}
     r === nothing && return nothing
-    Tinst, how = r
+    Tinst, how = r.inst, r.how
     _forget_records!(X, T)
     _record_checks!(X, T, _records_at(X, T, Tinst, how)...)
     _CHECKED[key] = nothing
