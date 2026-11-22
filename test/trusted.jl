@@ -71,3 +71,68 @@ end
     @test e isa TypeError && e.got === 1
     @test gstate(TMA(), nothing) === 1                           # at the member's own type: its own result
 end
+
+# every declared result read at a set is checked where a call passes the value on (compiler §7.1, §7.4): the
+# members' check does not reach a member's own instance in every world it runs in
+apply2(f, x, y) = f(x, y)
+isfloat(r) = r isa Float64 ? "yes" : "no"
+@trait TWhere begin
+    twop(x::TWhere, d::D)::Union{Float64, D} where {D}     # an operation's own `where` variable: checked at its bound
+end
+struct TWA end
+twop(::TWA, d) = "s"
+@implement TWhere TWA
+@trait TFam begin
+    tfop(x::TFam)::Float64
+end
+struct TFF{T} end
+tfop(::TFF{T}) where {T} = 1                                # a family's member: checked at its first use
+@implement TFam TFF{T} where {T}
+abstract type TAbs end
+struct TAR <: TAbs end
+@trait TAbsT begin
+    taop(x::TAbsT)::Float64
+end
+taop(::TAR) = 1                                             # an abstract type's member: checked at its first use
+@implement TAbsT TAbs
+struct TFw; inner::TAbs; end
+@implement TAbsT TFw by inner                               # forwarding to a field typed by such a member
+@trait TFld begin
+    @const tfld::Float64
+end
+struct TFldF{T}; tfld::T; end
+@implement TFld TFldF{T} where {T}                          # a declared field of a family's member
+gettfld(x) = x.tfld
+@trait TBelow begin
+    tbop(x::TBelow)::Float64
+end
+struct TBA end
+tbhelp(x) = 2.0
+tbop(a::TBA) = tbhelp(a)
+@implement TBelow TBA
+tbhelp(::TBA) = 1                                           # a method below the serving method's body, defined later
+@trait TKept begin
+    tkop(x::TKept)::Float64
+end
+struct TKA end
+tkop(::TKA) = 2.0
+@implement TKept TKA
+tkop(::Compiled{TKA}) = 1                                   # a method at the member's wrapper
+isbc(t, x) = t(x) isa Bool
+invoke_const() = invoke(isbc, Tuple{CB, Float64}, CB[x -> 1][1], 2.0) ? "yes" : "no"
+
+@testset "every declared result read at a set, passed on; Core.invoke's constant" begin
+    checked(f) = try f(); false catch e; e isa TypeError && e.func === :typeassert ? true : rethrow() end
+    # (each in compiled code: a closure over a vector typed by the trait, called once)
+    @test checked(() -> (r = apply2(twop, TWhere[TWA()][1], 1); r isa Union{Float64, Int} ? "yes" : "no"))
+    @test checked(() -> isfloat(apply1(tfop, TFam[TFF{Int}()][1])))
+    @test checked(() -> isfloat(apply1(taop, TAbsT[TAR()][1])))
+    @test checked(() -> isfloat(apply1(taop, TAbsT[TFw(TAR())][1])))
+    @test checked(() -> isfloat(apply1(gettfld, TFld[TFldF{Int}(1)][1])))
+    @test checked(() -> isfloat(apply1(tbop, TBelow[TBA()][1])))
+    @test checked(() -> isfloat(apply1(tkop, TKept[compiled_for(TKA())][1])))
+    # the member's own result where its own code is called at its type
+    @test apply1(tfop, TFF{Int}()) === 1 && apply1(tbop, TBA()) === 1
+    # a constant read at the signature is not taken through `Core.invoke`: the function's own answer
+    @test invoke_const() == "no"
+end
