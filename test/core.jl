@@ -549,3 +549,33 @@ end
     @test d(3) === 6 && d(1.5) === 3.0
     @test_throws MethodError d("a")
 end
+
+## a docstring before an operation in a trait's body documents its function at the declared signature (traits §4.1)
+module DocOps
+using TraitWorld
+@trait Sized{T} begin
+    T = eltype(Self)
+    "The number of items."
+    count_items(c::Sized)::Int
+    "A copy of `c` with `x` added."
+    with_item(c::Sized, x::T)::Self
+    "The items' sum, by default by iteration."
+    total(c::Sized)::T = sum(c)
+end
+end
+@testset "a docstring in a trait's body" begin
+    docs(f) = Base.Docs.meta(DocOps)[Base.Docs.Binding(DocOps, f)].docs
+    text(d) = only(d.text)
+    @test text(only(values(docs(:count_items)))) == "The number of items."
+    # the declared signature, in `@doc`'s form for a signature with `where` variables
+    @test Tuple{DocOps.Sized{Int}} <: only(keys(docs(:count_items)))
+    @test Tuple{DocOps.Sized{Int}, Int} <: only(keys(docs(:with_item)))          # `Self` written as the trait
+    @test text(only(values(docs(:total)))) == "The items' sum, by default by iteration."
+    # a docstring defines no method: the operation stays an entry, with the kept forms' methods only
+    kept(m) = occursin("Dynamic", string(m.sig)) || occursin("Compiled", string(m.sig))
+    @test all(kept, methods(DocOps.count_items))
+    @test_throws Exception Core.eval(@__MODULE__, :(@trait DocField begin
+        "a field has no docstring"
+        x::Int
+    end))
+end

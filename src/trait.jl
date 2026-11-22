@@ -151,6 +151,10 @@ function _trait(mod::Module, head, body)
                  init = :(Core.UnionAll($Z, $(lib(:Compiled)){$Z})))
     push!(out.args, Expr(:let, Expr(:block, tvdefs..., :($Z = Core.TypeVar($(QuoteNode(:Z)), $T))),
         :($(lib(:_declare_checked!))($wpat, $T, $mod, :object, :field))), Expr(:latestworld))
+    # a docstring written before an operation in the body documents its function at the declared signature
+    for op in items.ops
+        haskey(op, :doc) && push!(out.args, _operation_doc(name, params, bounds, op))
+    end
     # a docstring written before `@trait` documents the trait's binding
     push!(out.args, :(Core.@__doc__ $name))
     push!(out.args, nothing)
@@ -207,6 +211,14 @@ function _parse_body(name::Symbol, params::Vector{Symbol}, body)
         Meta.isexpr(body, :block) || error("@trait $name: the body is a begin … end block")
         for item in body.args
             item isa LineNumberNode && continue
+            # a docstring before an operation documents its function at the declared signature
+            doc = nothing
+            if Meta.isexpr(item, :macrocall) && (item.args[1] == GlobalRef(Core, Symbol("@doc")) || item.args[1] === Symbol("@doc"))
+                dargs = Any[a for a in item.args[2:end] if !(a isa LineNumberNode)]
+                length(dargs) == 2 || error("@trait $name: a docstring is followed by the operation it documents")
+                doc, item = dargs[1], dargs[2]
+            end
+            nops = length(ops)
             if Meta.isexpr(item, :macrocall)
                 m = item.args[1]
                 margs = Any[a for a in item.args[2:end] if !(a isa LineNumberNode)]
@@ -251,6 +263,10 @@ function _parse_body(name::Symbol, params::Vector{Symbol}, body)
                 end
             else
                 error("@trait $name: cannot read $item")
+            end
+            if doc !== nothing
+                length(ops) == nops + 1 || error("@trait $name: a docstring documents an operation, not $item")
+                ops[end] = merge(ops[end], (doc = doc,))
             end
         end
     end
@@ -312,6 +328,22 @@ function _parse_op(trait::Symbol, sig, body)
     receiver == 0 && error("@trait $trait: $call has no argument typed by $trait or Self, the receiver")
     return (fname = fname, args = args, vararg = vararg, receiver = receiver, result = result,
             wherevars = wherevars, body = body)
+end
+
+# `@doc "…" f(x::X{P…}, i::Int) where {P…}`: the operation's docstring at its declared signature, `Self` written as
+# the trait, an argument without a type at `Any`
+function _operation_doc(name::Symbol, params::Vector{Symbol}, bounds::Vector{Any}, op)
+    T = isempty(params) ? name : Expr(:curly, name, params...)
+    args = Any[]
+    for (i, (n, ty)) in enumerate(op.args)
+        t = ty === nothing ? :Any : _subst(ty, :Self, T)
+        push!(args, op.vararg && i == length(op.args) ? Expr(:(::), n, Expr(:curly, :Vararg, t)) : Expr(:(::), n, t))
+    end
+    sig = Expr(:call, op.fname, args...)
+    vars = Any[bounds[i] === nothing ? params[i] : Expr(:<:, params[i], bounds[i]) for i in eachindex(params)]
+    append!(vars, op.wherevars)
+    isempty(vars) || (sig = Expr(:where, sig, vars...))
+    return Expr(:macrocall, GlobalRef(Core, Symbol("@doc")), LineNumberNode(@__LINE__, Symbol(@__FILE__)), op.doc, sig)
 end
 
 _is_self(ty, trait::Symbol) = ty === trait || ty === :Self || (Meta.isexpr(ty, :curly) && ty.args[1] === trait)
