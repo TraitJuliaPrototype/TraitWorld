@@ -36,18 +36,25 @@ _fwd(d::Dynamic, @nospecialize(X::Type)) = getfield(d, :object)
 
 # The declared fields are read and written on the held object, asserted to the declared type
 # (lowering §7). Other names are not the trait's: `unwrap` reaches the object itself. The declared
-# type folds where the name is a constant (`d.u`), so a read costs the held object's own read.
-Base.@constprop :aggressive function Base.getproperty(d::Dynamic{X}, s::Symbol) where {X}
-    T = _dynamic_field_type(X, s)
-    T === nothing && throw(ArgumentError(_runtime_site(string, s, " is not a declared field of ", X, "; unwrap(d) is the object")::String))
+# type is a constant of `X` (`_field_type_at`): inlined at a constant name (`d.u`) the test folds, so a
+# read costs the held object's own read and its assertion; at a name not constant it is a scan of `X`'s
+# constant table of declared fields.
+@inline function Base.getproperty(d::Dynamic{X}, s::Symbol) where {X}
+    T = _field_type_at(X, s)
+    T === nothing && _not_declared(d, s)
     return getproperty(getfield(d, :object), s)::T
 end
-Base.@constprop :aggressive function Base.setproperty!(d::Dynamic{X}, s::Symbol, v) where {X}
-    T = _dynamic_field_type(X, s)
-    T === nothing && throw(ArgumentError(_runtime_site(string, s, " is not a declared field of ", X, "; unwrap(d) is the object")::String))
-    _field_isconst(X, Val(s)) && throw(ArgumentError(_runtime_site(string, s, " is declared @const by ", X)::String))
+@inline function Base.setproperty!(d::Dynamic{X}, s::Symbol, v) where {X}
+    T = _field_type_at(X, s)
+    T === nothing && _not_declared(d, s)
+    _const_at(X, s) && _declared_const(d, s)
     return setproperty!(getfield(d, :object), s, convert(T, v))
 end
+# the refusals, at the box (the definition-time check reads a call at a box that only throws, traits §7.3)
+@noinline _not_declared(d::Dynamic{X}, s::Symbol) where {X} =
+    throw(ArgumentError(_runtime_site(string, s, " is not a declared field of ", X, "; unwrap(d) is the object")::String))
+@noinline _declared_const(d::Dynamic{X}, s::Symbol) where {X} =
+    throw(ArgumentError(_runtime_site(string, s, " is declared @const by ", X)::String))
 Base.propertynames(d::Dynamic{X}) where {X} = Tuple(_declared_field_names(X))
 
 # The declared type of the field `s` at the trait instance `X`, or `nothing`: what inference reads
@@ -65,11 +72,6 @@ function _field_isconst(@nospecialize(X), s::Symbol)
     end
     return false
 end
-
-# The same as a constant where the name is one (`d.u = v`): the contract is fixed once `X` is declared, as the field's
-# declared type is, so the generator's answer stands; a build then folds the test as it folds the type (the contract's
-# lookup, run when the program runs, is a call a closed build cannot resolve)
-@generated _field_isconst(::Type{X}, ::Val{s}) where {X, s} = _field_isconst(X, s)
 
 function _declared_field_names(@nospecialize(X))
     names = Symbol[]
@@ -114,3 +116,18 @@ function _contracts_of!(out, @nospecialize(X))
     end
     return out
 end
+
+# The declared fields at the trait instance `X` as a constant of the type, (names, types, @const flags): fixed once
+# `X` is declared, as each field's declared type is (compiler §7.1), so the generator's answer stands. It stands after
+# the functions its generator calls (a generator runs in the world of its definition).
+@generated function _declared_fields(::Type{X}) where {X}
+    names = Tuple(_declared_field_names(X))
+    return QuoteNode((names, map(n -> _dynamic_field_type(X, n), names), map(n -> _field_isconst(X, n), names)))
+end
+# the declared type of the field `s` at `X`, or `nothing`; whether it is `@const`: a scan of the constant table, one
+# name at a time, so that at a constant name it folds
+@inline _field_type_at(::Type{X}, s::Symbol) where {X} = _scan_fields(s, _declared_fields(X)[1], _declared_fields(X)[2])
+@inline _const_at(::Type{X}, s::Symbol) where {X} = _scan_fields(s, _declared_fields(X)[1], _declared_fields(X)[3]) === true
+@inline _scan_fields(s::Symbol, ::Tuple{}, ::Tuple{}) = nothing
+@inline _scan_fields(s::Symbol, names::Tuple, vals::Tuple) =
+    s === names[1] ? vals[1] : _scan_fields(s, Base.tail(names), Base.tail(vals))

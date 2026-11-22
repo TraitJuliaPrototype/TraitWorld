@@ -453,6 +453,15 @@ gt(x::Integrator) = x.t
     @test Base.infer_return_type(gt, (Integrator,)) === Float64
     @test Base.infer_return_type(gu, (Integrator{Vector{Float64}, Tuple{Int,Int}},)) === Vector{Float64}
     @test gt(Integ([1.0], (1, 2), 2.5)) == 2.5
+    # through a box: the declared type a constant of the trait instance, the read inlined at a constant name; at a name
+    # not constant the same checks (lowering §7)
+    d = Dynamic{Integrator{Vector{Float64}, Tuple{Int,Int}}}(Integ([1.0], (1, 2), 2.5))
+    @test !occursin("invoke Base.getproperty", sprint(show, first(Base.code_typed(gt, (typeof(d),)))[1]))
+    names = Symbol[:t, :p, :name]
+    @test getproperty(d, names[1]) === 2.5 && getproperty(d, names[2]) === (1, 2)
+    @test_throws ArgumentError getproperty(d, names[3])
+    @test_throws ArgumentError setproperty!(d, names[2], (3, 4))          # @const
+    setproperty!(d, names[1], 3); @test unwrap(d).t === 3.0               # converted to the declared type
 end
 
 ## the classification (traits §7.3): fully bounded methods, unbounded ones, @bounded and @unbounded

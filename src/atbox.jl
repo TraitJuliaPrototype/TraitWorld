@@ -353,8 +353,10 @@ function _box_faults(m::Method, src::Core.CodeInfo, interp, world::UInt)
             chain = _reaches_no_method(interp, Tuple{_argtype(src, f), ats...}, Set{Any}())
             call = _callstr(src, fv, args)
             if chain === nothing
-                what = (fv === getproperty || fv === setproperty!) && length(args) >= 3 && args[3] isa QuoteNode ?
+                what = (fv === getproperty || fv === setproperty! || fv === _not_declared) && length(args) >= 3 && args[3] isa QuoteNode ?
                     string("the field `", args[3].value, "` is no declared field of ", _box_trait_of(ats[1])) :
+                    fv === _declared_const && length(args) >= 3 && args[3] isa QuoteNode ?
+                    string("the field `", args[3].value, "` is declared @const by ", _box_trait_of(ats[1])) :
                     string(call, " only throws")
                 push!(faults, BoxFault(:throws, string(what, via), m, line, fv))
             else
