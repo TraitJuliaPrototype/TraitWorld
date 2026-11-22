@@ -84,11 +84,11 @@ end
     bmsg(code) = (e = thrown(Meta.parse("module MB$(rand(UInt32))\nusing TraitWorld\nusing ..MsgLib: MShape, marea\n@trait_module\n$code\nend")); e isa TraitWorld.TraitUseError ? msg(e) : string(e))
     Q = raw"(\w+\.)*"                        # a type's module, where the test's module does not see it
     m = bmsg("msum(t::MShape) = sum(t)")
-    @test occursin(Regex("^TraitUseError: `msum\\(t::$(Q)MShape\\)` is declared bounded, and is not bounded: read with `t` in a box, `Dynamic\\{$(Q)MShape\\}`:"), m)
-    @test occursin(Regex("sum\\(t\\) reaches iterate\\(::Dynamic\\{$(Q)MShape\\}\\), which has no method"), m)
+    @test occursin(Regex("^TraitUseError: `msum\\(t::$(Q)MShape\\)` is declared bounded, and is not bounded: read with `t` in a box, `$(Q)Dynamic\\{$(Q)MShape\\}`:"), m)
+    @test occursin(Regex("sum\\(t\\) reaches iterate\\(::$(Q)Dynamic\\{$(Q)MShape\\}\\), which has no method"), m)
     m = bmsg("mboth(a::MShape, b::MShape, k::Int) = length(a) + length(b) + k")
     @test occursin(Regex("`mboth\\(a::$(Q)MShape, b::$(Q)MShape, k::$Int\\)` is declared bounded"), m)
-    @test occursin(Regex("read with `a` in a box, `Dynamic\\{$(Q)MShape\\}`, and `b` in a box, `Dynamic\\{$(Q)MShape\\}`:"), m)
+    @test occursin(Regex("read with `a` in a box, `$(Q)Dynamic\\{$(Q)MShape\\}`, and `b` in a box, `$(Q)Dynamic\\{$(Q)MShape\\}`:"), m)
     @test occursin("length(a) has no method", m)
     m = bmsg("mkw(t::MShape; k::Float64 = 1.0) = k * length(t)")
     @test occursin(Regex("`mkw\\(t::$(Q)MShape; k::Float64\\)` is declared bounded"), m)
@@ -98,21 +98,21 @@ end
     @test occursin(Regex("`mwhere\\(t::C\\) where C<:$(Q)MShape` is declared bounded"), m)
     # a vararg of members is read with each of its elements in a box (traits §7.3, §6.6; T-158)
     m = bmsg("mva(ts::MShape...) = sum(t -> length(t), ts)")
-    @test occursin(Regex("^TraitUseError: `mva\\(ts::$(Q)MShape...\\)` is declared bounded, and is not bounded: read with each of `ts` in a box, `Dynamic\\{$(Q)MShape\\}`:"), m)
+    @test occursin(Regex("^TraitUseError: `mva\\(ts::$(Q)MShape...\\)` is declared bounded, and is not bounded: read with each of `ts` in a box, `$(Q)Dynamic\\{$(Q)MShape\\}`:"), m)
     @test occursin("sum((t) -> …, ts)", m)
     @test bmsg("mvaok(ts::MShape...) = sum(marea, ts)") == "nothing"
     m = bmsg("mfv(a::MShape, ts::MShape...) = marea(a) + sum(t -> length(t), ts)")
-    @test occursin(Regex("`mfv\\(a::$(Q)MShape, ts::$(Q)MShape...\\)` is declared bounded, and is not bounded: read with `a` in a box, `Dynamic\\{$(Q)MShape\\}`, and each of `ts` in a box, `Dynamic\\{$(Q)MShape\\}`:"), m)
+    @test occursin(Regex("`mfv\\(a::$(Q)MShape, ts::$(Q)MShape...\\)` is declared bounded, and is not bounded: read with `a` in a box, `$(Q)Dynamic\\{$(Q)MShape\\}`, and each of `ts` in a box, `$(Q)Dynamic\\{$(Q)MShape\\}`:"), m)
     @test bmsg("mfvok(a::MShape, ts::MShape...) = marea(a) + sum(marea, ts)") == "nothing"
     m = bmsg("mvw(ts::T...) where {T <: MShape} = first(ts[1])")
-    @test occursin("read with each of `ts` in a box", m) && occursin(Regex("first\\(::Dynamic\\{$(Q)MShape\\}\\) reaches iterate"), m)
+    @test occursin("read with each of `ts` in a box", m) && occursin(Regex("first\\(::$(Q)Dynamic\\{$(Q)MShape\\}\\) reaches iterate"), m)
     # what a closure over a vararg of boxes reaches, at a tuple of no fixed length and at a fixed count (the chain
     # below Base's `sum` deeper than 20 calls): the operation that has no method, named (traits §7.3; T-159)
     m = bmsg("mva5(ts::MShape...) = sum(t -> length(t), ts)")
-    @test occursin(Regex("sum\\(\\(t\\) -> …, ts\\) reaches length\\(::Dynamic\\{$(Q)MShape\\}\\), which has no method"), m)
+    @test occursin(Regex("sum\\(\\(t\\) -> …, ts\\) reaches length\\(::$(Q)Dynamic\\{$(Q)MShape\\}\\), which has no method"), m)
     for code in ("mva3(ts::MShape...) = sum(t -> sum(t), ts)", "mva4(ts::Vararg{MShape, 2}) = sum(t -> sum(t), ts)")
         m = bmsg(code)
-        @test occursin(Regex("sum\\(\\(t\\) -> …, ts\\) reaches iterate\\(::Dynamic\\{$(Q)MShape\\}\\), which has no method \\(through [^)]*\\(t\\) -> … → sum\\)"), m)
+        @test occursin(Regex("sum\\(\\(t\\) -> …, ts\\) reaches iterate\\(::$(Q)Dynamic\\{$(Q)MShape\\}\\), which has no method \\(through [^)]*\\(t\\) -> … → sum\\)"), m)
         @test !occursin("Pairs", m) && !occursin("kw::", m)       # the chain by the functions' names: no keyword body
     end
     mv(ts::MShape...) = 0

@@ -27,6 +27,7 @@ const W150_SETUP = quote
     @implement Shape W150Circle
     w150radius(c::W150Circle) = c.r
 end
+Core.eval(Main, :(using TraitWorld))        # the case is declared in Main: the suite must not rest on what Main has loaded
 Core.eval(Main, Expr(:toplevel, W150_SETUP.args...))
 const Shape = Main.W150Shapes.Shape
 const Placed = Main.W150Shapes.Placed
