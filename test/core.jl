@@ -557,6 +557,13 @@ end
     d = Dynamic{All{Callable{Tuple{Int}, Int}, Callable{Tuple{Float64}, Float64}}}(x -> 2x)
     @test d(3) === 6 && d(1.5) === 3.0
     @test_throws MethodError d("a")
+    # the result checked against the matched signature's `S` in the call's body: compiled by facts, no helper is left
+    # to dispatch at the result, whose type is not known (open issue 261)
+    facts = Core.Compiler.NativeInterpreter(; facts = true)
+    @test only(Base.return_types(d, (Int,); interp = facts)) === Int
+    @test only(Base.return_types(d, (Float64,); interp = facts)) === Float64
+    e = try Dynamic{All{Callable{Tuple{Int}, Int}, Callable{Tuple{Float64}, Float64}}}(x -> x isa Int ? "a" : x)(1); nothing catch err; err end
+    @test e isa TypeError && e.expected === Int
 end
 
 ## a docstring before an operation in a trait's body documents its function at the declared signature (traits §4.1)

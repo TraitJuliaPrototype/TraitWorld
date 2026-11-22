@@ -37,22 +37,25 @@ function (d::Dynamic{Core.Callable{A, S}})(args...) where {A, S}
     return r::S
 end
 # Boxed at several signatures (`Dynamic{All{Callable{A, S}, Callable{B, S}}}`, traits §7.7), the call takes the one
-# its arguments match.
+# its arguments match. The result is checked in the body, as at one signature: a helper called with the result, whose
+# type is not known, is a run-time site in code compiled by facts.
 function (d::Dynamic{Z})(args...) where {A, S, Z <: Core.Callable{A, S}}
-    args isa A && return _checked_result(getfield(d, :object)(args...), S)
-    return _call_at_signatures(d, args, _signatures(Z))
+    sigs = _signatures(Z)
+    sigs === () || return _call_at_signatures(d, args, sigs)
+    args isa A || throw(MethodError(getfield(d, :object), args))     # a trait below `Callable{A, S}`: its bound's
+    r = getfield(d, :object)(args...)
+    r isa S || throw(TypeError(:Callable, S === Nothing ? "end the function with `nothing`" : "", S, r))
+    return r::S
 end
 # the signatures taken one by one, each `A2` and `S2` a constant where the call is compiled: a loop over the tuple
 # would give them as a union, and a closed build could resolve neither the test nor the result (compiler §7.6)
 @inline _call_at_signatures(d::Dynamic, args::Tuple, ::Tuple{}) = throw(MethodError(getfield(d, :object), args))
 @inline function _call_at_signatures(d::Dynamic, args::Tuple, sigs::Tuple)
     A2, S2 = sigs[1]
-    args isa A2 && return _checked_result(getfield(d, :object)(args...), S2)
-    return _call_at_signatures(d, args, Base.tail(sigs))
-end
-@inline function _checked_result(r, ::Type{S}) where {S}
-    r isa S || throw(TypeError(:Callable, S === Nothing ? "end the function with `nothing`" : "", S, r))
-    return r::S
+    args isa A2 || return _call_at_signatures(d, args, Base.tail(sigs))
+    r = getfield(d, :object)(args...)
+    r isa S2 || throw(TypeError(:Callable, S2 === Nothing ? "end the function with `nothing`" : "", S2, r))
+    return r::S2
 end
 # the signatures of an intersection of `Callable`s, as (A, S) pairs: a constant of the type, so a call of a
 # `Dynamic{All{Callable…}}` at its second signature builds nothing (E-307)
